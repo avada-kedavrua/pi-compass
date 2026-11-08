@@ -1,0 +1,9 @@
+Pi Compass V2 v0.8.0-rc.6 validation summary
+Core tests: 82/82 PASS
+Non-extension tests: 115/115 PASS
+User-supplied pi-subagents@0.83.1 contract report: 37/37 PASS
+Source/script syntax checks: PASS
+Full npm test: NOT VERIFIED in this build sandbox; TypeBox dependency unavailable and npm ci did not finish before timeout. npm test therefore cannot load tests/extension.test.mjs here.
+User-side RC5 evidence: 176/177 tests passed; sole failure was stale test assertion expecting v0.8.0-rc.4. RC6 changes that test to use the current GoalRun release/package manifest and updates runtime preflight to avoid hard-coded release text.
+Real Pi/provider acceptance: NOT RUN. RC5 acceptance script did not start Pi because the full test gate failed.
+Do not promote to final 0.8.0 until full tests and the live Pi acceptance report pass.

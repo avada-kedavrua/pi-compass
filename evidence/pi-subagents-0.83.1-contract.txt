@@ -1,0 +1,766 @@
+pi-subagents local compatibility evidence
+
+===== Collection metadata =====
+Package root: /home/avada/.pi/agent/npm/node_modules/pi-subagents
+Generated at: 2026-10-28T15:28:01.426Z
+Read-only collector. Does not read settings.json, auth.json, models.json, environment credentials, or session transcripts.
+Report can include source code from the installed extension; review before sharing if you maintain private modifications.
+
+
+===== Installed package identity =====
+{
+  "name": "pi-subagents",
+  "version": "0.83.1",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./bundle/index.js"
+    },
+    "./background-work": {
+      "types": "./src/api/background-work.d.ts",
+      "default": "./bundle/background-work.js"
+    },
+    "./external-job-provider": {
+      "types": "./src/api/external-job-provider.d.ts",
+      "default": "./bundle/external-job-provider.js"
+    },
+    "./external-runs": {
+      "types": "./src/api/external-runs.d.ts",
+      "default": "./bundle/external-runs.js"
+    },
+    "./agents": {
+      "types": "./src/api/agents.d.ts",
+      "default": "./bundle/agents.js"
+    },
+    "./inspectors": {
+      "types": "./src/api/inspectors.d.ts",
+      "default": "./bundle/inspectors.js"
+    },
+    "./delegation": {
+      "types": "./src/api/delegation.d.ts",
+      "default": "./bundle/delegation.js"
+    },
+    "./capability-ceiling": {
+      "types": "./src/api/capability-ceiling.d.ts",
+      "default": "./bundle/capability-ceiling.js"
+    },
+    "./workflow-resources": {
+      "types": "./src/api/workflow-resources.d.ts",
+      "default": "./bundle/workflow-resources.js"
+    },
+    "./required-child-extensions": {
+      "types": "./src/api/required-child-extensions.d.ts",
+      "default": "./bundle/required-child-extensions.js"
+    },
+    "./preflight": {
+      "types": "./src/api/preflight.d.ts",
+      "default": "./bundle/preflight.js"
+    },
+    "./control-channel": {
+      "types": "./src/api/control-channel.d.ts",
+      "default": "./bundle/control-channel.js"
+    },
+    "./intercom-bridge": {
+      "types": "./src/api/intercom-bridge.d.ts",
+      "default": "./bundle/intercom-bridge.js"
+    },
+    "./child-tool-plan": {
+      "types": "./src/api/child-tool-plan.d.ts",
+      "default": "./bundle/child-tool-plan.js"
+    },
+    "./shared-types": {
+      "types": "./src/api/shared-types.d.ts",
+      "default": "./bundle/shared-types.js"
+    },
+    "./project-panes": {
+      "types": "./src/api/project-panes.d.ts",
+      "default": "./bundle/project-panes.js"
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./bundle/index.js"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ]
+  }
+}
+
+
+===== src/api/delegation.d.ts =====
+Path: src/api/delegation.d.ts
+SHA-256: 66bc1230efb2805da6b3e6e72b3635dc989d135bdeddc9e5a54075e1884fdbfe
+Bytes: 4831
+
+import type { IntercomBridgeConfig } from "../shared/types.ts";
+export declare const SUBAGENT_DELEGATION_REQUEST_EVENT = "prompt-template:subagent:request";
+export declare const SUBAGENT_DELEGATION_STARTED_EVENT = "prompt-template:subagent:started";
+export declare const SUBAGENT_DELEGATION_UPDATE_EVENT = "prompt-template:subagent:update";
+export declare const SUBAGENT_DELEGATION_RESPONSE_EVENT = "prompt-template:subagent:response";
+export declare const SUBAGENT_DELEGATION_CANCEL_EVENT = "prompt-template:subagent:cancel";
+export interface SubagentDelegationToolBudget {
+    soft?: number;
+    hard: number;
+    block?: string[] | "*";
+}
+export type SubagentDelegationJsonSchemaObject = Record<string, unknown>;
+export type SubagentDelegationThinking = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export type SubagentDelegationResultRequest = {
+    kind: "text";
+} | {
+    kind: "structured";
+    schema: SubagentDelegationJsonSchemaObject;
+};
+export interface SubagentDelegationRequest {
+    requestId: string;
+    ownerRunId: string;
+    nodeId: string;
+    agent: string;
+    task: string;
+    context: "fresh" | "fork";
+    cwd: string;
+    model?: string;
+    thinking?: SubagentDelegationThinking;
+    timeoutMs?: number;
+    toolBudget?: SubagentDelegationToolBudget;
+    skill?: string | string[] | boolean;
+    artifacts?: boolean;
+    /** Per-launch bridge config; replaces the global `intercomBridge` config. Pass the same value to preflight to compare digests. */
+    intercomBridge?: IntercomBridgeConfig;
+    result: SubagentDelegationResultRequest;
+}
+export interface SubagentDelegationStarted {
+    requestId: string;
+    ownerRunId: string;
+    nodeId: string;
+}
+/**
+ * Cumulative usage for one attempt at one observation time. This snapshot is
+ * emitted only when every counter is known, finite, and non-negative. It does
+ * not combine retries or replace authoritative terminal usage; absence means
+ * unavailable, not zero. UPDATE `tokens` keeps its input-plus-output meaning.
+ */
+export interface SubagentDelegationUpdateUsage {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    turns: number;
+}
+/** Observed assistant-request errors and Pi retries, not provider-internal HTTP attempts. */
+export interface SubagentDelegationProviderDiagnostics {
+    errorCount: number;
+    lastError?: {
+        kind: "rate_limited" | "transient_other" | "unknown";
+        /** Fixed safe description; never the raw provider error/body. */
+        message: string;
+        at: number;
+    };
+    retry?: {
+        phase: "backoff" | "in_flight";
+        attempt: number;
+        maxAttempts: number;
+        delayMs: number;
+        /** Observation time of auto_retry_start; delayMs is Pi's planned delay. */
+        scheduledAt: number;
+    };
+}
+export interface SubagentDelegationUpdate extends SubagentDelegationStarted {
+    providerDiagnostics?: SubagentDelegationProviderDiagnostics;
+    runId?: string;
+    currentTool?: string;
+    currentToolArgs?: string;
+    recentOutput?: string;
+    recentOutputLines?: string[];
+    recentTools?: Array<{
+        tool: string;
+        args: string;
+    }>;
+    model?: string;
+    toolCount?: number;
+    durationMs?: number;
+    tokens?: number;
+    usage?: SubagentDelegationUpdateUsage;
+}
+export type SubagentDelegationStatus = "completed" | "failed" | "timed_out" | "cancelled" | "interrupted" | "tool_budget_exhausted" | "structured_output_failed" | "acceptance_failed" | "invalid_request" | "unavailable_context" | "duplicate_node";
+export type SubagentDelegationValue = {
+    kind: "text";
+    text: string;
+} | {
+    kind: "structured";
+    value: unknown;
+};
+export interface SubagentDelegationUsage {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    cost: number;
+    turns: number;
+    toolCalls: number;
+    durationMs: number;
+}
+export interface SubagentDelegationTerminalResponse extends SubagentDelegationStarted {
+    providerDiagnostics?: SubagentDelegationProviderDiagnostics;
+    status: Exclude<SubagentDelegationStatus, "invalid_request">;
+    error?: string;
+    runId?: string;
+    agent?: string;
+    model?: string;
+    thinking?: string;
+    exitCode?: number;
+    launchContractDigest?: string;
+    result?: SubagentDelegationValue;
+    usage?: SubagentDelegationUsage;
+}
+/** A malformed structured request can only be correlated by the valid identity fields it supplied. */
+export interface SubagentDelegationInvalidResponse {
+    requestId: string;
+    ownerRunId?: string;
+    nodeId?: string;
+    status: "invalid_request";
+    error?: string;
+}
+export type SubagentDelegationResponse = SubagentDelegationTerminalResponse | SubagentDelegationInvalidResponse;
+export interface SubagentDelegationCancel extends SubagentDelegationStarted {
+}
+
+
+===== bundle/delegation.js =====
+Path: bundle/delegation.js
+SHA-256: 7845d67d61f7cd1290b38f2c2ccddeb92e0f3a53926131e546fcabb772579c5c
+Bytes: 417
+
+import {
+  SUBAGENT_DELEGATION_CANCEL_EVENT,
+  SUBAGENT_DELEGATION_REQUEST_EVENT,
+  SUBAGENT_DELEGATION_RESPONSE_EVENT,
+  SUBAGENT_DELEGATION_STARTED_EVENT,
+  SUBAGENT_DELEGATION_UPDATE_EVENT
+} from "./chunk-D4EHT5SJ.js";
+export {
+  SUBAGENT_DELEGATION_CANCEL_EVENT,
+  SUBAGENT_DELEGATION_REQUEST_EVENT,
+  SUBAGENT_DELEGATION_RESPONSE_EVENT,
+  SUBAGENT_DELEGATION_STARTED_EVENT,
+  SUBAGENT_DELEGATION_UPDATE_EVENT
+};
+
+
+===== src/api/shared-types.d.ts =====
+Path: src/api/shared-types.d.ts
+SHA-256: b64c55a4346361b7ea5c8fb6a4d67fc7fef0455cfefaee5b6e6644fca16fe958
+Bytes: 667
+
+export { DEFAULT_FORK_PREAMBLE, wrapForkTask, type AcceptanceEvidenceKind, type AcceptanceInput, type AcceptanceLedger, type AcceptanceLevel, type AgentCapabilitiesSnapshot, type AgentCapabilityRow, type AsyncStartedEvent, type ControlEvent, type Details, type ExecutionProjection, type ExternalJobRunnerStatus, type ExternalJobStatus, type IntercomBridgeConfig, type IntercomBridgeMode, type JsonSchemaObject, type OutputMode, type ReviewProjection, type SingleResult, type SubagentResultStatus, type SubagentRunMode, type Usage, type ManagedWorktreeProvider, type WorktreeNaming, type WorktreeProvider, type WorkflowResourceProvenance, } from "../shared/types.ts";
+
+
+===== src/api/control-channel.d.ts =====
+Path: src/api/control-channel.d.ts
+SHA-256: 6df10b02034d471d3865d0ab23cc2306206d51fd070477bd7ba5de42c8e7cbd1
+Bytes: 93
+
+export { requestAsyncStop, type StopRequest, } from "../runs/background/control-channel.ts";
+
+
+===== bundle/index.js event and payload excerpts =====
+Path: bundle/index.js
+SHA-256: 5899cda5d6082a29eba13815494b036a274adb67f0667f280bbf3001e6634348
+[No matching lines found; bundle may be minified or use different event names]
+
+
+===== docs/extension-api.md relevant excerpts =====
+Path: docs/extension-api.md
+SHA-256: e9e4db4acccea4f9a38731803cfd746491d670ca4b483d0a2d1a07ec8f22cf16
+1: # Extension and integration APIs
+2: 
+3: Public seams for other Pi extensions and host integrations: the in-process RPC, the structured delegation API, launch preflight, capability ceilings, the background-work provider contract, and the Herdr integration.
+4: 
+5: ## Trusted workflow resources
+6: 
+7: Loaded trusted TypeScript extensions can import `registerWorkflowResource` from `pi-subagents/workflow-resources`. This subpath does not load the main extension and exposes no resolver or permit constructor. Its exported types are `RegisterWorkflowResourceInput`, `WorkflowResourceDefinition`, and `WorkflowResourceRegistration`:
+8: 
+9: ```typescript
+10: registerWorkflowResource({
+76:   });
+77: }
+78: ```
+79: 
+80: Invoke through the public `subagent` tool (use `async: false` for foreground):
+81: 
+82: ```json
+83: {
+84:   "workflow": "acme.review-check",
+85:   "args": { "task": "Review the current change; return findings only.", "check": "quick" },
+86:   "async": true
+87: }
+94: The existing shell runner uses workflow cwd and inherited environment. Exact matching does not pin PATH resolution, executable bytes, repository helpers, or credentials. Those remain operator/extension trust responsibilities. `JSON.stringify` embeds data in JavaScript source; **it is not shell escaping**. Keep commands fixed as above, or validate strictly bounded numeric/hex tokens before binding known positions; never concatenate arbitrary task text or flags into shell commands. No new runner, cwd confinement, CI/merge policy, or SDK lifecycle framework is provided.
+95: 
+96: ## In-process event-bus RPC
+97: 
+98: Other Pi extensions can use the in-process event-bus RPC instead of scraping slash output or calling internal modules. Listen for `subagents:rpc:v1:ready`, send requests on `subagents:rpc:v1:request`, and read replies from `subagents:rpc:v1:reply:<requestId>`.
+99: 
+100: ```typescript
+101: const requestId = crypto.randomUUID();
+102: pi.events.on(`subagents:rpc:v1:reply:${requestId}`, (reply) => {
+103:   // { version: 1, requestId, success: true, data } or
+104:   // { version: 1, requestId, success: false, error: { code, message } }
+105: });
+106: pi.events.emit("subagents:rpc:v1:request", {
+107:   version: 1,
+108:   requestId,
+109:   method: "spawn",
+110:   params: {
+111:     script: `return runs.run("main", { agent: "reviewer", task: "Review the current diff" })`,
+112:     context: "fresh"
+113:   }
+114: });
+115: ```
+139: - `statusProjection: { version: 1, untargeted: "in-memory-when-ready", targeted: "executor" }` — untargeted status may use restored bounded projections; targeted or rich status remains executor-backed.
+140: - `fleetStatus: { version: 1 }` — successful `status` replies additionally include `data.fleet`.
+141: - `cost: { version: 1 }` — the `cost` method is available and returns the versioned report shape above.
+142: 
+143: Structured delegation progress updates carry `runId` as soon as foreground execution allocates it, so a caller can retain the package-owned revival target even if its own tool turn is interrupted before the terminal response. Foreground `details.results[]` rows also include a numeric `index` that is unique within the run and stable across partial progress snapshots and the final result; use `(runId, index)` instead of row position to correlate single, counted parallel, and chain children.
+144: 
+145: ### Refresh a host view without polling
+146: 
+147: A host that shows background subagent activity (an editor panel, a footer, a status bar) can read `status` when something changed instead of on a timer:
+148: 
+149: 1. Subscribe to the names under `ping.events`: `jobsChanged`, `asyncStarted`, `childStatus`, `asyncComplete`, and `processTerminal`.
+150: 2. Read `status` once, when the host starts or reconnects. Events are not replayed after a host restart, and subscribing first means a change during that read still triggers another one.
+151: 3. When any of the events fires, read `status` again. Events can arrive in bursts and can repeat, so coalesce them in the host, for example one `status` read per 250 ms, and keep a refresh that arrives while a read is in flight for after it ends.
+152: 
+153: `subagent:jobs-changed` carries only `{ version: 1 }`. It fires whenever the parent's background job view changes: a run starts, moves to another step (no other event reports a chain or parallel run's step changes), reports new activity (a tool, a turn, tokens, or output), finishes, or is cleared from the widget. While a child streams output this can be about once per second per run. Starts and finishes fire right away; step and activity changes fire when the parent next reads the run's status file, which on macOS is a check every 5 seconds. It fires only in sessions with a UI, which covers interactive and RPC mode; print mode (`pi -p`) and SDK embeddings without a UI do not get it. It fires even when the async widget is turned off.
+154: 
+155: Foreground children are not background jobs. Their progress arrives as updates to the parent's `subagent` tool call (Pi's `tool_execution_update` events), with the `details.results[]` rows described above.
+156: 
+157: To rebuild what ran in a session after a reload, read the records the session file already holds: the `subagent` tool result's `details.results[]` for foreground runs and the `subagent-notify` message's `details.runs[]` for background runs (see [Host session lifetime and completion wakes](#host-session-lifetime-and-completion-wakes)). The `cost` method returns per-child rows built from the same records.
+158: 
+159: ### Direct async launch correlation
+160: 
+161: Direct async runs retain their originating `toolCallId` in status and result
+162: artifacts. After a lost RPC spawn reply, request `status` with
+163: `id: "rpc-spawn-<original-requestId>"`. The raw request UUID is not a run ID.
+164: Default targeted replies expose the resolved `runId` and retained `toolCallId`
+165: in `data.details`; older artifacts can omit the latter.
+166: 
+167: Lookup uses the existing run indexes and retained artifacts. Terminal indexing
+168: keeps the alias after result delivery while the run's status is retained.
+169: Correlation is not idempotent spawn: multiple runs with one alias are ambiguous, and missing or
+170: expired evidence never proves that execution did not start. Do not redispatch
+296: - Pass `projectTrusted: ctx.isProjectTrusted()` to match a session that declined project trust. With `false`, project agents and project subagent settings are ignored and an explicit `agentScope: "project"` returns `restricted_agent`. It defaults to `true`.
+297: - The resolved Intercom bridge state (`intercomBridge.mode` and `intercomBridge.active`). An active bridge appends the bridge instruction to the child prompt and adds `contact_supervisor` to a declared tool list, exactly as execution does.
+298: - Artifact/session paths, async lifecycle/status/result/event/process-terminal paths, package/lifecycle versions, capability-ceiling audit data, and stable digests.
+299: 
+300: `launchContractDigest` is the canonical digest of the caller task, effective system prompt (including an active bridge instruction), model candidates, effective tools/extensions/MCP (including inherited capability ceilings and the bridge tool), output binding, and structured-output schema that ordinary foreground and async execution report in results/status/events and metadata. Preflight and each execution path that reports the digest assemble it through one shared binding, so equal inputs produce equal digests.
+301: 
+302: Bridge inputs:
+303: 
+304: - `intercomBridge` replaces the global `intercomBridge` config for this launch, with the same semantics as the `subagent` tool and delegation overrides. Pass the same value to the launch you compare against. Preflight reads the global config from disk on each call while the running extension keeps the config it loaded at startup, so pass the override when the digest must not depend on that file.
+305: - The default bridge instruction never names the parent session, so most hosts need no further input. When the configured `instructionFile` interpolates `{orchestratorTarget}`, preflight reports a `host_required` diagnostic unless the host supplies a non-empty `orchestratorTarget`; the executor derives that target with `resolveIntercomSessionTarget` from `pi-subagents/intercom-bridge`, given the parent session name and id.
+306: 
+307: Boundaries:
+308: 
+309: - Runtime acceptance prose and output-task annotations are intentionally excluded because side-effect-free preflight does not resolve those host/runtime augmentations; the launch and task digests make that boundary explicit.
+310: - Raw prompts are not exposed in public contract output.
+311: - It is side-effect-free for launch state: it does not create child sessions, temp prompt files, structured-output runtimes, tool-diagnostic files, or run artifacts.
+312: - Some host-owned facts, such as exact fork snapshots, nested async roots, and live model registries, can only be proven by the Pi host; those appear as `host_required` diagnostics instead of silently pretending to be exact.
+313: - Preflight reads the extension config, so `defaultSubagentContext: "fresh"` or `"fork"` affects omitted context in the same way as execution. Explicit `context` still wins.
+314: 
+315: ## Structured delegation API
+316: 
+317: Other Pi extensions can ask `pi-subagents` to run one configured foreground leaf agent through the structured delegation API. It uses the established `prompt-template:subagent:*` event family and the same executor as the `subagent` tool; it does not add another launcher.
+318: 
+319: ```ts
+320: import {
+321:   SUBAGENT_DELEGATION_REQUEST_EVENT,
+322:   SUBAGENT_DELEGATION_RESPONSE_EVENT,
+323:   type SubagentDelegationRequest,
+324:   type SubagentDelegationResponse,
+325: } from "pi-subagents/delegation";
+326: 
+327: const request: SubagentDelegationRequest = {
+328:   requestId: crypto.randomUUID(),
+329:   ownerRunId: workflowRunId,
+330:   nodeId: "review-accuracy",
+331:   agent: "reviewer",
+332:   task: "Review the supplied evidence.",
+333:   context: "fresh",
+334:   cwd: ctx.cwd,
+335:   thinking: "high",
+336:   result: {
+337:     kind: "structured",
+343:     },
+344:   },
+345: };
+346: 
+347: const unsubscribe = pi.events.on(SUBAGENT_DELEGATION_RESPONSE_EVENT, (payload) => {
+348:   const response = payload as SubagentDelegationResponse;
+349:   if (response.requestId !== request.requestId) return;
+350:   if (response.ownerRunId !== request.ownerRunId || response.nodeId !== request.nodeId) return;
+351:   unsubscribe();
+352:   // Inspect response.status, response.result, response.usage, model, and thinking.
+353: });
+354: pi.events.emit(SUBAGENT_DELEGATION_REQUEST_EVENT, request);
+355: ```
+356: 
+357: Identity:
+358: 
+359: - `ownerRunId` plus `nodeId` is the active logical identity; `requestId` identifies one attempt.
+360: - A second active attempt for the same logical node receives `duplicate_node` without disturbing the original.
+361: - Started, update, response, and cancellation payloads carry the full tuple. Cancellation affects only an exact tuple, including cancel-before-start races.
+362: - Each attempt emits at most one terminal response.
+363: 
+364: Results:
+365: 
+366: - Result mode is explicit. Text remains literal even when it looks like JSON. Structured mode returns the separately captured, schema-validated JSON value.
+367: - Terminal usage reports input, output, cache-read, cache-write, cost, turns, tool calls, and duration alongside the effective model and thinking level when known. Native child totals are reconciled per attempt from post-prompt session messages: complete persisted fields replace live aggregates, while incomplete fields retain them.
+368: 
+369: Live update events are bounded progress snapshots, not patches, so consumers should replace the prior snapshot rather than merge it as a delta. Structured delegation coalesces heartbeats whose delegation-visible progress and recent output are unchanged; a duration-only heartbeat therefore does not produce another update. The terminal response remains authoritative for the complete result, error, and final usage details.
+370: 
+371: Both `:update` and terminal `:response` optionally include one bounded `providerDiagnostics` snapshot:
+372: 
+373: ```ts
+374: {
+375:   errorCount: number,
+376:   lastError?: {
+389: ```
+390: 
+391: - Coverage is **observed assistant-request errors and Pi retries**, not every provider-internal HTTP attempt. Healthy long reasoning does not invent diagnostics; absence means no observation, not proof that no internal retry happened.
+392: - `errorCount` increments once per failed assistant `message_end` (`stopReason: "error"`), including repeated identical errors and errors without an `errorMessage`. It does not count retry scheduling, tool failures, aborts, or compaction. The first error is reported immediately, even with no output or tokens and before Pi schedules any retry.
+393: - Only the failed message's `errorMessage` is classified, never assistant content or tool text. `rate_limited` requires explicit throttling evidence. Text that mentions quota or billing, or says credits, balance, or an account or usage limit is exhausted, is reported as `unknown`, even when it also carries throttling or transient wording, so account exhaustion never looks like transient throttling. Other Pi-recognized transient errors use `transient_other`; anything else uses `unknown`. This classification is observational and does not change Pi's retry policy or the delegation's status/error behavior.
+394: - `lastError.message` is a short fixed safe description, **not** the raw provider error/body. Raw diagnostics remain in existing child artifacts. No HTTP status or provider code is inferred or exposed here. `at` and `scheduledAt` are observation-time Unix timestamps in milliseconds.
+395: - `auto_retry_start` schedules `backoff`; `attempt` is the 1-based retry attempt, `maxAttempts` is Pi's retry budget, and `delayMs` is Pi's planned delay, **not** a claimed server `Retry-After`. The next `agent_start`/`turn_start` changes the phase to `in_flight`. `auto_retry_end` ends the sequence after success, exhaustion, or cancellation; it is not a backoff-finished event.
+396: - Cumulative error history survives recovery and unrelated replacement updates. `retry` is active-only and is absent from every terminal response, including cancellation and timeout. Historical errors alone do not turn a recovered completed result into a failure.
+397: 
+398: Bounds:
+399: 
+400: - Schemas are capped at 64 KiB; tasks and returned text/structured values are capped at 1 MiB, with smaller bounds on identity/configuration strings and a maximum `timeoutMs` of 2,147,483,647.
+401: - Structured delegation accepts `toolBudget: { hard: 0, block: "*" }` to block the first tool call and run a zero-tool leaf; ordinary model-facing/configured budgets keep their existing minimum of one.
+402: - `intercomBridge` optionally replaces the global bridge config for one delegation, for example `{ mode: "off" }` when no supervisor session will answer the child. Pass the same value to `resolveSubagentLaunchContract` to compare `launchContractDigest` against the terminal response.
+403: - The foreground bridge retains up to 8,192 exact pending-cancellation and settled-attempt identities per extension context. If either history fills, it fails closed with `unavailable_context` for later starts rather than evicting identity facts; lifecycle reset clears the bounded history.
+404: 
+405: Constraints:
+406: 
+407: - Delegation requires an active extension context. Emit requests from a supported event callback or queued application step, not by recursively invoking the `subagent` tool inside another tool's `tool_call` hook.
+408: - The caller selects a configured agent, but agent discovery and effective tools remain package-owned. A request cannot grant arbitrary tools, and tool restrictions are not an operating-system sandbox.
+409: - The detached RPC remains async-only; this API is foreground-only.
+410: 
+411: Unversioned prompt-template payloads with `requestId`, `agent`, `task`, `context`, `model`, and `cwd` are rejected as legacy direct delegation. New integrations must use the structured owned-leaf request above. `pi-subagents/delegation` is the canonical contract for extension integrations.
+412: 
+413: ## Capability ceilings
+414: 
+415: Parent extensions can enforce an out-of-band, session-scoped capability ceiling without adding a model-visible field to `subagent`:
+416:
+
+
+===== docs/tool-reference.md relevant excerpts =====
+Path: docs/tool-reference.md
+SHA-256: 11362cef55399d7b5a0d922ac415aa3804988dc558d0e09dec46192bd36f42c9
+7: Call `{ action: "guide", options: { topic: "tool-reference" } }` for this reference or `options: { topic: "workflows" }` for [workflow recipes](workflows.md). Use `topic: "agents"` for authoring, `topic: "missions"` for missions/schedules, and `topic: "watchdog"` for watchdog controls, always inside `options`. Guide reads do not change the schema or grant authority.
+8: 
+9: ## Execution examples
+10: 
+11: Chaining is code-driven through a workflow script. Write the script as one ```` ```js workflow ```` fenced block in the reply, then call `subagent({ workflow: true, ... })` in the same reply. A `workflow` string containing `/` is a script file, and any other string is a named resource. `workflowScript` and `workflowScriptPath` were removed; use these forms instead.
+12: 
+13: Use `await runs.run(...)` for sequential steps and `await runs.all([{ key, agent, task }, ...])` for ordinary parallel fanout. `runs.all` resolves to an ordered array, not a key map, so use indexes, destructuring, or `.map(...)`, not `results.<key>`. Do not read `.output` from an unawaited `runs.run` launch. Stored `runs.run` promises are only for the advanced rolling fanout pattern under [Workflow steering](#workflow-steering), where every promise is later observed with direct `await`, `Promise.race`, or `Promise.all`. Legacy top-level `chain`, `tasks`, and `parallel` inputs are not supported, except that `disabledFeatures: ["workflow-scripts"]` replaces workflow scripts with top-level `chain` and `tasks` (see [configuration](configuration.md#chain-and-tasks-without-workflow-scripts)). Helper functions must be plain functions or explicit Promise chains. Nested `async function` helpers, async arrows, and async methods are rejected so child-launch tracking stays portable across Node and Bun. For permission-sensitive host calls, use an extension-owned named resource such as `{ workflow: "run-ci", args: { command: "npm test" } }`; raw scripts (`workflow: true` or a script path) have unknown resource provenance and cannot call `runs.host`. A resolved resource may internally use `runs.host(key, { kind: "command", command, timeoutMs, output?, role?, provider? })` within its authority ceiling; there is no per-step `cwd`, and commands and relative output paths use the workflow `cwd`. Set `cwd` on the outer `subagent({...})` request instead, or put a trusted directory change in the command (for example, `cd /path/to/worktree && npm test`).
+14: 
+15: Use `{ action: "validate", workflow: true }` (or a script path) to check statically decidable syntax and structure without launching children. It returns `{ ok, errors }` and fails the tool call when `ok` is false. Literal child `baseRef` values are checked against the runtime ref policy. Dynamic keys and values remain subject to runtime checks; static validation does not guess them.
+16: 
+17: Use `workflow: "./path/to/script.js"` to load the same JavaScript statement body from a file. Relative paths resolve against the request `cwd`, and absolute paths pass through. The host reads the file before validation, scheduling, or sandbox execution. The workflow sandbox still has no filesystem access. Missing, unreadable, and empty files fail as file input errors.
+18: 
+19: Raw reply-block and file-backed scripts accept bounded plain-JSON `args`, including during `validate` and `schedule.create`. Omitted raw args become `{}`; supplied args are deeply frozen in the sandbox. Normalized args persist in run and schedule evidence for diagnosis and exact replay, so never include secrets. Args are data only and do not grant `runs.host` authority.
+20: 
+21: For permission-extension interoperability, use one of the package-owned named resources with bounded `args` instead of caller-supplied workflow text:
+22: 
+32: { action: "validate", workflow: "./workflows/review.js", args: { target: "src/workflows" } }
+33: { action: "schedule.create", workflow: "./workflows/review.js", args: { target: "src/workflows" }, options: { every: "6h" } }
+34: ```
+35: 
+36: Each script below is the ```` ```js workflow ```` block of a reply that then calls `subagent({ workflow: true })`:
+37: 
+38: ```js workflow
+39: // One child; return the child promise explicitly
+40: return runs.run("main", { agent: "scout", task: "Analyze the auth flow" });
+41: ```
+42: 
+43: ```js workflow
+47: ```
+48: 
+49: ```js workflow
+50: // Parallel workflow
+51: const results = await runs.all([
+52:   { key: "backend", agent: "reviewer", task: "Review backend" },
+53:   { key: "frontend", agent: "reviewer", task: "Review frontend" }
+54: ]);
+55: return results.map(result => result.output);
+56: ```
+57: 
+58: ### Parallel sequential lanes
+60: Use `runs.lanes(lanes)` inside a workflow script when several independent lanes each have ordered stages. This helper composes the existing workflow child runner; it does not add a top-level `lanes` parameter or a second persistence/cleanup system.
+61: 
+62: See the [staged-lane example](workflows.md#parallel-sequential-lanes) (guide topic `workflows`).
+63: 
+64: The first stage of each lane is launched by one existing `runs.all(...)` batch. Later stages run in lane order. Set `resume: "previous"` on a later stage to continue the preceding retained child; the helper requires that child’s returned `runId` and delegates to the existing resume checks. Stage keys are local to the lane, and generated child keys are `<lane>.<stage>`.
+65: 
+66: The complete plain-JSON inventory is validated before the first launch (maximum 32 lanes, 16 stages per lane, 64 total stages, and 64 KiB canonical JSON). A failed, stopped, or detached stage blocks only its lane and marks later stages `skipped`; an explicit `structuredOutput.verdict === "blocked"` has the same effect. Reviewer prose is not parsed. The bounded board returns lane/stage keys, state, `ok`, run ids, explicit output references, bounded errors, and optional verdicts, not transcripts. Use raw `runs.run(...)`/`runs.all(...)` for conditional or rolling workflows.
+67: 
+68: ## Parameter reference
+69: 
+70: The `subagent` tool schema lists `agent`, `task`, `workflow`, `args`, `async`, `model`, `cwd`, `worktree`, `output`, `action`, `id` and `message` at the top level and every other field inside `options`, for example `subagent({ action: "status", id: "<run-id>", options: { view: "transcript" } })`. Management fields and the `runId`, `maxRuntimeMs` and `isolation` aliases also keep working at the top level, as in RPC payloads, slash commands, schedules and workflow `runs.run`/`runs.all` items; a field given in both places with different values is rejected.
+71: 
+72: ### Target and management parameters
+73: 
+74: | Param | Type | Default | Description |
+75: |-------|------|---------|-------------|
+76: | `options` | object | - | Management and control fields; the rows named `options.<name>` below go here. Unknown keys are rejected with the closest valid option. The same fields are also accepted at the top level. |
+77: | `agent` | string | - | One direct child or agent-management target. Workflow child agents are set inside `runs.run` or `runs.all`. |
+78: | `task` | string | agent default | Direct child's task; requires `agent`, excludes `action` and workflow inputs. `agent` may also select a management target. |
+79: | `action` | string | - | Offline workflow `validate`, agent management (including `guide`, `children.list`, and `refine`/`refine.show`/`refine.rollback`), lane evidence (`lane.status`, `lane.recordMerge`, `lane.recordSupersession`), mission (`mission.create/list/show/update/resolve-decision/attach-run/close`), Inspect actions (`inspector.command/open/status/close`), Herdr project pane (`project.open/status/close`), status/control, reviewed `worktree.cleanup`, schedule, watchdog, or doctor action. |
+80: | `options.topic` | `overview \| workflows \| agents \| missions \| observability \| tool-reference \| configuration \| models \| watchdog \| extension-api \| council`, or `<topic>/<section>` | `overview` | Packaged guide topic for `action: "guide"`. A docs topic returns its table of contents; `<topic>/<section>` returns one section. |
+81: | `options.config` | object/string | - | Agent config for management create/update. |
+82: | `options.context` | `fresh \| fork \| profile` | global or per-agent default, else `fresh` | Explicit `fresh` or `fork` overrides every workflow child. `profile` requires the selected agent's declared `defaultContext` and ignores config `defaultSubagentContext`; missing agent defaults fail. When omitted, [`defaultSubagentContext`](configuration.md#defaultsubagentcontext) wins over each agent's `defaultContext`; implicit fork falls back to fresh without a persisted parent session and leaf. Explicit fork is strict. Packaged `worker` defaults to `fresh`; packaged `oracle` and `advisor` default to `fork`. |
+83: | `model` | string | agent default | An exact `provider/id`; bare ids resolve only if unique, and agent names are not model ids. An unknown or ambiguous model fails with up to 5 closest registry ids to copy; `{action:"models"}` lists them all. A suffix such as `provider/id:high` (`off/minimal/low/medium/high/xhigh/max`) overrides agent thinking. The `thinking` field is only for `watchdog.configure`, ignored on dispatch. On the `claude-code` and `claude-code-writer` adapters the model is Claude Code's own alias or id, and the same suffix becomes its `--effort`, bounded by `subagents.maxThinking` and by an enforced `subagents.modelScope`. |
+84: | `options.missionId` | string | - | Attach a workflow, including each fire of `schedule.create`, to an existing project mission. Scheduled attachment uses ordinary lifecycle and retention rules. |
+103: |-------|------|---------|-------------|
+104: | `async` | boolean | default-on | Background execution. Workflows default to background. `async:false` blocks the parent until completion. A local foreground child runs inside the parent Pi process and never loads the parent's ambient extensions, but it does inherit the providers those extensions registered. A pane-native remote foreground child instead uses the remote machine's provider discovery and configuration. Agents that need MCP tools (`mcpDirectTools`, or MCP tools from an ambient adapter such as pi-mcp-adapter) must run as background children, which load them inside the detached runner process. |
+105: | `options.chatProgress` | `auto \| off \| live-card` | `auto` | Workflow chat projection. `auto` renders a live in-chat card only for watched foreground workflows in the same Git repository, including managed worktrees; it is off otherwise. Explicit `live-card` requires `async:false` and the same Git repository. Async workflows have no inline live card, so omit `chatProgress` or use `auto`/`off`; use `async:false` only when the parent must block. |
+106: | `isolation` | `none \| worktree` | - | Alias kept at the top level; prefer `worktree`. Workflow child isolation. `none` runs in the shared cwd and does not need Git. `worktree` requires a managed Git worktree. Do not combine it with a contradictory `worktree` value. |
+107: | `options.baseRef` | string | `HEAD` | `HEAD` or a supported named ref such as `refs/heads/release`, `refs/tags/v1`, or `origin/main`. Full 40/64-character commit IDs and revision expressions such as `HEAD~1` are unsupported. The ref must resolve to a commit at worktree allocation; omitted values default to `HEAD` resolved at that time. Source-checkout cleanliness is still checked. For a workflow script, set it on the outer request as a default or on an individual `runs.run`/`runs.all` child to override it. |
+108: | `options.timeoutMs` | number | config `timeoutMs`, else 30 min foreground / single-agent async | Optional run-level max runtime in milliseconds. The top-level alias `maxRuntimeMs` is also accepted; both must agree. When omitted, the global [`timeoutMs`](configuration.md#timeoutms) config provides the default; absent that, foreground and plain single-agent async runs fall back to 30 minutes, while composite async runs (chains, parallel tasks, workflows) stay unbounded at the top level. Expiration of this run-level deadline is terminal. |
+109: | `options.toolTimeoutMs` | number | fast-tool default | Optional positive hard per-tool-call deadline in milliseconds. Precedence: call value → agent frontmatter → config → `PI_SUBAGENT_TOOL_TIMEOUT_MS`. The timer starts on `tool_execution_start`, clears on the matching `tool_execution_end`, and terminates the run with `timedOut: true` if the tool remains open. When omitted, known-fast built-in tools get a five-minute default; long-running tools get attention notices but no hard default. It never extends the run deadline; `contact_supervisor`, `intercom`, and `bg_wait` are exempt. |
+110: | `options.checkpointBeforeDeadlineMs` | number | none | Async single-agent runs only. The runner requests that the child "checkpoint and stop" this many milliseconds before the run deadline (finish the current tool call, report changed files, build/test state, remaining work, commit/PR state; start no new work). This best-effort steer uses the normal steering lifecycle at the next tool boundary, so the receipt is visible in status and events; the ordinary deadline kill still applies. Precedence: call value → config `checkpointBeforeDeadlineMs`. Disarmed when the deadline leaves under one second before the checkpoint. |
+111: | `options.toolBudget` | object | none | Optional child tool-call budget `{ soft?, hard, block? }`: `hard` is a positive integer and `soft`, if set, is a positive integer no greater than `hard`. At `soft` the child is nudged to finalize. After `hard`, configured tools are blocked; `block` defaults to `read`, `grep`, `find`, and `ls`, and accepts either a nonempty array of tool names or `"*"` for every tool call. Final assistant text is never blocked. |
+112: | `options.usageBudget` | object | none | Optional root-only reported-usage budget `{ tokens?: { soft?, hard }, costUsd?: { soft?, hard } }`. Include at least one metric; each `hard` must be positive and each optional `soft` positive and no greater than its `hard`. Soft limits are status-only. Hard limits prevent later child launches after reported usage is reconciled; already-running children are not stopped and no reservations are made. |
+113: | `options.extensionBindings` | object | none | Child-only plain JSON keyed by namespaces like `package.name/1` (positive version): at most 16 namespaces, nesting depth 16, 256 total object properties, and 16 KiB of canonical UTF-8 JSON. Native Pi launches only; external runners and retained resumes reject it. A child's extensions read it as canonical JSON from `PI_SUBAGENT_EXTENSION_BINDINGS` in their factory or `session_start`; a foreground child sees it only until its session has started, after which the parent's environment is restored. |
+114: | `options.preflight` | object | none | Advisory lane hints for raw scripts (`workflow: true` or a script path) only; not accepted with named workflows or direct children. See [bounded workflows](workflows.md#opt-in-bounded-workflows). |
+115: | `cwd` | string | runtime cwd | Override working directory. With `machine`, the directory on that machine. |
+116: | `options.machine` | string | - | Herdr saved machine (label or profile id) for external-cli agents; see [agents.md](agents.md#running-external-cli-agents-on-a-herdr-saved-machine). |
+117: | `options.maxOutput` | object | none | Final output truncation limits `{ bytes?, lines? }`. For child runs it is only applied when set; there is no default cap on the inline path, so use `outputMode: "file-only"` for large outputs. For workflow script results, the Return, Emitted, and Console sections are always capped, at 200 KB / 5000 lines unless `maxOutput` sets other limits. |
+118: | `options.artifacts` | boolean | true | Write debug artifacts. |
+119: | `options.includeProgress` | boolean | false | Include full progress in result. |
+120: | `options.share` | boolean | false | Upload session export to GitHub Gist. |
+121: | `options.sessionDir` | string | derived | Override session log directory. |
+122: | `options.acceptance` | string/object/false | inferred | Configure evidence gates. See [Acceptance gates](#acceptance-gates). |
+123: | `options.gate` | string \| object | - | One host-run verification command, shorthand for `acceptance: { level: "verified", verify: [{ id: "gate", command }] }`. The object form `{ command, output?: "json", schema?, timeoutMs? }` adds a [typed gate](#typed-gates): with `output: "json"`, a passing command's stdout becomes the child's `structuredOutput`. Also valid on individual `runs.run`/`runs.all` items. Rejects `acceptance` except `false` (treated as omitted), rejects retained `resume`, and `output: "json"` rejects `outputSchema`. |
+124: 
+125: ### Budget guidance for writers
+126: 
+127: As a conservative orchestration policy, do not set a hard `toolBudget` or tight `usageBudget` on implementation workers, fix workers, reviewers with edit authority, or other mutation-capable children. A default tool budget blocks read/search tools rather than mutation tools, and reported usage has no reservation model, so neither tool-call counts nor token/cost totals measure whether a delivery slice is buildable or safe to hand off. Hard caps remain appropriate for explicitly read-only scouts, reviewers, and validators.
+128: 
+129: Bound writer work with a narrow task and an outer `timeoutMs` or `maxRuntimeMs` that leaves enough margin for the slice. An elapsed timeout is not a mutation-safe boundary and may still signal a child during tool work. Request a checkpoint after the current tool returns that records changed files, build/test state, and commit or PR state; for async single-agent runs, set `checkpointBeforeDeadlineMs`, otherwise steer by hand.
+130: 
+131: ### Fork context details
+132: 
+133: Explicit `context: "fork"` fails fast when the parent session is not persisted, the current leaf is missing, or the branched child session cannot be created. By contrast, global `defaultSubagentContext: "fork"` and agent-level `defaultContext: fork` are preferences: when the parent has no persisted session file or current leaf yet, the launch uses `fresh` immediately instead of failing and requiring a retry. Global `defaultSubagentContext: "fresh"` starts fresh. Explicit `context: "fresh"` always wins over both preferences.
+134: 
+135: A forked child keeps the inherited transcript as the parent sent it, signed Anthropic `thinking` blocks included: a signature covers its block's content, so a verbatim copy stays valid, and Pi replays a signed block only to the model that signed it. Raw `redacted_thinking` blocks, signed thinking in a `context_edit` replacement, and every signed or redacted Anthropic thinking block of a [pruned fork](configuration.md#forkcontext) are still removed. The child keeps its requested thinking level either way. Explicit `context: "fork"` never silently downgrades to `fresh`.
+136: 
+147: In workflow runs that omit `context`, each `runs.run` child follows the global `defaultSubagentContext` when set, then its own `defaultContext`. Without the global setting, a fresh-default worker can run fresh beside a fork-default oracle. If the parent session file or current leaf is not available yet, implicit fork-default children run fresh. Pass explicit `context: "fork"` or `context: "fresh"` when you intentionally want one context for every child.
+148: 
+149: ### Workflow steering
+150: 
+151: `runs.steer(key, message, options?)` targets a stable key already launched by `runs.run` or `runs.all`. It does not accept a raw run id. Options are `mode?: "steer" | "follow_up" | "auto"`, `index?: number`, and `ackTimeoutMs?: number`. The promise returns `{ key, state, requestId?, deliveryStatus?, targets?, error? }`, where `state` is `queued`, `delivered`, `missed`, or `failed`.
+152: 
+153: The workflow trace records the attempt and receipt. Always await, return, or include the promise in an awaited standard Promise combinator. Unawaited steering calls reject workflow completion after the side effect settles. `Promise.race` remains the rolling primitive. Foreground children are steered through their in-process session (`steer` and `auto` report `delivered` when that transport accepts the input; `follow_up` reports `queued` when accepted into Pi's queue). Async children use the file control inbox and report correlated consumption by the child, not merely inbox acceptance. Steering recovery is disabled in both cases.
+154: 
+155: For advanced rolling fanout, keep the launched `runs.run` promises in ordinary JavaScript data only when every promise is later observed with direct `await`, `Promise.race`, or `Promise.all`. `Promise.race` gives the next completed child, `runs.steer` can challenge a still-running keyed sibling, and `Promise.all` collects the rest. No separate `runs.start`, `runs.next`, or `runs.collect` API is exposed.
+156: 
+157: ```js workflow
+158: let pending = [
+172: Use `outputMode: "file-only"` when a saved output may be large and the parent only needs a pointer. The returned text is a compact reference like `Output saved to: /abs/report.md (48.2 KB, 2847 lines). Read this file if needed.` Failed runs and save errors still return normal inline output for debugging.
+173: 
+174: In a workflow script, give each child an explicit output path when later script steps need a durable file reference. A child with only read-only tools does not need direct filesystem access for `output`: it returns the complete artifact in its final response and the runtime persists it. Children with mutation-capable tools retain the direct-write instruction. With `outputSchema`, the runtime persists the structured result as indented JSON instead of the final prose, unless the child wrote the file itself.
+175: 
+176: The `output` field is the API binding; a filename mentioned in task text (for example, `Write your findings to exactly this path: report.md`) is only instruction and does not override runtime routing. When a later workflow step or parent needs a durable file, set `output` on `runs.run`/`runs.all` and return the child’s `outputReference`, `outputPathMapping`, or `artifactPaths`; arbitrary literal strings returned by workflow JavaScript are not rewritten. Omitted child output may use a managed aggregate-derived sibling path.
+177: 
+178: Workflows get `await state.get(key)` and `await state.set(key, value)` through their default or explicit mission. Use them to share durable JSON values across later workflows attached with the same `missionId`. Each `set` takes the state-file lock and merges its key with the latest on-disk state. Missing keys return `undefined`, and the complete state file has a strict 256 KiB limit. `mission:false` workflows have no `state` global.
+179: 
+180: ### Retained children
+181: 
+182: Completed workflow children from the current parent session stay addressable as retained children. `{ action: "children.list" }` lists up to the last 10 with their run ids and explicit `resumable` or `not resumable` state. This workflow-only roster is not an exhaustive list of direct native children. Resume only rows reported `resumable`. When the exact run id of an intended direct child is known, inspect it with `{ action: "status", id: "<run-id>" }`; if status identifies the candidate, attempt `{ action: "resume", id: "<run-id>", message: "..." }`. Resume performs the authoritative eligibility check and may reject the attempt. Start a same-role fallback challenge, labeled as fallback, only when no known candidate exists or resume rejects eligibility. A later workflow continues a resumable child by passing `resume` instead of `agent`:
+183: 
+266: `refine`, `refine.show`, and `refine.rollback` manage project-local refinement overlays for one agent. `/subagents-refine <agent>` is the slash equivalent of `refine`. See [agents.md](agents.md#refinement-overlays) for behavior and storage.
+267: 
+268: ### Schedule controls
+269: 
+270: Use `schedule.create` with `workflow: true` or a script path, not a direct child. `at` accepts a delay like `+10m` or an ISO timestamp with timezone; `every` accepts fixed intervals or `day`/`week` with `at:"HH:mm"` and an explicit IANA `timezone` (or `UTC`). Weekly `on` is a non-empty array of `mon`–`sun`; daily schedules omit it. Missing local times are skipped; repeated times fire once at their first instant. `sessionOnly:true` binds restoration/execution to the creating session file; omitted/false is project-wide. Recurring `quiet:true` keeps successful automatic fires visible without a parent turn; failed, stopped or paused runs still wake the parent. One-shot `at` and manual `schedule.run` stay noisy unless that launch passes `quiet:true`. An optional `missionId` attaches an existing mission on every fire and exposes its workflow state, using ordinary mission lifecycle and retention rules; `mission.close` does not pause the schedule. See [missions and schedules](missions.md#schedules) for examples and list/show/history/pause/resume/run/run-due/delete. `baseRef` resolves only at worktree allocation and still requires a clean source checkout.
+271: 
+272: ## Lane merge evidence and cleanup eligibility
+273: 
+274: Lane evidence actions update an existing parallel handoff manifest at an explicit update boundary. They do not verify GitHub state, run Git commands, or remove worktrees. Pass the manifest path and its exact `runId` as `laneId`:
+275: 
+276: ```ts
+277: subagent({
+368: ```
+369: 
+370: `yieldTimeMs` and `waitMs` range from 0 to 30,000 milliseconds. Omitting `yieldTimeMs` preserves completion-waiting behavior. Yielded handles are not successful exits. Status includes running/yielded/cancel-requested states and completed/failed/cancelled terminal states, a bounded output tail, and Pi's full-output file path when available. Recent terminal history retains 20 commands; active commands remain tracked.
+371: 
+372: Commands remain owned by the child session. Normal completion with unfinished commands cancels them and fails the run. Interrupt, stop, timeout, and disposal clean up owned commands. Controls do not transfer processes out of the child or create detached services. Native bash `timeout` remains command-scoped; `toolTimeoutMs` covers an open tool call and does not become a yielded process deadline.
+373: 
+374: ### resume
+375: 
+376: `resume` revives a paused, completed, or failed async/foreground child by starting a new child from its stored session file. Stopped runs remain non-resumable, and it does not interrupt a live top-level async child. Use `steer` for acknowledged live async guidance.
+377: 
+378: - Multi-child async runs and remembered foreground single, parallel, or chain runs can be revived by passing `index` to choose the child.
+379: - Nested runs can be resumed by nested id when their live route or persisted nested session metadata is available.
+422:     acceptance: {
+423:       level: "verified",
+424:       criteria: ["Patch the bug without widening scope"],
+425:       evidence: ["changed-files", "tests-added", "commands-run", "residual-risks", "no-staged-files"],
+426:       verify: [{ id: "focused", command: "npm test", timeoutMs: 120000 }]
+427:     }
+428:   }
+429: }
+430: ```
+431: 
+432: A direct tool call passes `acceptance` inside `options`; a workflow `runs.run` item passes it as a plain field.
+433: 
+538: ```
+539: 
+540: Supported: status artifacts, stdout/stderr logs, timeout, and stop. Full stdout and stderr are written to log files, while the in-memory final stdout response and stderr error are limited to their last 64 KiB.
+541: 
+542: Intentionally unsupported: native Pi child options such as model override, structured output, acceptance/agent contract, tool budgets, fast mode, fork context, skills, or native Pi tools unless the runner explicitly implements them. Foreground/clarify, steer/resume/interrupt-as-pause, and nested subagents are also unsupported.
+543: 
+544: ## Session sharing
+545: 
+546: Pass `share: true` to export a full session to HTML, upload it to a secret GitHub Gist through your `gh` credentials, and return a `https://shittycodingagent.ai/session/?<gistId>` URL.
+547: 
+548: ```js workflow
+549: return runs.run("main", { agent: "scout", task: "..." });
+550: ```
+551: 
+552: ```js
+553: subagent({ workflow: true, options: { share: true } });
+554: ```
+555: 
+556: This is disabled by default. Session data may contain source code, paths, environment variables, credentials, or other sensitive output. You need `gh` installed and authenticated.
+557: 
+558: ### Reviewed worktree cleanup
+
+
+===== docs/configuration.md relevant excerpts =====
+Path: docs/configuration.md
+SHA-256: 5f1460b0b3703fad71426cdfb01b7272e7fc90e5100ba329ed7d2132559831a6
+1: # Configuration
+2: 
+3: `pi-subagents` reads optional JSON config from `~/.pi/agent/extensions/subagent/config.json`. This page lists every key, plus the environment variables and the settings-file keys that affect config resolution.
+4: 
+5: Settings-level keys (`subagents.defaultModel`, `defaultProvider`, `defaultThinking`, `defaultExtensions`, `defaultSubagentOnlyExtensions`, `agentOverrides`, `machines`, `agentScanDirs`, `agentExcludeDirs`, `modelScope`, `disableThinking`, `disableBuiltins`, watchdog settings) live in Pi settings files, not this config file. `modelScope.agents.<name>` adds per-agent restrictions, `allow: ["inherit"]` permits the current parent model, and `allow: ["scoped"]` permits the parent session's scoped models (the parent model when the session is unscoped). See [models.md](models.md), [agents.md](agents.md), and [watchdog.md](watchdog.md).
+6: 
+7: ## Project root resolution (settings)
+8: 
+9: By default, project settings resolve from the nearest parent directory that contains `.pi` or `.agents`, preserving existing nested-project behavior. Discovery stops at the user home directory, including when the home is reached through a filesystem alias such as a symlink or Windows junction, so home-level `.pi` and `.agents` remain user configuration rather than project configuration. In monorepos or git worktrees where an incidental nested `.pi` directory should not shadow the repository-level config, set this in the repository root `.pi/settings.json`:
+10: 
+11: ```json
+12: {
+15:   }
+16: }
+17: ```
+18: 
+19: `"git-root"` keeps package discovery, project agents, chains, and `agentOverrides` anchored to the git worktree root when that root also has Pi project config. A nested project can still opt back into nearest-root behavior by setting `"projectRootResolution": "nearest"` in its own `.pi/settings.json`.
+20: 
+21: ## Extra agent scan directories (settings)
+22: 
+23: Add recursive user or project agent roots with `subagents.agentScanDirs` in Pi settings:
+24: 
+25: ```json
+26: {
+141: | `tool-budgets` | `toolBudget` | |
+142: | `control-overrides` | `control` | |
+143: | `extension-bindings` | `extensionBindings` | |
+144: | `external-machines` | `machine` | |
+145: | `workflow-scripts` | `workflow`, `args`, `preflight`, `globalConcurrencyLimit`, `maxSubagentSpawnsPerRun` | `validate` |
+146: 
+147: Disabling a per-call option removes only the per-call override. Configured defaults such as `toolBudget`, `usageBudget`, and `control` in this file still apply, the watchdog still follows its own settings, missions still attach automatically when [`missions`](#missions) enables them, and agents with a `machine` in their definition still run there. Operator screens that do not go through the `subagent` executor, such as `/subagents-admin`, are unchanged. With every feature and [`scheduledRuns.enabled`](#scheduledruns) disabled, the default `subagent` tool declaration (name, description, and parameter schema as JSON) shrinks from 18,239 to 10,263 characters (80 to 41 parameters). Restart Pi after changing this setting. The smaller declaration applies to new sessions; a resumed session keeps the tool declaration it already sent, so its prompt cache stays valid. Disabled options and actions are still rejected in every session.
+148: 
+149: ### Chain and tasks without workflow scripts
+150: 
+151: `workflow-scripts` removes workflow scripts and named workflow resources from every entry point. The model can no longer write a script, and a script that still arrives from RPC `spawn` (`script` or `workflow`), `/prompt-workflow`, a saved schedule, or a delegated launch fails with an error that names the setting. Schedule inspection, pause, and delete still work, but `schedule.create` cannot succeed because it needs a script. `/run` still works: it launches its one child directly. The built-in tool description and prompt snippet drop the script guidance and describe two small inputs instead:
+152: 
+212:   "subagents": { "disableBuiltins": true }
+213: }
+214: ```
+215: 
+216: A `!` entry such as `"!review-loop.md"` drops one file, and `[]` drops all of that type. `subagents.agentOverrides.<name>.disabled: true` turns off one built-in agent instead of all of them ([agents.md](agents.md)). `pi config` toggles the package's prompts and skills interactively.
+217: 
+218: ## `foregroundDetachShortcut`
+219: 
+220: ```json
+221: { "foregroundDetachShortcut": "ctrl+b" }
+222: ```
+223: 
+463: Global default for the async single-agent `checkpointBeforeDeadlineMs` launch option. When an async single-agent run has a run-level deadline, the runner issues a best-effort "checkpoint and stop" steer to the child this many milliseconds before that deadline: finish the current tool call, report changed files, build/test state, remaining work, and commit/PR state, and start no new work. The steer uses the normal steering lifecycle at the child's next tool boundary, so its receipt (requested, routed, delivered) is visible in run status and events, and the ordinary `timeoutMs` kill still applies if the child does not stop.
+464: 
+465: An explicit `subagent` call value wins over this default. Choose a value at least as long as the child's longest expected tool call; a steer cannot land inside one. When the deadline leaves less than one second of run time before the checkpoint, the checkpoint is disarmed and the run behaves as if the option were absent. The global config value must be a positive integer no greater than `2147483647`; invalid values fail config loading rather than silently disabling the checkpoint.
+466: 
+467: ## `globalConcurrencyLimit`
+468: 
+469: ```json
+470: { "globalConcurrencyLimit": 20 }
+471: ```
+472: 
+473: Caps simultaneously running children inside one run, including durable legacy multi-child runs and workflow script launches through `runs.run`/`runs.all`. Queued workflow children retain their stable keys and begin when a running sibling releases capacity. The default is `20`.
+474: 
+475: Inline or file-backed top-level workflow calls may set a positive safe-integer `globalConcurrencyLimit` to override this value for that workflow. The override is workflow-only and is not forwarded to child calls.
+476: 
+477: ## `maxSubagentSpawnsPerSession`
+478: 
+479: ```json
+480: { "maxSubagentSpawnsPerSession": 100 }
+481: ```
+482: 
+493: Caps cumulative logical child admissions in one top-level run tree. The default is `64`. `PI_SUBAGENT_MAX_SPAWNS_PER_RUN` overrides the config when it is a positive integer. Invalid, zero, or missing values fall back to the configured positive value or `64`.
+494: 
+495: Inline or file-backed top-level workflow calls may set a positive safe-integer `maxSubagentSpawnsPerRun`; it overrides the environment and config for that workflow. Inherited nested budgets remain authoritative, and the override is not forwarded to child calls.
+496: 
+497: The budget counts single launches, expanded `tasks`/`count`, static chain steps and parallel groups, actual dynamic `expand` items, appended chain steps, workflow children, and nested child calls. Static and materialized dynamic groups are admitted atomically. Retained-child resume reuses the original logical child claim. Claims are never released or refunded. This cap is independent from the session-wide cumulative spawn budget and `globalConcurrencyLimit`.
+498: 
+499: ## `maxActiveAsyncRunsPerSession`
+500: 
+501: ```json
+502: { "maxActiveAsyncRunsPerSession": 4 }
+503: ```
+504: 
+515: The default is `1200000` milliseconds (20 minutes). For a top-level run, the policy releases only a failed terminal run whose runner PID is dead and whose last activity is older than the threshold (workflow children follow the rule below). A live or unknown PID, a top-level run in a non-failed terminal state, a recent run, or missing activity timestamp retains the slot. Set the value to `false` to keep strict retention. Valid configured durations range from 5 minutes through 24 hours. Policy release is reported as `abandoned-timeout` with `processProof: unknown`; it is not observed process-terminal proof and may reclaim capacity while an orphan child still exists.
+516: 
+517: A terminal workflow whose controller is gone uses the same policy when async children lack proof: the workflow must have ended longer ago than the threshold, and every async child without proof must be a terminal run (failed, stopped, complete, partial or rejected, but not paused) with a dead runner PID in this PID namespace and old activity. A stopped or completed child counts too, because a child whose launching Pi process is gone never gets observed proof however it ended. Any other child without proof keeps the slot. The release event lists those children and their states under `abandonedChildren`.
+518: 
+519: This limit bounds current top-level async load. It is separate from cumulative `maxSubagentSpawnsPerSession`, `maxSubagentSpawnsPerRun`, and `globalConcurrencyLimit`.
+520: 
+521: `subagent({ action: "status" })`, fleet status, and `subagent({ action: "doctor" })` expose used, effective limit, and remaining active capacity. Static chains and parallel calls fail before creating run artifacts or starting partial work when their declared capacity cannot fit. Later retries or unbounded dynamic work are not guaranteed by that preflight.
+522: 
+523: ## `scheduledRuns`
+524: 
+525: ```json
+526: { "scheduledRuns": { "enabled": false, "maxPending": 20 } }
+564: ```
+565: 
+566: Routes relative `output` paths for single-agent `/run` calls under this directory. Absolute per-call or agent output paths are still used as-is. When unset, relative single-run outputs go under the run's output artifact directory instead of the project root.
+567: 
+568: ## `maxSubagentDepth`
+569: 
+570: ```json
+571: { "maxSubagentDepth": 1 }
+572: ```
+573: 
+574: Controls nested delegation when no stricter limit is inherited from the launching child's runtime config. The default is 2 when neither the runtime limit, `PI_SUBAGENT_MAX_DEPTH`, nor this setting supplies a limit. Per-agent `maxSubagentDepth` can tighten the limit for that agent's child runs, but cannot relax an inherited stricter limit. This applies even to children that explicitly declare `tools: subagent` or `allowNestedSubagents: true`; at the cap, execution fanout is blocked instead of silently hiding nested work.
+575: 
+576: ## `PI_SUBAGENT_PI_BINARY`
+577: 
+578: ```bash
+579: export PI_SUBAGENT_PI_BINARY=/path/to/pi-or-wrapper
+580: ```
+581:
+
+
+===== Collector summary =====
+Required files missing: none
+Known event names present in collected source/docs: prompt-template:subagent:request, prompt-template:subagent:started, prompt-template:subagent:update, prompt-template:subagent:response, prompt-template:subagent:cancel
+This is evidence collection only; it does not assert that Compass is compatible with this contract.
+Collection status: COMPLETE — review the declarations and event/payload excerpts before live execution.
+

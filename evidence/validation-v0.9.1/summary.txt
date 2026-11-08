@@ -1,0 +1,21 @@
+Pi Compass V2 v0.9.1 build validation
+Date: 2026-10-31
+Environment: Node v22.16.0, npm 10.9.2; no Pi package/CLI installed in this build container.
+
+PASS  npm ci --ignore-scripts --omit=peer --offline --no-audit --no-fund
+      node_modules/typebox absent after install
+PASS  npm run test:core                         89/89
+PASS  npm run test:non-extension                127/127
+BLOCK npm test                                  127 pass; extension.test.mjs cannot import host TypeBox because Pi is not installed here
+PASS  static preflight                          package/API/cursor/peer declaration/no local TypeBox/target separation
+PASS  pi-subagents 0.84.0 collected report       37/37 checks
+PASS  syntax                                     changed TS/JS/shell files
+PASS  TypeBox resolver plumbing fixture         host path remapping only; not a TypeBox or Pi runtime test
+NOT RUN real Pi/provider live acceptance        requires user's Pi 1.4.0 and configured provider
+
+User-supplied v0.9.0 evidence (separate, historical):
+- Pi 1.4.0; Node 22.22.1; npm 10.9.4
+- core 89/89; full tests 187/187; static preflight PASS
+- installed pi-subagents 0.84.0 vs old v0.9.0 pin 0.83.1
+- delegation contract check 35/36; only exact version pin failed
+- live Pi process was not started

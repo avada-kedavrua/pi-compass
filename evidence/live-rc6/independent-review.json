@@ -1,0 +1,39 @@
+{
+  "analysis": "historical RC6 evidence reconciliation; not a new live execution",
+  "sourceArchive": "pi-compass-live-evidence-20261029T042954Z.tar.gz",
+  "sourceRelease": "0.8.0-rc.6",
+  "originalReportStatus": "FAIL",
+  "originalFailedCheck": "each child reports observed tool activity and a supported model",
+  "failureRootCause": "effective model reported as cliproxyapi/gpt-6-luna:high, but previous checker required unsuffixed literal",
+  "correctedModelMatch": "PASS for all 3 genuine child metric rows",
+  "originalPassingChecks": 11,
+  "correctedEvaluableChecks": 12,
+  "totalChecks": 12,
+  "piVersion": "1.4.0",
+  "piSubagentsVersion": "0.83.1",
+  "fullTestsUserEnvironment": "177/177 PASS (RC6)",
+  "firstWave": {
+    "taskIds": [
+      "probe_a",
+      "probe_b"
+    ],
+    "wallDurationMs": 37756,
+    "sumDurationMs": 62835,
+    "estimatedParallelSavingsMs": 25079
+  },
+  "secondWave": {
+    "taskIds": [
+      "probe_c"
+    ],
+    "status": "completed"
+  },
+  "reportedTotalCost": 0.00117348,
+  "fallbackCount": 0,
+  "codeParentDispatched": false,
+  "limitations": [
+    "final 0.8.0 bytes not re-executed on the user Pi runtime",
+    "natural provider quota exhaustion not provoked",
+    "semantic deviation is not universally observable",
+    "cost savings compared with parent-only counterfactual not proven"
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "pi-compass-v2",
+  "version": "0.9.1",
+  "sourceBaseline": "0.8.0",
+  "goalRunSchemaVersion": 7,
+  "minimumPiVersion": "1.4.0",
+  "testedPiRuntime": "Pi 1.4.0; v0.9.1 live runtime pending user-side acceptance",
+  "piSubagentsPinned": "0.84.0",
+  "askUserQuestionSourceVersion": "2.15.0",
+  "liveEvidence": "No v0.9.1 live run yet; v0.9.0 user evidence showed all local tests pass but blocked before Pi start by pi-subagents version pin and configuration drift",
+  "releaseCaveats": [
+    "v0.9.1 exact bytes still require live Pi acceptance",
+    "natural provider fallback not exercised",
+    "parent-only cost baseline unavailable"
+  ],
+  "localValidation": {
+    "npmCiOmitPeer": "PASS; no package-local node_modules/typebox installed",
+    "coreTests": "89/89 PASS",
+    "nonExtensionTests": "127/127 PASS",
+    "fullTests": "127 pass; extension.test.mjs blocked at import because this build environment has no Pi host TypeBox package",
+    "staticPreflight": "PASS; package, GoalRun cursor/API, host peer declaration, no local TypeBox copy and target separation",
+    "subagentsContract": "37/37 PASS against supplied pi-subagents@0.84.0 report; no live dispatch",
+    "syntax": "Changed TypeScript, JavaScript and shell files pass syntax checks",
+    "hostTypeboxResolver": "Resolver mechanics smoke passed against a temporary module fixture; not a TypeBox/runtime test",
+    "livePi": "NOT RUN; exact v0.9.1 live acceptance remains a user-side requirement"
+  },
+  "inheritedLiveEvidence": {
+    "pi": "1.4.0",
+    "piSubagents": "0.83.1",
+    "childCalls": 3,
+    "dagWaves": 2,
+    "scope": "v0.8.0 RC6 predecessor only; not v0.9.1 evidence"
+  }
+}

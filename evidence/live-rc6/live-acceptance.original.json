@@ -1,0 +1,199 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-29T04:31:05.247Z",
+  "compassRelease": "0.8.0-rc.6",
+  "schedulerTrigger": "shared-post-tool-result-handler",
+  "explicitCompassExecutionCalls": 0,
+  "cwd": "/tmp/pi-compass-v0.8.0-rc6",
+  "package": {
+    "name": "pi-compass-v2",
+    "version": "0.8.0-rc.6"
+  },
+  "result": "FAIL",
+  "durationMs": 56097,
+  "checks": [
+    {
+      "name": "probe bridge accepted the structured request contract",
+      "pass": true
+    },
+    {
+      "name": "shared post-tool-result scheduler dispatches without compass_execution",
+      "pass": true
+    },
+    {
+      "name": "two independent tasks share first parallel wave",
+      "pass": true
+    },
+    {
+      "name": "dependent task starts in a later wave",
+      "pass": true
+    },
+    {
+      "name": "child A evidence matches a real safe directory entry",
+      "pass": true
+    },
+    {
+      "name": "child B evidence confirms actual package metadata",
+      "pass": true
+    },
+    {
+      "name": "child C evidence confirms README heading after dependencies",
+      "pass": true
+    },
+    {
+      "name": "Code Mode task remains undispatched",
+      "pass": true
+    },
+    {
+      "name": "parent task remains undispatched",
+      "pass": true
+    },
+    {
+      "name": "all three real Subagent tasks completed with evidence",
+      "pass": true
+    },
+    {
+      "name": "each child reports observed tool activity and a supported model",
+      "pass": false
+    },
+    {
+      "name": "usage and cost fields preserve known/unknown values",
+      "pass": true
+    }
+  ],
+  "waves": [
+    {
+      "requestId": "b0eedeb5-2e38-4e09-a7b1-a14d7d672f67",
+      "taskIds": [
+        "probe_a",
+        "probe_b"
+      ],
+      "status": "completed",
+      "wallDurationMs": 37756,
+      "sumDurationMs": 62835,
+      "estimatedParallelSavingsMs": 25079,
+      "totalCost": 0.0009527399999999999,
+      "fallbackCount": 0,
+      "metricsComplete": true,
+      "policyMode": "parallel_cold_start",
+      "policyReason": "No three-wave comparable history exists. Each child has an explicit separate-context justification; run independent read-only tasks together because serializing the same planned child work does not inherently reduce its token cost, and measure actual cost/latency for future waves."
+    },
+    {
+      "requestId": "0247d404-b646-47c9-b82c-d23b768b6596",
+      "taskIds": [
+        "probe_c"
+      ],
+      "status": "completed",
+      "wallDurationMs": 18336,
+      "sumDurationMs": 18327,
+      "estimatedParallelSavingsMs": -9,
+      "totalCost": 0.00022074,
+      "fallbackCount": 0,
+      "metricsComplete": true,
+      "policyMode": "single",
+      "policyReason": "Only one eligible independent read-only Subagent task is ready."
+    }
+  ],
+  "taskMetrics": [
+    {
+      "id": "probe_a",
+      "model": "cliproxyapi/gpt-6-luna:high",
+      "fallbackAttempted": false,
+      "fallbackReason": null,
+      "providerErrorCount": null,
+      "providerLastErrorKind": null,
+      "providerRetryPhase": null,
+      "cost": 0.00042731999999999997,
+      "primaryCost": null,
+      "durationMs": 25121,
+      "input": 3271,
+      "output": 139,
+      "toolCalls": 2,
+      "observedToolCount": 2,
+      "observedTools": [
+        "ls",
+        "structured_output"
+      ],
+      "metricsComplete": true,
+      "runId": "6f8d272b-67e0-4ec0-a816-daf09d0bfddb"
+    },
+    {
+      "id": "probe_b",
+      "model": "cliproxyapi/gpt-6-luna:high",
+      "fallbackAttempted": false,
+      "fallbackReason": null,
+      "providerErrorCount": 1,
+      "providerLastErrorKind": "transient_other",
+      "providerRetryPhase": null,
+      "cost": 0.00052542,
+      "primaryCost": null,
+      "durationMs": 37714,
+      "input": 3547,
+      "output": 216,
+      "toolCalls": 3,
+      "observedToolCount": 3,
+      "observedTools": [
+        "find",
+        "read",
+        "structured_output"
+      ],
+      "metricsComplete": true,
+      "runId": "8707742d-b37a-4062-90ea-c91c785c9202"
+    },
+    {
+      "id": "probe_c",
+      "model": "cliproxyapi/gpt-6-luna:high",
+      "fallbackAttempted": false,
+      "fallbackReason": null,
+      "providerErrorCount": null,
+      "providerLastErrorKind": null,
+      "providerRetryPhase": null,
+      "cost": 0.00022074,
+      "primaryCost": null,
+      "durationMs": 18327,
+      "input": 912,
+      "output": 149,
+      "toolCalls": 2,
+      "observedToolCount": 2,
+      "observedTools": [
+        "read",
+        "structured_output"
+      ],
+      "metricsComplete": true,
+      "runId": "7bfbdd48-732c-4f5c-8c01-8610957898cb"
+    }
+  ],
+  "taskResults": [
+    {
+      "id": "probe_a",
+      "status": "done",
+      "evidence": "Inspected the top-level directory and found visible entries.\nEvidence: Top-level `ls` output includes the exact visible entry `AGENTS.md`.\nEvidence: Top-level `ls` output also includes `src/` and `tests/`.",
+      "reason": ""
+    },
+    {
+      "id": "probe_b",
+      "status": "done",
+      "evidence": "package.json reports the required package name and version.\nEvidence: `/tmp/pi-compass-v0.8.0-rc6/package.json` lines 2-3 contain `\"name\": \"pi-compass-v2\"` and `\"version\": \"0.8.0-rc.6\"`.",
+      "reason": ""
+    },
+    {
+      "id": "probe_c",
+      "status": "done",
+      "evidence": "README first heading is exactly: Pi Compass V2 — 0.8.0-rc.6\nEvidence: README.md:1 contains `# Pi Compass V2 — 0.8.0-rc.6`.",
+      "reason": ""
+    },
+    {
+      "id": "probe_code",
+      "status": "pending",
+      "evidence": "",
+      "reason": ""
+    },
+    {
+      "id": "probe_parent",
+      "status": "pending",
+      "evidence": "",
+      "reason": ""
+    }
+  ],
+  "note": "Contains only bounded smoke-test output, model usage metrics, and safe filenames/evidence; no settings or credentials are included."
+}

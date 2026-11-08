@@ -1,0 +1,133 @@
+已经完成 **Pi Compass V2 v0.4.0**。这次是根据 DeepSeekHarness、Prove2Me、你的 Messages 设计，以及三份真实执行轨迹中的重复调用和状态问题做的针对性改版，不是继续堆叠功能。
+
+[下载 pi-compass-v2-v0.4.0.zip](sandbox:/mnt/data/pi-compass-v2-v0.4.0.zip)
+
+## 1. 从根因到改动
+
+这次最重要的发现，是 Compass 不仅存在模型没有主动调用工具的问题，工具本身也制造了大量不必要的成本。
+
+例如，PPTX 的 GPT-6 Luna Session 中，193 次顶层 `codemode` 调用包含约 876 次 Compass 工具调用表达式；Triage 被调用 77 次，其中 13 次因输入过长而失败。相同的多项状态查询脚本也被反复执行。
+
+更严重的是，v0.3.1 的状态修改结果在已有持久化记录的情况下，仍然把完整 GoalRun 放进每次工具结果的 `details.state`。实际日志中，单次任务创建或状态更新的这部分数据就达到约 10–11 KB。
+
+v0.4.0 针对这些问题做了以下修改。
+
+<box border radius="lg" padding={3} gap={3}>
+  <row align=start gap={3}>
+    <box background="surface-secondary" radius="md" size="10" align=center justify=center>
+      <icon name="database" size="lg"/>
+    </box>
+    <box flex="1" gap={1}>
+      **统一的紧凑状态读取：`compass_state`**
+
+      Goal 捕获后自动可用，不需要先调用 `compass_open`。
+
+      一次读取即可获得当前 Goal、DAG 进度、Ready Tasks、验收状态，以及 `codemode`、Subagent、`ask-user-questions` 的注册和激活状态。
+
+      后续可以使用返回的事件游标增量读取，不必反复查询 Goal、Plan、Acceptance 和 History。
+    </box>
+  </row>
+  <divider color="subtle"/>
+  <row align=start gap={3}>
+    <box background="surface-secondary" radius="md" size="10" align=center justify=center>
+      <icon name="history" size="lg"/>
+    </box>
+    <box flex="1" gap={1}>
+      **Messages 与事件历史更可靠**
+
+      状态快照返回 `cursor`，后续通过 `afterEventId` 读取新增事件。
+
+      如果历史已经超出保留范围，会明确返回 `historyGap`；如果传入了未来游标，会返回 `cursorAhead`。不会把不完整的历史伪装成完整历史。
+
+      Goal Anchor 也改为优先保留 Goal、Human 指令、验收状态和计划，而不是截断末尾时意外丢掉最重要的执行信息。
+    </box>
+  </row>
+  <divider color="subtle"/>
+  <row align=start gap={3}>
+    <box background="surface-secondary" radius="md" size="10" align=center justify=center>
+      <icon name="search-check" size="lg"/>
+    </box>
+    <box flex="1" gap={1}>
+      **Triage 改为引用证据，而不是复制日志**
+
+      `compass_triage` 现在接受简短的 `issue` 和/或最多 8 个事件 ID。
+
+      - 单次问题描述最多 240 字符。
+      - 未知、过期、属于旧 Goal 的事件引用会被明确拒绝。
+      - 相同问题在相关状态未变化时，会返回紧凑的重复诊断结果。
+      - 新失败、新计划状态或新验收证据出现后，允许重新分析。
+
+      这样可以减少复制历史、重复诊断和无效输入调用。
+    </box>
+  </row>
+  <divider color="subtle"/>
+  <row align=start gap={3}>
+    <box background="surface-secondary" radius="md" size="10" align=center justify=center>
+      <icon name="package-check" size="lg"/>
+    </box>
+    <box flex="1" gap={1}>
+      **不再重复保存完整状态到工具结果**
+
+      当 Pi 的 `appendEntry` 成功保存 GoalRun 时，状态修改结果只返回必要的操作结果和元数据，不再额外携带整份 GoalRun。
+
+      如果自定义状态记录不可用，仍保留 `details.state` 作为兼容性回退。
+
+      同时，preflight 增加了真实扩展入口的模块导入检查，降低再次出现模块版本不匹配、函数导入失败的风险。
+    </box>
+  </row>
+</box>
+
+## 2. 哪些最初的思想仍然保留？
+
+这版没有偏离原来的架构方向。
+
+- **DeepSeekHarness：** 继续复用 Pi 原生 `codemode` 和 Subagent，减少模型的机械操作；不自建第二套调度器。
+- **Prove2Me：** 任务完成、Agent 报告通过、真实验收通过仍然是不同状态。
+- **Messages：** 保留 Goal 版本、Human 指令和事件来源；通过紧凑投影与增量读取减少重复上下文。
+- **Agent-first：** 工具 Schema、结果和异常路径围绕 Agent 的执行成本设计，不为了人类仪表盘增加额外结构。
+
+这次没有加入自动 Fork 管理器、强制 DAG、自动回滚或通用验证器。我们还没有足够证据证明这些机制值得承担额外复杂度。
+
+## 3. 验证情况
+
+当前结果如下：
+
+| 检查 | 结果 |
+|---|---|
+| 完整测试套件（临时 TypeBox 替身） | 73 项通过 |
+| 不依赖 TypeBox 的核心测试 | 49 项通过 |
+| TypeScript / JavaScript 语法检查 | 通过 |
+| ZIP 完整性 | 通过 |
+| 真实 TypeBox 依赖 | 未能下载 |
+| Pi 1.3.0 实际运行时 | 尚未验证 |
+
+必须明确：当前环境访问 npm registry 时遇到 DNS 错误，因此完整测试中的扩展部分使用了临时 TypeBox API 替身。这个替身没有包含在 ZIP 中。**73 项通过不能等同于真实 Pi 1.3.0 运行时验收通过。**
+
+## 4. 安装与实测
+
+先完整备份并替换原 V2 安装目录，不要只覆盖部分文件，也不要合并到 V1。
+
+在 Compass 目录执行：
+
+```bash
+npm install
+npm test
+node scripts/preflight.mjs /path/to/target-project --require-compass
+```
+
+然后在 Pi 中执行：
+
+```text
+/reload
+/compass-preflight
+```
+
+如果扩展入口导入、GoalRun 模块契约或动态工具注册检查失败，先停止实验。
+
+接下来使用一个全新的 Session 完成真实 Goal。重点观察三个结果：
+
+1. `compass_state` 是否确实替代了多次重复状态读取。
+2. Triage 是否能够引用事件并避免重复诊断，而不是让 Agent 反复复制日志。
+3. Goal、Human 指令和计划是否在 Compaction 及路线变更后保持一致。
+
+**v0.4.0 的目标不是让 Agent 更频繁地调用 Compass，而是让它用更少的调用获得正确的状态和证据。** 这次我们已经针对日志中可直接确认的浪费做了修改；至于整体是否更快、更省，仍然需要下一轮真实执行数据来证明。

@@ -1,0 +1,211 @@
+{
+  "packages": [
+    "npm:pi-subagents@0.84.0"
+  ],
+  "subagents": {
+    "defaultProvider": "cliproxyapi",
+    "defaultModel": "cliproxyapi/gpt-6-luna",
+    "defaultThinking": "high",
+    "maxThinking": "xhigh",
+    "defaultExtensions": [
+      "/home/avada/.pi/agent/npm/node_modules/@router-for-me/pi-cliproxyapi-provider/extensions/index.ts"
+    ],
+    "agentOverrides": {
+      "scout": {
+        "description": "FAST read-only local reconnaissance: identify entry points, data flow, relevant files and concrete evidence. Do not implement or perform a deep review.",
+        "model": "cliproxyapi/gpt-6-luna",
+        "thinking": "high",
+        "inheritSkills": false,
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls"
+        ]
+      },
+      "researcher": {
+        "description": "External/current evidence research through the local pi-searxng stack. Prefer primary sources and stop when decision-relevant evidence is sufficient.",
+        "model": "cliproxyapi/gpt-6-luna",
+        "thinking": "high",
+        "tools": [
+          "web_search",
+          "web_fetch"
+        ],
+        "subagentOnlyExtensions": [
+          "/home/avada/workspace/gitcode/agent-organon/pi-searxng/extensions/searxng.js"
+        ],
+        "inheritProjectContext": false,
+        "inheritGlobalContext": false,
+        "inheritSkills": false,
+        "defaultContext": "fresh",
+        "systemPromptMode": "replace",
+        "systemPrompt": "Research external or current facts using only web_search and web_fetch. Prefer canonical, official or primary sources when accuracy matters. Search to identify authoritative candidates, then fetch only sources needed to verify material claims. Return a concise evidence brief with source URLs and dates where relevant. Clearly separate Evidence, Inference and Unknowns. Do not assume facts that were not verified. Stop when evidence is sufficient for the parent to decide."
+      },
+      "evidence-auditor": {
+        "description": "Independent verification tier for material external claims. Audit decisive evidence rather than repeating the original research.",
+        "model": "cliproxyapi/gpt-6.1-sol",
+        "thinking": "high",
+        "tools": [
+          "web_search",
+          "web_fetch"
+        ],
+        "subagentOnlyExtensions": [
+          "/home/avada/workspace/gitcode/agent-organon/pi-searxng/extensions/searxng.js"
+        ],
+        "inheritProjectContext": false,
+        "inheritGlobalContext": false,
+        "inheritSkills": false,
+        "defaultContext": "fresh",
+        "systemPromptMode": "replace",
+        "systemPrompt": "Independently audit the material claims in the supplied brief using only web_search and web_fetch. Do not trust supplied citations or conclusions without checking them. Verify decision-changing claims against primary or canonical sources where possible. Label each important claim Supported, Contradicted or Uncertain and provide a supporting URL. Distinguish source evidence from inference. Do not broaden the investigation beyond what is needed."
+      },
+      "delegate": {
+        "description": "Bounded read-only delegate for routine analysis, test-output inspection, and documentation checks that justify a separate context. Do not implement or mutate files.",
+        "model": "cliproxyapi/gpt-6-luna",
+        "thinking": "high",
+        "inheritSkills": false,
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls"
+        ]
+      },
+      "worker": {
+        "description": "Implementation tier for one bounded change. Implement, validate and escalate unresolved design decisions instead of guessing.",
+        "model": "cliproxyapi/gpt-6-luna",
+        "thinking": "high",
+        "inheritSkills": true
+      },
+      "reviewer": {
+        "description": "Independent review of correctness, regressions, tests, edge cases, maintainability, security and data integrity. Review evidence, not intent.",
+        "model": "cliproxyapi/gpt-6.1-sol",
+        "thinking": "high",
+        "inheritSkills": false,
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls"
+        ]
+      },
+      "oracle": {
+        "description": "Rare read-only escalation for difficult architecture, root-cause, trajectory or decision-consistency questions.",
+        "model": "cliproxyapi/gpt-6.1-sol",
+        "thinking": "high",
+        "inheritSkills": false,
+        "tools": [
+          "read",
+          "grep",
+          "find",
+          "ls"
+        ]
+      },
+      "advisor": {
+        "disabled": true
+      },
+      "developer": {
+        "model": "cliproxyapi/gpt-6-luna",
+        "thinking": "high"
+      },
+      "coder": {
+        "model": "cliproxyapi/gpt-6-luna",
+        "thinking": "high"
+      },
+      "implementer": {
+        "model": "cliproxyapi/gpt-6-luna",
+        "thinking": "high"
+      },
+      "develop": {
+        "model": "cliproxyapi/gpt-6-luna",
+        "thinking": "high"
+      },
+      "explore": {
+        "disabled": true
+      }
+    },
+    "modelScope": {
+      "enforce": true,
+      "strict": true,
+      "allow": [
+        "cliproxyapi/gpt-5.6-luna",
+        "cliproxyapi/gpt-5.6-sol",
+        "cliproxyapi/gpt-5.6-terra",
+        "cliproxyapi/gpt-6-astra",
+        "cliproxyapi/gpt-6-luna",
+        "cliproxyapi/gpt-6-sol",
+        "cliproxyapi/gpt-6.1-sol",
+        "cliproxyapi/gpt-6.1-terra",
+        "jrt/deepseek-v4.1-flash"
+      ],
+      "agents": {
+        "scout": {
+          "allow": [
+            "cliproxyapi/gpt-6-luna",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        },
+        "researcher": {
+          "allow": [
+            "cliproxyapi/gpt-6-luna",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        },
+        "delegate": {
+          "allow": [
+            "cliproxyapi/gpt-6-luna",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        },
+        "worker": {
+          "allow": [
+            "cliproxyapi/gpt-6-luna",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        },
+        "reviewer": {
+          "allow": [
+            "cliproxyapi/gpt-6.1-sol",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        },
+        "evidence-auditor": {
+          "allow": [
+            "cliproxyapi/gpt-6.1-sol",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        },
+        "oracle": {
+          "allow": [
+            "cliproxyapi/gpt-6.1-sol",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        },
+        "developer": {
+          "allow": [
+            "cliproxyapi/gpt-6-luna",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        },
+        "coder": {
+          "allow": [
+            "cliproxyapi/gpt-6-luna",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        },
+        "implementer": {
+          "allow": [
+            "cliproxyapi/gpt-6-luna",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        },
+        "develop": {
+          "allow": [
+            "cliproxyapi/gpt-6-luna",
+            "jrt/deepseek-v4.1-flash"
+          ]
+        }
+      }
+    }
+  }
+}

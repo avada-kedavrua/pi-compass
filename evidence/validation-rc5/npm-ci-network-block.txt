@@ -1,0 +1,5 @@
+Command: npm ci --ignore-scripts --fetch-retries=0 --fetch-timeout=20000
+Result: failed before dependency install due environment DNS/network restriction.
+Error: EAI_AGAIN registry.npmjs.org (request for typebox-1.4.3.tgz)
+Impact: node_modules/typebox was unavailable, so tests/extension.test.mjs could not load under npm test.
+No successful full-suite result is claimed. Re-run npm ci in the user's Pi development environment.
