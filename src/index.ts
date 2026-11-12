@@ -6,7 +6,7 @@ import { questionnaireFailureResultPatch } from "./questionnaire-integration.mjs
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveLiveAcceptanceFixture } from "./live-acceptance-root.mjs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   DELEGATION_EVENTS,
   FALLBACK_MODEL,
@@ -36,9 +36,7 @@ import {
   goalOutcomeStatus,
   planningActivationSignal,
   stripConventionSections,
-  buildGoalAnchor,
   buildGoalDetails,
-  buildIssueReview,
   buildRecentEvents,
   buildStateSnapshot,
   GOAL_RUN_API_VERSION,
@@ -51,7 +49,6 @@ import {
   captureHumanDecision,
   emptyGoalRunState,
   explicitGoalChangeUpdates,
-  hasUsefulTrace,
   mergeTrace,
   normalizeGoalRunState,
   recordCheckpoint,
@@ -112,65 +109,14 @@ function activeNames(pi: any): string[] {
   return [];
 }
 function nativeToolSetSignature(pi: any): string {
-  const preferences = reconcileNativeToolPreferences(pi);
   let registered: string[] | null = null;
   try { if (typeof pi.getAllTools === "function") registered = namesFrom(pi.getAllTools()).filter((name) => !isCompassName(name)).sort(); }
   catch { registered = null; }
-  const active = [...preferences.preferred].sort();
-  const value = JSON.stringify({ registered, active });
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `${value.length}:${(hash >>> 0).toString(16)}`;
+  return createHash("sha256")
+    .update(JSON.stringify({ registered, active: activeNames(pi).filter((name) => !isCompassName(name)).sort() }))
+    .digest("hex");
 }
 
-function subagentCandidates() {
-  const tasks = Array.isArray(state?.plan?.tasks) ? state.plan.tasks : [];
-  if (tasks.length < 2) return [];
-  const byId = new Map(tasks.map((task: any) => [task.id, task]));
-  return tasks.filter((task: any) => {
-    if (task.executor !== "subagent") return false;
-    if (String(task.writeScope || "").toLowerCase() !== "read-only") return false;
-    if (task.status !== "pending") return false; // Already-running work is not an unassigned delegation candidate.
-    if (typeof task.dispatchReason !== "string" || task.dispatchReason.trim().length < 12) return false;
-    return (task.dependsOn ?? []).every((dep: string) => byId.get(dep)?.status === "done");
-  });
-}
-type NativeToolPreferences = {
-  preferred: Set<string>;
-  applied: Set<string>;
-  hiddenByCompass: Set<string>;
-};
-const nativeToolPreferencesByPi = new WeakMap<object, NativeToolPreferences>();
-
-function sameSet(left: Set<string>, right: Set<string>): boolean {
-  return left.size === right.size && [...left].every((value) => right.has(value));
-}
-function nativeNames(pi: any): string[] {
-  return activeNames(pi).filter((name) => !isCompassName(name));
-}
-function reconcileNativeToolPreferences(pi: any): NativeToolPreferences {
-  const actual = new Set(nativeNames(pi));
-  let preferences = nativeToolPreferencesByPi.get(pi);
-  if (!preferences) {
-    preferences = { preferred: new Set(actual), applied: new Set(actual), hiddenByCompass: new Set() };
-    nativeToolPreferencesByPi.set(pi, preferences);
-  } else if (!sameSet(actual, preferences.applied)) {
-    // Pi/user/another extension changed the native loadout since Compass last
-    // applied it. Adopt those changes, but preserve tools Compass itself hid.
-    const preferred = new Set(actual);
-    for (const name of preferences.hiddenByCompass) if (!actual.has(name)) preferred.add(name);
-    preferences.preferred = preferred;
-  }
-  let registered: Set<string> | null = null;
-  try {
-    if (typeof pi.getAllTools === "function") registered = new Set(namesFrom(pi.getAllTools()).filter((name) => !isCompassName(name)));
-  } catch { registered = null; }
-  if (registered) preferences.preferred = new Set([...preferences.preferred].filter((name) => registered!.has(name)));
-  return preferences;
-}
 // Explicit Human instructions are evaluated newest first. Earlier commands may be
 // superseded by a later instruction, including a later prohibition. Conventions
 // and quoted examples are not treated as runtime delegation requests.
@@ -201,49 +147,15 @@ function explicitSubagentVisibilityRequest(latestInstruction = ""): string | nul
   }
   return null;
 }
-function subagentEligibility() {
-  const candidates = subagentCandidates();
-  const explicit = explicitSubagentVisibilityRequest();
-  if (explicit === "human_prohibited_subagents") return { eligible: false, reason: explicit, candidateTaskIds: candidates.map((task: any) => task.id) };
-  if (executionUnresolved(state.plan?.execution)) {
-    return { eligible: true, reason: "unresolved_subagent_batch", candidateTaskIds: [...(state.plan.execution.taskIds ?? [])] };
-  }
-  if (candidates.length >= 2) return { eligible: true, reason: "ready_read_only_dag_tasks", candidateTaskIds: candidates.map((task: any) => task.id) };
-  if (explicit) return { eligible: true, reason: explicit, candidateTaskIds: candidates.map((task: any) => task.id) };
-  return { eligible: false, reason: null, candidateTaskIds: candidates.map((task: any) => task.id) };
-}
-function subagentVisibility(pi: any) {
-  const preferences = reconcileNativeToolPreferences(pi);
-  const registeredNames = (() => {
-    try { return typeof pi.getAllTools === "function" ? namesFrom(pi.getAllTools()) : []; }
-    catch { return []; }
-  })();
-  const registered = registeredNames.filter((name) => /subagent/i.test(name));
-  const preferred = [...preferences.preferred].filter((name) => /subagent/i.test(name));
-  const eligibility = subagentEligibility();
-  const eligible = eligibility.eligible;
-  const hiddenByCompass = !eligible ? preferred : [];
-  return {
-    registered: registered.length > 0,
-    eligible,
-    eligibilityReason: eligibility.reason,
-    candidateTaskIds: eligibility.candidateTaskIds,
-    hiddenByCompass: hiddenByCompass.length > 0,
-    hiddenNames: hiddenByCompass,
-    userEnabledNames: preferred,
-  };
-}
 function setCompassLoadout(pi: any, compassNames: string[]) {
   if (typeof pi.setActiveTools !== "function" || typeof pi.getActiveTools !== "function") {
-    throw new Error("This Pi runtime must expose both getActiveTools() and setActiveTools(); Compass requires reliable dynamic tool activation without re-enabling tools the user disabled.");
+    throw new Error("This Pi runtime must expose getActiveTools() and setActiveTools().");
   }
-  const preferences = reconcileNativeToolPreferences(pi);
-  const eligible = subagentEligibility().eligible;
-  const nativeDesired = [...preferences.preferred].filter((name) => !/subagent/i.test(name) || eligible);
-  preferences.hiddenByCompass = new Set([...preferences.preferred].filter((name) => /subagent/i.test(name) && !eligible));
-  const desired = [...new Set([...nativeDesired, ...compassNames.filter((name) => typeof name === "string" && name)])];
-  pi.setActiveTools(desired);
-  preferences.applied = new Set(nativeDesired);
+  // Native extensions own their activation policy. Compass changes only its own tools.
+  const native = activeNames(pi).filter((name) => !isCompassName(name));
+  const desired = [...new Set([...native, ...compassNames.filter(Boolean)])];
+  const current = activeNames(pi);
+  if (current.length !== desired.length || current.some((name, index) => name !== desired[index])) pi.setActiveTools(desired);
 }
 
 function getContext(rest: any[]): any {
@@ -318,7 +230,7 @@ function persistState(pi: any, value = state) {
 function persistTrace(pi: any, item: any) {
   try { pi.appendEntry?.(`${STATE_ENTRY_TYPE}.trace`, clone(item)); } catch { /* trace is best-effort */ }
 }
-function stateResult(text: string, details: Record<string, any> = {}) {
+function stateResult(text: string, details: Record<string, unknown> = {}) {
   // Do not duplicate the full GoalRun snapshot into every tool-result JSONL entry
   // when Pi's custom-entry persistence succeeded. Keep it only as a compatibility
   // fallback for runtimes that cannot persist extension entries.
@@ -329,7 +241,7 @@ function stateResult(text: string, details: Record<string, any> = {}) {
     details: { ...fallback, ...details, cursor, stateRevision: state.stateRevision ?? 0 },
   };
 }
-function readResult(text: string, details: Record<string, any> = {}) {
+function readResult(text: string, details: Record<string, unknown> = {}) {
   return { content: [{ type: "text", text }], details };
 }
 function sameIds(left: any[], right: any[]): boolean {
@@ -535,8 +447,7 @@ async function executionAvailability(pi: any, cwd: string, latestInstruction = "
   const humanRequest = explicitSubagentVisibilityRequest(latestInstruction);
   if (humanRequest === "human_prohibited_subagents") return { ok: false, runtime, reason: "Human instructions prohibit Subagent execution for the current Goal; no task was dispatched." };
   if (!registered) return { ok: false, runtime, reason: "pi-subagents is not registered in this Pi session; no task was dispatched." };
-  // The model-visible native tool may be hidden by the host/session tool activation
-  // policy or by Compass's progressive-disclosure gate. Structured dispatch is a separate
+  // pi-subagents owns model-visible tool activation. Structured dispatch is a separate
   // runtime API; explicit executor intent authorizes it unless Human vetoes.
   if (!runtime?.installed) return { ok: false, runtime, reason: "The Pi event bus does not expose the structured-delegation contract; no task was dispatched." };
   const bridge = await probeDelegationBridge(pi, runtime, cwd);
@@ -1129,23 +1040,14 @@ function toolInventory(pi: any) {
       ...(registered === false ? { reason: "not registered in this Pi session" } : !visible && hiddenReason ? { reason: hiddenReason } : {}),
     };
   };
-  const hasDag = Boolean(state.plan.goal && state.plan.tasks.length);
-  const subagents = subagentVisibility(pi);
-  const subagentState = stateFor(/subagent/i, "registered but not currently active in Pi");
-  if (!subagentState.active && subagents.hiddenByCompass) {
-    subagentState.reason = "hidden by Compass until at least two ready DAG tasks explicitly marked executor=subagent and read-only exist or Human explicitly requests parallel scouting across multiple independent paths";
-  } else if (!subagentState.active && subagentState.registered === true) {
-    subagentState.reason = "registered but inactive in Pi/user toolset; Compass will not re-enable a user-disabled native tool";
-  }
   return {
     codemode: stateFor(/codemode|code.?mode/i, "registered but not currently active"),
-    subagents: {
-      ...subagentState,
-      hiddenByCompass: subagents.hiddenByCompass,
-      eligibleByCode: subagents.eligible,
-      eligibilityReason: subagents.eligibilityReason,
-      candidateTaskIds: subagents.candidateTaskIds,
-      dagReadyReadOnlyTasks: hasDag ? subagents.candidateTaskIds.length : null,
+    subagents: stateFor(/^(?:subagent|subagents)$/i, "activation is owned by Pi/pi-subagents and the user"),
+    subagentLoader: stateFor(/^subagents_enable$/i),
+    await: {
+      watch: stateFor(/^watch$/),
+      status: stateFor(/^watches$/),
+      cancel: stateFor(/^unwatch$/),
     },
     askUserQuestions: stateFor(/ask.*user.*question|ask_user_question|ask.*question/i, "registered but not currently active"),
   };
@@ -1154,12 +1056,10 @@ function toolInventory(pi: any) {
 function registerStateSnapshotTool(pi: any) {
   return registerOnce(pi, "compass_state", {
     label: "Compact Goal State",
-    description: "The injected Goal anchor already contains the current Goal/plan/acceptance summary. Call only for event deltas, cursor reconciliation, or runtime capability inventory; do not reread status already present in context. Pass cursor for deltas; omit cursor when you need a full fresh snapshot/runtime inventory. Exact cursors return a tiny unchanged result without runtime details.",
-    promptSnippet: "Use the injected Goal anchor and mutation results by default. Pass cursor only when you need changes since a previous snapshot; omit cursor for a fresh runtime inventory. Do not poll after every tool call.",
+    description: "Read compact Goal/plan/acceptance state and native capability availability when prior results are insufficient. Pass a previous cursor for deltas; omit it for a fresh snapshot. Exact cursors return a small unchanged envelope. This is not independent Goal verification.",
+    promptSnippet: "Read Goal continuity or event deltas on demand; do not poll.",
     promptGuidelines: [
-      "The injected Goal anchor and mutation results are the default current-state view. Read only for new event evidence, cursor recovery, or live capability inventory.",
-      "Use the exact returned cursor for deltas. An unchanged response adds no state evidence; wait until a meaningful change or route decision before another read.",
-      "Runtime distinguishes registered from active native tools; do not infer model visibility from Code Mode's tool list. Compass does not impose a native-tool blacklist or mandatory step sequence.",
+      "Use compass_state only when existing messages/results do not answer the current state question; pass its returned cursor for later deltas.",
     ],
     parameters: Type.Object({
       cursor: Type.Optional(Type.String({ pattern: "^R[0-9]+-E[0-9]+$", maxLength: 32, description: "Opaque cursor returned by compass_state, e.g. R213-E166." })),
@@ -1213,7 +1113,7 @@ function ensureLoader(pi: any): string {
       "This schema contains only currently applicable, not-yet-loaded groups. It changes with Goal structure and recorded evidence; do not search for hidden groups or retry stale names.",
       "Load missing capability groups in one batch when their operations or details will help the next step; loaded groups are additive.",
       "Loaded groups no longer appear in this schema. If any requested group is unavailable, the atomic request loads none.",
-      "The Goal anchor is the default current-state view. Runtime validates state/dependencies; the Agent chooses tools, decomposition, and route. No DAG is created merely because planning tools are visible.",
+      "Compass mutation results carry current state; use compass_state only for missing information. Runtime validates dependencies; the Agent chooses the route. Planning visibility does not create a DAG.",
     ],
     parameters: Type.Object({
       capabilities: Type.Array(Type.String({ enum: caps, description: "Capability group currently applicable to this Goal state." }), {
@@ -1833,13 +1733,8 @@ function ensureCurrentLoadout(pi: any, ctx: any) {
   const visibleNames = activeNames(pi);
   const visibleCompassNames = visibleNames.filter((name) => isCompassName(name));
   const desiredSet = new Set(desiredCompassNames);
-  const subagentGate = subagentVisibility(pi);
-  const expectedNativeSubagents = new Set(subagentGate.eligible ? subagentGate.userEnabledNames : []);
-  const visibleNativeSubagents = new Set(visibleNames.filter((name) => /subagent/i.test(name)));
-  const subagentLoadoutMismatch = !sameSet(expectedNativeSubagents, visibleNativeSubagents);
   const loadoutMismatch = desiredCompassNames.some((name) => !visibleNames.includes(name))
-    || visibleCompassNames.some((name) => !desiredSet.has(name))
-    || subagentLoadoutMismatch;
+    || visibleCompassNames.some((name) => !desiredSet.has(name));
   const stateToolMissing = Boolean(state.goal.current) && !visibleNames.includes("compass_state");
   if (desiredSignature !== lastLoadoutSignature || loadoutMismatch || (Boolean(currentLoader) && !visibleNames.includes(currentLoader)) || stateToolMissing || loadoutRefreshPending) {
     setCompassLoadout(pi, desiredCompassNames);
@@ -1940,7 +1835,7 @@ function maybeAutoActivatePlanning(cwd?: string): boolean {
   return true;
 }
 
-function maybeEscalateIssueReview(pi: any) {
+function maybeEscalateIssueReview(_pi: any) {
   // Defensive guard: an in-place extension reload can leave an older dependency
   // module cached. The versioned module path should prevent that; if a broken
   // install still occurs, failure recording must never throw from this hook.
@@ -2060,7 +1955,8 @@ export default function (pi: any) {
       state = captured.state;
       if (captured.captured) {
         refreshAfterHumanInput(pi, ctx);
-        return { message: { customType: STATE_MESSAGE_TYPE, content: JSON.stringify(state), display: false } };
+        if (!statePersistedViaEntry) return { message: { customType: STATE_MESSAGE_TYPE, content: JSON.stringify(state), display: false } };
+        return;
       }
       ensureCurrentLoadout(pi, ctx);
       return;
@@ -2105,13 +2001,15 @@ export default function (pi: any) {
       if (branchState.stateRevision > (state.stateRevision ?? 0) || (!state.goal.original && branchState.goal.original)) state = branchState;
     }
     ensureCurrentLoadout(pi, ctx);
+    // Do not rebuild request history or append a volatile full-state anchor.
+  });
+
+  pi.on("context_with_system", async (event: any) => {
     if (!Array.isArray(event?.messages)) return;
+    // Older Compass state messages are internal persistence, not instructions.
+    // Preserve Pi's original system/tool patches instead of folding them into the head.
     const messages = event.messages.filter((message: any) => !(message?.role === "custom" && [STATE_MESSAGE_TYPE, ANCHOR_MESSAGE_TYPE, "pi-compass-v2.conventions"].includes(message?.customType)));
-    const additions: any[] = [];
-    const anchor = buildGoalAnchor(state, 2200, toolInventory(pi));
-    if (anchor) additions.push({ role: "custom", customType: ANCHOR_MESSAGE_TYPE, content: anchor, display: false, timestamp: Date.now() });
-    if (!additions.length && messages.length === event.messages.length) return;
-    return { messages: [...messages, ...additions] };
+    if (messages.length !== event.messages.length) return { messages };
   });
 
   // Capture explicit writes, failed tools, and structured answers returned by ask-user-questions.
@@ -2152,7 +2050,7 @@ export default function (pi: any) {
       }
     }
     // Repeated identical writes/drift are no-ops. Observable path violations are
-    // blocked before execution; their evidence is also injected into the next Goal anchor.
+    // blocked before execution; the tool result carries the warning and state retains its evidence.
     if (writeAdded || driftChanged || activated) persistState(pi);
   }));
   pi.on("tool_result", async (event: any, ctx: any) => {
@@ -2209,8 +2107,9 @@ export default function (pi: any) {
       const allNames = typeof pi.getAllTools === "function" ? namesFrom(pi.getAllTools()) : names;
       const dynamic = typeof pi.setActiveTools === "function" && typeof pi.getActiveTools === "function";
       const schemaReplacement = supportsSameNameSchemaReplacement(pi);
-      const subagentInstalled = allNames.some((name) => /subagent/i.test(name));
-      const subagentVisible = names.some((name) => /subagent/i.test(name));
+      const inventory = toolInventory(pi);
+      const subagentInstalled = inventory.subagents.registered || inventory.subagentLoader.registered;
+      const subagentVisible = inventory.subagents.active;
       const checks = [
         { label: "GoalRun module export contract", ok: GOAL_RUN_API_VERSION === 7 && GOAL_RUN_RELEASE === PACKAGE_VERSION && typeof shouldSurfaceIssueReview === "function" && typeof buildStateSnapshot === "function" && typeof triageIssue === "function" },
         { label: "Pi active-tool read/write", ok: dynamic },
@@ -2227,8 +2126,10 @@ export default function (pi: any) {
       lines.push(`Loaded Compass capabilities: ${activeCapabilities().join(", ") || "none"}`);
       if (!schemaReplacement) lines.push("BLOCKER: same-name schema replacement did not verify. Do not use this build; dynamic schemas require this Pi runtime behavior.");
       lines.push(`Active Compass tools: ${names.filter(isCompassName).join(", ") || "none"}`);
-      const subagentGate = subagentVisibility(pi);
-      lines.push(`Subagent tools: ${!subagentInstalled ? "not installed/registered" : subagentVisible ? `visible; eligibility=${subagentGate.eligibilityReason ?? "native/user state"}` : subagentGate.hiddenByCompass ? "registered but intentionally hidden until two ready DAG tasks explicitly marked executor=subagent and read-only exist or Human explicitly requests Subagent use/parallel scouting across multiple independent paths" : "registered but inactive in Pi/user toolset; Compass will not force-enable it"}`);
+      lines.push(`Subagent tools: ${!subagentInstalled ? "not installed/registered" : subagentVisible ? "visible; activation owned by Pi/pi-subagents and the user" : "registered but inactive in Pi/user toolset; Compass will not force-enable it"}`);
+      lines.push(`Subagent loader: ${inventory.subagentLoader.active ? "visible" : "inactive/not registered"}. Loader visibility does not mean the executor schema is active.`);
+      const awaiting = inventory.await;
+      lines.push(`pi-await: watch=${awaiting.watch.active}; watches=${awaiting.status.active}; unwatch=${awaiting.cancel.active}. External conditions use native watch wakes; Subagents use their native completion mechanism.`);
       lines.push("Structured-delegation surface check confirms only that Compass can emit/listen on the in-process event bus; a real Subagent request/response smoke test is still required to prove installed pi-subagents compatibility and model availability.");
       lines.push("Compass capability groups are exposed only when state or explicit task structure makes them applicable. The model-visible native Subagent tool may remain hidden; separately, Compass auto-dispatches only tasks explicitly routed as executor=subagent with read-only scope. It never infers a DAG from tool visibility, and an explicit Human prohibition blocks dispatch.");
       ctx.ui?.notify?.(lines.join("\n"), checks.every((check) => check.ok) ? "info" : "warning");

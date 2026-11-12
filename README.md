@@ -1,5 +1,7 @@
 # Pi Compass V2 — 0.9.1
 
+> **Unreleased development:** this branch contains context-foundation changes requiring Pi >=1.5.2. See [the implementation TODO and current evidence](./docs/architecture-v0.10.0.md). The v0.9.1 release manifest and validation records describe the historical release, not acceptance of these changes. No v0.10.0 release is claimed.
+
 Pi Compass is an agent-only Pi extension. Its objective is to reduce the total practical cost of completing arbitrary Goals without lowering correctness or delivery quality. It is not a human-facing workflow UI.
 
 ## 0.9.1 changes
@@ -21,7 +23,7 @@ Pi Compass is an agent-only Pi extension. Its objective is to reduce the total p
 
 A DAG is optional. Simple Goals remain on the light default loadout. The Agent chooses the route and decomposition; code validates deterministic boundaries.
 
-## Compatibility target
+## Released v0.9.1 compatibility target
 
 - Pi: `>=1.4.0`. v0.9.1 uses the 1.4.0 `tool_result` event contract to distinguish questionnaire UI errors from Human declines. Durable Context Edit hooks are not yet activated.
 - `pi-subagents`: pinned target `0.84.0`; its delegation declaration and runtime export are byte-identical to the supplied 0.83.1 baseline.
@@ -41,7 +43,7 @@ node scripts/check-subagents-contract.mjs --report evidence/pi-subagents-0.84.0-
 bash -n scripts/run-live-acceptance.sh
 ```
 
-`npm ci --omit=peer` is intentional: Pi supplies `typebox`; installing a package-local copy can bypass Pi's module mapping. Full `npm test` resolves TypeBox from the installed Pi package through `scripts/register-pi-host-typebox.mjs` and therefore requires Pi >=1.4.0 on PATH (or `PI_CODING_AGENT_PACKAGE_ROOT`).
+`npm ci --omit=peer` is intentional: Pi supplies `typebox`; installing a package-local copy can bypass Pi's module mapping. Full `npm test` resolves TypeBox from the installed Pi package through `scripts/register-pi-host-typebox.mjs` and therefore requires Pi >=1.5.2 on PATH for the current development tests (or `PI_CODING_AGENT_PACKAGE_ROOT`).
 
 The 2026-10-31 user-side v0.9.0 evidence records 89/89 core and 187/187 full tests, with static preflight passing. Live Pi was not started because the installed pi-subagents 0.84.0 did not match the package's old 0.83.1 pin. v0.9.1 updates that compatibility baseline and the TypeBox host dependency contract; exact v0.9.1 live acceptance remains pending. See `docs/validation-v0.9.1.md`.
 

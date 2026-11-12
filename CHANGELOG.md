@@ -1,4 +1,13 @@
 # Changelog
+
+## Unreleased — context foundation
+
+- Stop injecting a full GoalRun anchor before every provider request; persist internal state without duplicating it as a model message when Pi custom-entry persistence succeeds.
+- Filter historical Compass internal messages through `context_with_system`, preserving Pi system/tool patches and unrelated watch/subagent messages. Current development requires Pi >=1.5.2; the released v0.9.1 compatibility/evidence records below are historical.
+- Let Pi/pi-subagents own native tool activation, including its loader. Report executor, loader and pi-await availability separately; retain explicit read-only DAG dispatch and Human veto.
+- Add regression tests using the installed host transformation/Responses serializer. These prove request construction only, not provider cache hits or live runtime acceptance.
+- Track Agent-owned attention and frame feasibility in `docs/architecture-v0.10.0.md`. Slots, frames, approval gates and expanded pi-subagents compatibility are not yet implemented.
+
 ## 0.9.1 (2026-10-31)
 
 - Declare Pi-hosted `typebox` as `peerDependencies: { "typebox": "*" }`; remove it from runtime dependencies to prevent a duplicate module copy.

@@ -31,7 +31,7 @@ function isPiPackageRoot(candidate) {
   }
 }
 
-const piRoot = piPackageRoots().find(isPiPackageRoot);
+export const piRoot = piPackageRoots().find(isPiPackageRoot);
 const hostParentURL = piRoot ? pathToFileURL(path.join(piRoot, "package.json")).href : null;
 registerHooks({
   resolve(specifier, context, nextResolve) {

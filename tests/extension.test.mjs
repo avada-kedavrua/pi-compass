@@ -10,7 +10,7 @@ function fakePi(options = {}) {
   const tools = new Map();
   const entries = [];
   const delegationRequests = [];
-  const base = ["read", "bash", "edit", "write", "amend", "codemode", "subagent", "ask_user_questions"];
+  const base = ["read", "bash", "edit", "write", "amend", "codemode", "subagent", "subagents_enable", "bg_wait", "watch", "watches", "unwatch", "ask_user_questions"];
   let active = [...base];
   events.on = (name, handler) => {
     const listeners = busListeners.get(name) ?? new Set();
@@ -123,14 +123,15 @@ const tasks = [
   { id: "smoke", title: "Implement smoke path", acceptance: "A real UI-to-API path is exercised", dependsOn: ["api", "ui"], writeScope: "src/smoke" },
 ];
 
-test("simple Goal exposes only compact state; unused capability and semantic delegation tools stay hidden", async () => {
+test("simple Goal exposes only compact Compass state and preserves native tool activation", async () => {
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi, "Goal: fix one typo in src/readme.ts");
   const compass = pi.activeNames().filter((name) => name.startsWith("compass_"));
   assert.deepEqual(compass.sort(), ["compass_state"]);
   assert.ok(!pi.activeNames().includes("compass_open"), "no capability loader is exposed when no group is applicable");
-  assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)), "semantic delegation stays hidden without code-derived parallel-read eligibility");
+  assert.ok(pi.activeNames().includes("subagent"), "pi-subagents owns semantic tool activation, not Compass");
+  assert.ok(pi.activeNames().includes("watch"), "Compass preserves pi-await tools");
   assert.ok(pi.tools.has("compass_state"), "compact state tool is registered before Goal capture");
 });
 
@@ -144,8 +145,7 @@ test("explicit multi-part Goal surfaces planning early without creating or requi
   assert.equal(state.autoActivation.trigger, "explicit_goal_complexity");
   assert.match(state.autoActivation.reason, /numbered actionable/);
   const context = await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.match(context.messages.at(-1).content, /Planning tools were surfaced/);
-  assert.match(context.messages.at(-1).content, /no DAG was created/);
+  assert.equal(context, undefined, "planning disclosure does not inject a repeated instruction block");
 });
 
 test("simple single-file Goal remains on the light default loadout", async () => {
@@ -189,7 +189,7 @@ test("cross-file write attempts automatically surface planning tools without cre
   assert.equal(pi.entries.at(-1).data.plan.tasks.length, 0, "Runtime exposes planning but never invents a semantic DAG");
   assert.match(pi.entries.at(-1).data.autoActivation.reason, /3 distinct write targets/);
   const context = await pi.events.get("context")({ messages: [{ role: "user", content: "Continue" }] }, ctx(pi));
-  assert.match(context.messages.at(-1).content, /Planning was surfaced/);
+  assert.equal(context, undefined, "capability availability does not require repeated model instructions");
 });
 
 test("path-based amend writes participate in the cross-file planning signal", async () => {
@@ -251,7 +251,7 @@ test("planning loadout creates DAG and keeps loaded capabilities additive", asyn
 });
 
 test("read-only scope alone does not imply Subagent execution", async () => {
-  const pi = fakePi();
+  const pi = fakePi({ autoDelegation: true });
   extensionFactory(pi);
   await captureGoal(pi);
   await openCapability(pi, "planning");
@@ -259,9 +259,10 @@ test("read-only scope alone does not imply Subagent execution", async () => {
     { id: "read-a", title: "Read area A", acceptance: "Evidence recorded", dependsOn: [], writeScope: "read-only" },
     { id: "read-b", title: "Read area B", acceptance: "Evidence recorded", dependsOn: [], writeScope: "read-only" },
   ];
-  await currentTool(pi, "compass_plan_create").execute("create-parent-readonly", { acceptanceCriteria: ["Both areas are understood"], tasks: readOnlyButParentOwned }, undefined, undefined, ctx(pi));
+  const created = await currentTool(pi, "compass_plan_create").execute("create-parent-readonly", { acceptanceCriteria: ["Both areas are understood"], tasks: readOnlyButParentOwned }, undefined, undefined, ctx(pi));
+  await pi.events.get("tool_result")({ toolName: "compass_plan_create", content: created.content, details: created.details, input: {} }, ctx(pi));
   assert.deepEqual(latestState(pi).plan.tasks.map((task) => task.executor), ["parent", "parent"]);
-  assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)), "read-only describes write safety, not delegation intent");
+  assert.equal(pi.delegationRequests.length, 0, "read-only describes write safety, not delegation intent");
 });
 
 test("an already-running read-only task is not treated as an unassigned delegation candidate", async () => {
@@ -649,18 +650,18 @@ test("loader contains only missing capability groups after a partial open", asyn
   assert.equal(loader.parameters.properties.capabilities.maxItems, choices.length);
 });
 
-test("semantic Subagent tools are hidden as soon as code-derived parallel-read eligibility disappears", async () => {
+test("DAG progress never changes native Subagent activation", async () => {
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
-  assert.ok(pi.activeNames().some((name) => /subagent/i.test(name)), "two ready read-only tasks make semantic delegation eligible");
+  const before = pi.activeNames().filter((name) => !name.startsWith("compass_"));
   await currentTool(pi, "compass_task").execute("done-api", { action: "done", tasks: [{ id: "api", evidence: "Read API route and recorded source location" }] }, undefined, undefined, ctx(pi));
-  assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)), "one remaining ready read-only task is not enough to expose Subagents");
-  const state = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
-  assert.equal(state.runtime.subagents.eligibleByCode, false);
-  assert.equal(state.runtime.subagents.hiddenByCompass, true);
+  assert.deepEqual(pi.activeNames().filter((name) => !name.startsWith("compass_")), before);
+  const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
+  assert.equal(snapshot.runtime.subagents.active, true);
+  assert.equal(snapshot.plan.done, 1);
 });
 
 test("already-completed ready tasks can be closed without a redundant start call", async () => {
@@ -802,11 +803,13 @@ test("Goal continuity works without a DAG; failure details are on demand, not in
   await captureGoal(pi, "Goal: inspect the repo and establish a smoke test");
   const messages = [{ role: "user", content: "A tool failed." }];
   const first = await pi.events.get("context")({ messages }, ctx(pi));
-  assert.match(first.messages.at(-1).content, /inspect the repo and establish a smoke test/);
-  assert.match(first.messages.at(-1).content, /No DAG is active/);
+  assert.equal(first, undefined, "the native Human message is not repeated in an injected anchor");
+  const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
+  assert.match(snapshot.goal.current, /inspect the repo and establish a smoke test/);
+  assert.equal(snapshot.plan, null);
   await pi.events.get("tool_execution_end")({ toolName: "bash", isError: true, result: { content: [{ type: "text", text: "command exited 1" }] } }, ctx(pi));
   const second = await pi.events.get("context")({ messages }, ctx(pi));
-  assert.doesNotMatch(second.messages.at(-1).content, /command exited 1/);
+  assert.equal(second, undefined, "a recorded failure does not trigger per-request context injection");
   assert.ok(currentTool(pi, "compass_open").parameters.properties.capabilities.items.enum.includes("issue_review"));
   await openCapability(pi, "issue_review");
   const triage = await currentTool(pi, "compass_triage").execute("triage", { issue: "Should I change the approach?" }, undefined, undefined, ctx(pi));
@@ -886,15 +889,16 @@ test("versioned Goal candidate exposes apply/dismiss without an extra open call 
   assert.equal(latestState(pi).goal.sourceUpdateId, "U1");
 });
 
-test("Goal anchor explains when Compass intentionally hides native Subagents", async () => {
+test("inactive native Subagents stay inactive without a second Compass visibility policy", async () => {
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi, "Goal: inspect multiple independent workstreams across four code paths.");
   pi.setActiveTools(pi.activeNames().filter((name) => !/subagent/i.test(name)));
-  const context = await pi.events.get("context")({ messages: [{ role: "user", content: "Scout the gaps in parallel" }] }, ctx(pi));
-  assert.match(context.messages.at(-1).content, /Native Subagents are intentionally hidden/);
-  assert.match(context.messages.at(-1).content, /no code-derived set of at least two ready tasks explicitly marked executor=subagent and read-only/);
-  assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)), "Compass does not override a disabled native tool");
+  assert.equal(await pi.events.get("context")({ messages: [{ role: "user", content: "Scout the gaps in parallel" }] }, ctx(pi)), undefined);
+  const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
+  assert.equal(snapshot.runtime.subagents.active, false);
+  assert.match(snapshot.runtime.subagents.reason, /activation is owned by Pi/);
+  assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)));
 });
 
 test("embedded Goal mention preserves Current Goal, acceptance criteria, and capability loadout", async () => {
@@ -1045,11 +1049,13 @@ test("message_end captures Human steering messages and applies explicit Goal rep
   assert.equal(state.goalChanges.at(-1).previousGoal, "Goal: finish mutation delivery");
   assert.equal(state.activeCapability, "root");
   const projected = await pi.events.get("context")({ messages: [{ role: "user", content: "Continue" }] }, ctx(pi));
-  assert.doesNotMatch(projected.messages.at(-1).content, /不用 cd/, "a directive from the previous Goal version must not leak into the new Goal");
+  assert.equal(projected, undefined);
+  const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
+  assert.doesNotMatch(JSON.stringify(snapshot.directives ?? []), /不用 cd/, "a directive from the previous Goal version must not leak into the new Goal");
   assert.ok(state.sessionDirectives.some((directive) => directive.goalVersion === 1 && /不用 cd/.test(directive.text)), "the directive remains archived in state history");
 });
 
-test("ask-user-questions answers are persisted and projected into the active Goal context", async () => {
+test("ask-user-questions answers remain available on demand without repeated injection", async () => {
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi, "Goal: complete the PPTX delivery");
@@ -1075,8 +1081,10 @@ test("ask-user-questions answers are persisted and projected into the active Goa
   assert.equal(state.humanDecisions[0].questionnaire.answers.length, 2);
   assert.doesNotMatch(JSON.stringify(state.humanDecisions[0]), /large-preview-body/);
   const projected = await pi.events.get("context")({ messages: [{ role: "user", content: "Continue" }] }, ctx(pi));
-  assert.match(projected.messages.at(-1).content, /Push origin\/main only/);
-  assert.match(projected.messages.at(-1).content, /PowerPoint/);
+  assert.equal(projected, undefined);
+  const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
+  assert.match(JSON.stringify(snapshot.humanDecisions), /Push origin\/main only/);
+  assert.match(JSON.stringify(snapshot.humanDecisions), /PowerPoint/);
 });
 
 test("ask-user-question UI load failures are not recorded as Human declines", async () => {
@@ -1136,7 +1144,7 @@ test("plan tool loadout refreshes at the request boundary while lifecycle tool s
   assert.ok(pi.activeNames().includes("compass_acceptance_record"));
 });
 
-test("path-based writes create an automatic drift warning in the next Goal anchor", async () => {
+test("path-based writes report scope drift immediately without injecting a Goal anchor", async () => {
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi);
@@ -1154,9 +1162,8 @@ test("path-based writes create an automatic drift warning in the next Goal ancho
   assert.equal(blocked.block, true, "an explicit out-of-scope write is blocked before the edit tool runs");
   assert.match(latestState(pi).plan.executionDrift.reason, /outside every declared scope/i);
   const context = await pi.events.get("context")({ messages: [] }, ctx(pi));
-  const anchor = context.messages.find((message) => message.customType === "pi-compass-v2.goalrun-anchor");
-  assert.ok(anchor, "the extension injects the updated anchor automatically at the context boundary");
-  assert.match(anchor.content, /Execution drift detected/);
+  assert.match(blocked.reason, /outside every declared scope/i, "the actual blocked tool result already carries the actionable warning");
+  assert.equal(context, undefined, "do not repeat the failure in every later provider request");
 });
 
 test("repeated current-Goal failures automatically surface issue review at a request boundary", async () => {
@@ -1185,10 +1192,23 @@ test("preflight reports dynamic tool activation and native dependencies", async 
   assert.match(notice, /Compass loader/);
   assert.match(notice, /PASS codemode/);
   assert.match(notice, /PASS pi-subagents registered/);
-  assert.match(notice, /hidden until two ready DAG tasks explicitly marked executor=subagent and read-only/);
+  assert.match(notice, /activation owned by Pi\/pi-subagents and the user/);
+  assert.match(notice, /pi-await: watch=true; watches=true; unwatch=true/);
   assert.match(notice, /PASS ask-user-questions/);
 });
 
+
+test("preflight distinguishes the Subagent loader from the inactive executor", async () => {
+  const pi = fakePi();
+  pi.setActiveTools(pi.activeNames().filter((name) => name !== "subagent"));
+  extensionFactory(pi);
+  await captureGoal(pi, "Goal: inspect one file.");
+  let notice = "";
+  await pi.commands.get("compass-preflight").handler("", { ui: { notify(message) { notice = message; } } });
+  assert.match(notice, /Subagent tools: registered but inactive/);
+  assert.match(notice, /Subagent loader: visible/);
+  assert.doesNotMatch(notice, /Subagent tools: visible/);
+});
 
 test("compact state is visible after Goal capture and reports native capability availability", async () => {
   const pi = fakePi();
@@ -1205,60 +1225,56 @@ test("compact state is visible after Goal capture and reports native capability 
   assert.equal(snapshot.runtime.codemode.registered, true);
   assert.equal(snapshot.runtime.askUserQuestions.registered, true);
   assert.equal(snapshot.runtime.subagents.registered, true);
-  assert.equal(snapshot.runtime.subagents.active, false, "semantic Subagents stay hidden until code-derived parallel-read eligibility exists");
-  assert.equal(snapshot.runtime.subagents.hiddenByCompass, true);
-  assert.equal(snapshot.runtime.subagents.eligibleByCode, false);
-  assert.equal(snapshot.runtime.subagents.dagReadyReadOnlyTasks, null, "null means there is no DAG-derived candidate count");
+  assert.equal(snapshot.runtime.subagents.active, true, "native activation is not overridden by Compass");
+  assert.equal(snapshot.runtime.subagentLoader.registered, true);
+  assert.deepEqual(snapshot.runtime.await, {
+    watch: { registered: true, active: true },
+    status: { registered: true, active: true },
+    cancel: { registered: true, active: true },
+  });
   const unchanged = await currentTool(pi, "compass_state").execute("state2", { cursor: snapshot.cursor }, undefined, undefined, ctx(pi));
   assert.equal(JSON.parse(unchanged.content[0].text).unchanged, true);
   assert.ok(unchanged.content[0].text.length < 200, "unchanged reads return only the cursor/revision envelope");
 });
 
-test("explicit Human parallel scouting can expose Subagents before a DAG without forcing a DAG", async () => {
+test("Human parallel scouting does not create a DAG or replace native activation", async () => {
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi, "Goal: inspect multiple independent workstreams across four code paths.");
-  assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)), "generic multi-workstream Goal alone does not expose semantic delegation");
+  const native = pi.activeNames().filter((name) => !name.startsWith("compass_"));
   await pi.events.get("message_end")({ message: { role: "user", content: [{ type: "text", text: "Scout the gaps in parallel." }] } }, ctx(pi));
   await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.ok(pi.activeNames().some((name) => /subagent/i.test(name)), "explicit Human parallel-scouting request is a deterministic visibility trigger");
-  assert.equal(latestState(pi).plan.tasks.length, 0, "visibility does not auto-create a DAG");
-  const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
-  assert.equal(snapshot.runtime.subagents.eligibilityReason, "explicit_human_parallel_scouting");
+  assert.deepEqual(pi.activeNames().filter((name) => !name.startsWith("compass_")), native);
+  assert.equal(latestState(pi).plan.tasks.length, 0);
 });
 
-test("an explicit Human Subagent request is an override, but an explicit prohibition wins", async () => {
+test("pi-subagents can switch its loader and native tool without Compass undoing it", async () => {
   const pi = fakePi();
+  pi.setActiveTools(pi.activeNames().filter((name) => name !== "subagent"));
   extensionFactory(pi);
   await captureGoal(pi, "Goal: fix one typo in one file.");
-  await pi.events.get("message_end")({ message: { role: "user", content: [{ type: "text", text: "Use subagents for this task." }] } }, ctx(pi));
+  assert.ok(pi.activeNames().includes("subagents_enable"));
+  assert.ok(!pi.activeNames().includes("subagent"));
+  pi.setActiveTools([...pi.activeNames().filter((name) => name !== "subagents_enable"), "subagent"]);
   await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.ok(pi.activeNames().some((name) => /subagent/i.test(name)));
-  let snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
-  assert.equal(snapshot.runtime.subagents.eligibilityReason, "explicit_human_subagent_request");
-
-  await pi.events.get("message_end")({ message: { role: "user", content: [{ type: "text", text: "Do not use subagents; inspect this serially." }] } }, ctx(pi));
-  await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)), "explicit prohibition hides Subagents even if they were previously visible");
-  snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
-  assert.equal(snapshot.runtime.subagents.hiddenByCompass, true);
-  await pi.events.get("message_end")({ message: { role: "user", content: [{ type: "text", text: "Use subagents now; my earlier prohibition is superseded." }] } }, ctx(pi));
-  await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.ok(pi.activeNames().some((name) => /subagent/i.test(name)), "latest explicit instruction must override an older prohibition");
+  assert.ok(pi.activeNames().includes("subagent"));
+  assert.ok(!pi.activeNames().includes("subagents_enable"));
+  assert.ok(pi.activeNames().includes("bg_wait"));
+  assert.ok(pi.activeNames().includes("watch"));
 });
 
-test("explicit Human prohibition overrides the DAG eligibility gate", async () => {
-  const pi = fakePi();
+test("Human prohibition blocks automatic DAG dispatch without rewriting native tools", async () => {
+  const pi = fakePi({ autoDelegation: true });
   extensionFactory(pi);
   await captureGoal(pi);
   await openCapability(pi, "planning");
-  await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
-  assert.ok(pi.activeNames().some((name) => /subagent/i.test(name)));
-  await pi.events.get("message_end")({ message: { role: "user", content: [{ type: "text", text: "Do not use subagents for this Goal." }] } }, ctx(pi));
-  await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)), "a prohibition must outrank code-derived eligibility");
-  const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
-  assert.equal(snapshot.runtime.subagents.eligibilityReason, "human_prohibited_subagents");
+  const create = await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
+  await pi.events.get("message_end")({ message: { role: "user", content: "Do not use subagents for this Goal." } }, ctx(pi));
+  await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
+  await waitFor(() => latestState(pi)?.plan?.execution?.status === "failed", { message: "Human veto applied" });
+  assert.equal(pi.delegationRequests.length, 0);
+  assert.match(latestState(pi).plan.execution.error, /Human instructions prohibit/);
+  assert.ok(pi.activeNames().includes("subagent"), "native schema visibility is not execution authorization");
 });
 
 test("Subagent eligibility never force-enables a native tool disabled before Compass loads", async () => {
@@ -1272,8 +1288,7 @@ test("Subagent eligibility never force-enables a native tool disabled before Com
   const state = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
   assert.equal(state.runtime.subagents.registered, true);
   assert.equal(state.runtime.subagents.active, false);
-  assert.equal(state.runtime.subagents.eligibleByCode, true);
-  assert.equal(state.runtime.subagents.hiddenByCompass, false, "eligible but user-disabled is not the same as hidden by Compass");
+  assert.match(state.runtime.subagents.reason, /activation is owned by Pi\/pi-subagents and the user/);
 });
 
 test("native tool visibility changes advance state revision without re-enabling user-disabled tools", async () => {
@@ -1282,7 +1297,7 @@ test("native tool visibility changes advance state revision without re-enabling 
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
-  assert.ok(pi.activeNames().some((name) => /subagent/i.test(name)), "the code-derived eligibility gate exposes Subagents for two ready read-only tasks");
+  assert.ok(pi.activeNames().some((name) => /subagent/i.test(name)), "Compass preserves the native active toolset");
   const initial = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
   const beforeRevision = latestState(pi).stateRevision;
   pi.setActiveTools(pi.activeNames().filter((name) => !/subagent/i.test(name)));
@@ -1292,7 +1307,7 @@ test("native tool visibility changes advance state revision without re-enabling 
   const after = JSON.parse((await currentTool(pi, "compass_state").execute("state-after", { cursor: initial.cursor }, undefined, undefined, ctx(pi))).content[0].text);
   assert.equal(after.delta.stateChanged, true);
   assert.equal(after.runtime.subagents.active, false);
-  assert.equal(after.runtime.subagents.hiddenByCompass, false, "the user-disabled state is distinct from Compass's deterministic gate");
+  assert.match(after.runtime.subagents.reason, /activation is owned by Pi\/pi-subagents and the user/);
 });
 
 test("triage uses evidence references and returns a compact duplicate result", async () => {

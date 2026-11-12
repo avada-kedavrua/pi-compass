@@ -1676,12 +1676,8 @@ export function buildGoalAnchor(stateValue, maxChars = 2200, runtime = null) {
   } else {
     const subagentsUnavailable = runtime?.subagents && runtime.subagents.active === false && [true, false].includes(runtime.subagents.registered);
     lines.push(subagentsUnavailable
-      ? (runtime.subagents.hiddenByCompass
-        ? "No DAG is active. Native Subagents are intentionally hidden: no code-derived set of at least two ready tasks explicitly marked executor=subagent and read-only exists, and Human has not explicitly requested parallel scouting across multiple independent paths. Use deterministic native tools for single-route work; Compass does not create a DAG just to expose semantic delegation."
-        : `No DAG is active. Native Subagents are ${runtime.subagents.registered === true ? "registered but inactive in the Pi/user toolset" : "not registered"}; Compass will not force-enable them.`)
-      : ["explicit_human_parallel_scouting", "explicit_human_subagent_request"].includes(runtime?.subagents?.eligibilityReason)
-        ? `No DAG is active. Native Subagents are visible because Human explicitly requested ${runtime.subagents.eligibilityReason === "explicit_human_parallel_scouting" ? "parallel scouting across multiple independent paths" : "Subagent use"}. Use them only when deterministic code cannot complete the work and expected savings exceed delegation overhead; Compass does not create a DAG automatically.`
-        : "No DAG is active. Native Subagents are not surfaced by Compass until code identifies at least two ready tasks explicitly marked executor=subagent and read-only, or Human explicitly requests Subagent use/parallel scouting.");
+      ? `No DAG is active. Native Subagents are ${runtime.subagents.registered === true ? "registered but inactive in the Pi/user toolset" : "not registered"}; Compass will not force-enable them.`
+      : "No DAG is active. Native tool activation belongs to Pi and its extensions; a DAG is optional.");
     if (state.autoActivation?.capability === "planning" && state.autoActivation?.trigger === "explicit_goal_complexity") {
       lines.push(`Planning tools were surfaced because of ${clip(state.autoActivation.reason || "an explicit multi-part Goal", 80)}; no DAG was created. Use them only if they reduce coordination cost.`);
     }
@@ -1690,9 +1686,7 @@ export function buildGoalAnchor(stateValue, maxChars = 2200, runtime = null) {
   const optional = [];
   const subagentsUnavailable = runtime?.subagents && runtime.subagents.active === false && [true, false].includes(runtime.subagents.registered);
   if (subagentsUnavailable && Boolean(plan?.tasks?.length)) {
-    optional.push(runtime.subagents.hiddenByCompass
-      ? `Native Subagents are hidden: only ${runtime.subagents.dagReadyReadOnlyTasks ?? 0} ready read-only task(s), and no explicit Human parallel-scouting request across multiple independent paths was found.`
-      : `Native Subagents ${runtime.subagents.registered === true ? "are registered but inactive in the Pi/user toolset" : "are not registered"}; Compass will not force-enable them.`);
+    optional.push(`Native Subagents ${runtime.subagents.registered === true ? "are registered but inactive in the Pi/user toolset" : "are not registered"}; Compass will not force-enable them.`);
   }
   const pending = explicitGoalChangeUpdates(state).at(-1);
   if (pending) optional.push(`Pending scope change ${pending.id}: ${clip(pending.summary, 130)}${pending.proposedGoal ? `; proposed: ${clip(pending.proposedGoal, 150)}` : ""}. Review before applying.`);

@@ -154,10 +154,10 @@ if (staticOnly) {
     add("FAIL", "Pi CLI", `Could not run pi --version. ${piVersionResult.text || "Is Pi on PATH?"}`);
   } else if (!piVersion) {
     add("WARN", "Pi version", `Could not parse version output: ${piVersionResult.text}`);
-  } else if (atLeast(piVersion, [1, 4, 0])) {
-    add("PASS", "Pi version", `${piVersion.join(".")} (minimum required for the v0.9.1 tool_result contract: 1.4.0)`);
+  } else if (atLeast(piVersion, [1, 5, 2])) {
+    add("PASS", "Pi version", `${piVersion.join(".")} (minimum supported by the current context_with_system integration: 1.5.2)`);
   } else {
-    add("FAIL", "Pi version", `${piVersion.join(".")} is older than the 1.4.0 minimum required by v0.9.1`);
+    add("FAIL", "Pi version", `${piVersion.join(".")} is older than the current 1.5.2 integration baseline`);
   }
 }
 
