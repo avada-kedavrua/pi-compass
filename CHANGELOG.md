@@ -7,7 +7,10 @@
 - Let Pi/pi-subagents own native tool activation, including its loader. Report executor, loader and pi-await availability separately; retain explicit read-only DAG dispatch and Human veto.
 - Add regression tests using the installed host transformation/Responses serializer. These prove request construction only, not provider cache hits or live runtime acceptance.
 - Track Agent-owned attention and frame feasibility in `docs/architecture-v0.10.0.md`.
-- Add the first native same-session frame core: `compass_context` uses Pi `turn_end` boundary drafts for explicit `call`/`return`, ref/copy capture, source-versioned edits, complete-exchange protection, bounded search, frame-owned pi-await watch bookkeeping, and aborted-turn ref persistence. Native tests now cover nested frames, active-branch reload, external compaction recovery, and reserved system messages; live provider/branch-navigation acceptance and active-Skill/caveat retention still require evidence.
+- Replace the frame prototype's premature completion checklist with a requirement-linked M0–M7 implementation plan; unimplemented retrieval, retention, approval, routes and integration remain explicit.
+- Repair canonical frame restoration: preserve parent summaries/omissions, release raw child process even after native compaction, retain ref writes across nested/aborted work, preserve complete tool exchanges, and make drop functional. Use persisted entry identities rather than session-global provider call IDs.
+- Introduce current-only context schema v2 and intent/commit receipts binding both native drafts and resulting control state. Activate only committed branch-local state; incomplete or altered persistence invokes the public abort path rather than silently resetting a frame. Prototype v1 context state is not migrated.
+- Fix review findings in steering/native-watch reconciliation and control-state receipt integrity. Installed projection/runner checks cover these boundaries with adapters; they do not prove live AgentSession/provider behavior. M2–M7 and Human acceptance remain pending.
 
 ## 0.9.1 (2026-10-31)
 

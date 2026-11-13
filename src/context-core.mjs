@@ -2,244 +2,381 @@ import { createHash } from "node:crypto";
 
 export const CONTEXT_STATE_TYPE = "pi-compass-v2.context";
 export const CONTEXT_MESSAGE_TYPE = "pi-compass-v2.context-message";
-export const CONTEXT_SCHEMA_VERSION = 1;
-
+export const CONTEXT_SCHEMA_VERSION = 2;
+const INTENT_TYPE = `${CONTEXT_STATE_TYPE}.intent`;
 const MAX_DEPTH = 16;
 const MAX_SOURCES = 256;
 const MAX_PINS = 64;
-const MAX_TEXT = 8_000;
-const MAX_COPY_BYTES = 128 * 1024;
-const MODEL_ROLES = new Set(["user", "assistant", "toolResult", "custom"]);
-const RESERVED_CUSTOM_TYPES = new Set([
-  "pi-compass-v2.goalrun-state",
-  "pi-compass-v2.goalrun-anchor",
-  "pi-compass-v2.conventions",
-]);
+const MAX_CONTENT_BYTES = 128 * 1024;
+const EXTERNAL_MESSAGES = new Set(["watch-condition", "watch-lost", "subagent-result"]);
+const RESERVED_MESSAGES = new Set(["pi-compass-v2.goalrun-state", "pi-compass-v2.goalrun-anchor", "pi-compass-v2.conventions"]);
 
 function fail(message) { throw new Error(`${message} No context changed.`); }
-function isObject(value) { return value !== null && typeof value === "object"; }
-function textContent(content) {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.filter((part) => part?.type === "text").map((part) => part.text).join("\n");
+function recoveryRequired(message) {
+  throw new Error(`${message} Context projection may have changed; no further Compass mutation was applied. Use Pi tree navigation to return before the intent entry.`);
+}
+function object(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
+function textOf(content) {
+  return typeof content === "string" ? content : (content ?? []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
 }
 function messageOf(entry) {
   if (entry?.type === "message") return entry.message;
-  if (entry?.type === "custom_message") {
-    return { role: "custom", content: entry.content, customType: entry.customType, details: entry.details };
-  }
+  if (entry?.type === "custom_message") return { role: "custom", customType: entry.customType, content: entry.content };
   return null;
 }
-function isModelEntry(entry) {
-  return MODEL_ROLES.has(messageOf(entry)?.role);
-}
-function isReserved(entry) {
+function editable(entry) {
   const message = messageOf(entry);
-  return message?.role === "custom" && RESERVED_CUSTOM_TYPES.has(message.customType);
+  return Boolean(message && ["user", "assistant", "toolResult", "custom"].includes(message.role) && !RESERVED_MESSAGES.has(message.customType));
 }
-function isEditable(entry) {
-  return isModelEntry(entry) && !isReserved(entry);
+export function contentVersion(content) {
+  return createHash("sha256").update(JSON.stringify(content)).digest("hex").slice(0, 24);
 }
-export function contentVersion(value) {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 24);
-}
-const hash = contentVersion;
-function clone(value) { return structuredClone(value); }
-function byteLength(value) { return Buffer.byteLength(JSON.stringify(value)); }
-function ensureText(value, label, max = MAX_TEXT) {
-  if (typeof value !== "string" || !value.trim() || value.length > max) fail(`${label} must be a non-empty string of at most ${max} characters.`);
-  return value;
+function ensureText(value, label, maximum = 8_000) {
+  if (typeof value !== "string" || !value.trim() || value.length > maximum) fail(`${label} requires 1..${maximum} characters.`);
 }
 function ensureIds(ids, label = "source IDs") {
-  if (!Array.isArray(ids) || ids.length > MAX_SOURCES || new Set(ids).size !== ids.length || ids.some((id) => typeof id !== "string" || !id.trim())) {
-    fail(`${label} must contain unique non-empty source IDs (at most ${MAX_SOURCES}).`);
-  }
-  return ids;
+  if (!Array.isArray(ids) || ids.length > MAX_SOURCES || new Set(ids).size !== ids.length || ids.some((id) => typeof id !== "string" || !id)) fail(`${label} must contain at most ${MAX_SOURCES} unique source IDs.`);
+}
+function ensureContent(content) {
+  if (content === undefined || Buffer.byteLength(JSON.stringify(content)) > MAX_CONTENT_BYTES) fail("Context content exceeds 128 KiB; select a smaller unit or spill it.");
 }
 function ensureVersion(version) {
   if (typeof version !== "string" || !/^[a-f0-9]{24}$/.test(version)) fail("A current source version is required.");
 }
+
 export function emptyContextState() {
   return { schemaVersion: CONTEXT_SCHEMA_VERSION, revision: 0, frames: [], pins: [], writes: {}, watches: {} };
 }
 
+/** Validate current control metadata. Unsupported/corrupt state is never silently reset. */
 export function normalizeContextState(raw) {
-  if (!isObject(raw) || raw.schemaVersion !== CONTEXT_SCHEMA_VERSION) return emptyContextState();
-  const state = emptyContextState();
-  state.revision = Number.isInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0;
-  state.frames = Array.isArray(raw.frames) ? raw.frames.slice(-MAX_DEPTH).filter((frame) => isObject(frame) && typeof frame.id === "string" && typeof frame.parent === "string").map((frame) => ({
-    id: frame.id,
-    parent: frame.parent,
-    boundaryId: typeof frame.boundaryId === "string" ? frame.boundaryId : "",
-    saved: Array.isArray(frame.saved) ? frame.saved.slice(0, MAX_SOURCES).filter((item) => isObject(item) && typeof item.id === "string" && (item.editId === null || typeof item.editId === "string") && typeof item.version === "string" && typeof item.visible === "boolean").map((item) => ({ ...item })) : [],
-    refs: Array.isArray(frame.refs) ? frame.refs.slice(0, MAX_SOURCES).filter((item) => isObject(item) && typeof item.id === "string" && typeof item.version === "string").map((item) => ({ id: item.id, version: item.version })) : [],
-  })) : [];
-  state.pins = Array.isArray(raw.pins) ? raw.pins.slice(-MAX_PINS).filter((pin) => isObject(pin) && typeof pin.id === "string" && typeof pin.scope === "string").map((pin) => ({ id: pin.id, scope: pin.scope })) : [];
-  state.writes = isObject(raw.writes) ? Object.fromEntries(Object.entries(raw.writes).filter(([id, version]) => typeof id === "string" && typeof version === "string")) : {};
-  state.watches = isObject(raw.watches) ? Object.fromEntries(Object.entries(raw.watches).filter(([id, watch]) => typeof id === "string" && isObject(watch) && typeof watch.owner === "string").map(([id, watch]) => [id, { owner: watch.owner }])) : {};
-  const active = new Set(state.frames.map((frame) => frame.id));
-  state.pins = state.pins.filter((pin) => pin.scope === "root" || active.has(pin.scope));
-  state.writes = Object.fromEntries(Object.entries(state.writes).filter(([id]) => state.frames.some((frame) => frame.refs.some((ref) => ref.id === id))));
-  state.watches = Object.fromEntries(Object.entries(state.watches).filter(([, watch]) => active.has(watch.owner)));
-  return state;
+  if (raw === undefined || raw === null) return emptyContextState();
+  if (!object(raw) || raw.schemaVersion !== CONTEXT_SCHEMA_VERSION) fail("Unsupported Compass context schema; open a new session or navigate to a pre-context branch.");
+  if (!Number.isSafeInteger(raw.revision) || raw.revision < 0 || !Array.isArray(raw.frames) || raw.frames.length > MAX_DEPTH || !Array.isArray(raw.pins) || raw.pins.length > MAX_PINS || !object(raw.writes) || !object(raw.watches)) fail("Invalid Compass context metadata.");
+  const scopes = new Set(["root"]);
+  let parent = "root";
+  for (const frame of raw.frames) {
+    if (!object(frame) || typeof frame.id !== "string" || !frame.id || scopes.has(frame.id) || frame.parent !== parent || typeof frame.boundaryId !== "string" || !(frame.summaryId === null || typeof frame.summaryId === "string")) fail("Invalid frame stack or parent summary reference.");
+    if (!Array.isArray(frame.saved) || !Array.isArray(frame.refs)) fail("Invalid frame source lists.");
+    ensureIds(frame.saved.map((item) => item.id), "saved source IDs");
+    ensureIds(frame.refs.map((item) => item.id), "reference capture IDs");
+    for (const item of frame.saved) if (typeof item.visible !== "boolean" || !(item.editId === null || typeof item.editId === "string")) fail("Invalid saved source reference.");
+    for (const item of frame.refs) ensureVersion(item.version);
+    scopes.add(frame.id);
+    parent = frame.id;
+  }
+  for (const pin of raw.pins) if (!object(pin) || typeof pin.id !== "string" || !scopes.has(pin.scope)) fail("Invalid pin owner.");
+  for (const version of Object.values(raw.writes)) ensureVersion(version);
+  for (const watch of Object.values(raw.watches)) if (!object(watch) || !scopes.has(watch.owner)) fail("Invalid watch owner.");
+  return structuredClone({ schemaVersion: raw.schemaVersion, revision: raw.revision, frames: raw.frames, pins: raw.pins, writes: raw.writes, watches: raw.watches });
 }
 
+function draftShape(entry) {
+  switch (entry.type) {
+    case "custom": return { type: entry.type, customType: entry.customType, data: entry.data };
+    case "custom_message": return { type: entry.type, customType: entry.customType, content: entry.content, display: entry.display, details: entry.details };
+    case "context_edit": return { type: entry.type, targetId: entry.targetId, replacement: entry.replacement };
+    case "compaction": return { type: entry.type, summary: entry.summary, firstKeptEntryId: entry.firstKeptEntryId === entry.id ? null : entry.firstKeptEntryId, details: entry.details };
+    default: fail(`Unexpected entry ${entry.type} in context commit.`);
+  }
+}
+function verifyCommit(branch, positions, position, commit, state) {
+  const start = position - commit.count;
+  const base = commit.fromLeafId === null ? -1 : positions.get(commit.fromLeafId) ?? -1;
+  const gap = branch.slice(base + 1, start);
+  if (!Number.isInteger(commit.count) || commit.count < 1 || start < 0 || base >= start || (commit.fromLeafId !== null && base < 0) || gap.some((entry) => entry.type !== "custom" || [CONTEXT_STATE_TYPE, INTENT_TYPE].includes(entry.customType))) recoveryRequired("Context commit does not match its active-branch baseline.");
+  const actual = branch.slice(start, position).map(draftShape);
+  if (contentVersion({ entries: actual, state }) !== commit.digest) recoveryRequired("Context proposal or resulting control state was changed or only partially persisted.");
+}
 export function restoreContextState(branch) {
   let restored = emptyContextState();
-  for (const entry of branch ?? []) {
-    if (entry?.type !== "custom" || entry.customType !== CONTEXT_STATE_TYPE) continue;
-    restored = normalizeContextState(entry.data);
+  const positions = new Map(branch.map((entry, position) => [entry.id, position]));
+  const pending = new Set();
+  for (let position = 0; position < branch.length; position++) {
+    const entry = branch[position];
+    if (entry.type !== "custom") continue;
+    if (entry.customType === INTENT_TYPE) pending.add(entry.data.operationId);
+    if (entry.customType !== CONTEXT_STATE_TYPE) continue;
+    const state = normalizeContextState(entry.data);
+    if (entry.data.commit) {
+      if (!pending.has(entry.data.commit.operationId)) recoveryRequired("Context commit has no matching operation intent.");
+      verifyCommit(branch, positions, position, entry.data.commit, state);
+      pending.delete(entry.data.commit.operationId);
+    }
+    restored = state;
   }
+  if (pending.size) recoveryRequired(`Uncommitted context transition ${[...pending].join(", ")}.`);
   return restored;
 }
-
 export function contextStateEntry(state) {
-  return { type: "custom", customType: CONTEXT_STATE_TYPE, data: clone(normalizeContextState(state)) };
+  return { type: "custom", customType: CONTEXT_STATE_TYPE, data: normalizeContextState(state) };
 }
 
-function branchIndex(branch) {
-  const byId = new Map((branch ?? []).map((entry) => [entry.id, entry]));
+/** One index per operation; keep raw and active edit views distinct after compaction. */
+function sourceIndex(branch, boundary) {
+  const byId = new Map();
+  const positions = new Map();
+  const editsByTarget = new Map();
+  const groups = new Map();
+  const calls = new Map();
+  for (const [position, entry] of branch.entries()) {
+    byId.set(entry.id, entry);
+    positions.set(entry.id, position);
+    if (entry.type === "context_edit") {
+      const rows = editsByTarget.get(entry.targetId) ?? [];
+      rows.push(entry);
+      editsByTarget.set(entry.targetId, rows);
+    }
+    const message = messageOf(entry);
+    if (message?.role === "assistant") {
+      const toolCalls = message.content.filter((part) => part.type === "toolCall");
+      if (!toolCalls.length) continue;
+      const group = { ids: [entry.id], calls: new Set(toolCalls.map((call) => call.id)), results: new Set(), duplicate: false };
+      groups.set(entry.id, group);
+      for (const call of toolCalls) calls.set(call.id, group);
+    }
+    if (message?.role === "toolResult") {
+      const group = calls.get(message.toolCallId);
+      if (!group) continue;
+      group.ids.push(entry.id);
+      if (group.results.has(message.toolCallId)) group.duplicate = true;
+      group.results.add(message.toolCallId);
+      groups.set(entry.id, group);
+    }
+  }
+  const active = new Map();
   const edits = new Map();
-  for (const entry of branch ?? []) if (entry?.type === "context_edit") edits.set(entry.targetId, entry);
-  return { byId, edits };
-}
-
-function currentSource(branch, id) {
-  const { byId } = branchIndex(branch);
-  const source = byId.get(id);
-  if (!source || !isEditable(source)) fail(`Unknown, wrong-branch, reserved, or non-editable context source ${id}.`);
-  return source;
-}
-
-function contentAt(branch, id, editId = undefined) {
-  const { byId, edits } = branchIndex(branch);
-  const source = currentSource(branch, id);
-  const selected = editId === undefined ? edits.get(id) : editId === null ? null : byId.get(editId);
-  if (editId !== undefined && editId !== null && (!selected || selected.type !== "context_edit" || selected.targetId !== id)) fail(`Stale context edit ${editId} for ${id}.`);
-  if (selected?.replacement === null) return null;
-  return clone(selected?.replacement?.content ?? messageOf(source).content);
-}
-
-function editIdAt(branch, id) {
-  return branchIndex(branch).edits.get(id)?.id ?? null;
-}
-
-function sourceById(boundary) {
-  const result = new Map();
   for (const item of boundary?.context?.contextEntries ?? []) {
-    if (item?.sourceEntry?.id && isEditable(item.sourceEntry)) result.set(item.sourceEntry.id, item);
+    if (editable(item.sourceEntry)) active.set(item.sourceEntry.id, item);
+    if (item.sourceEntry.type === "context_edit") edits.set(item.sourceEntry.targetId, item.sourceEntry);
   }
-  return result;
+  return { branch, byId, positions, editsByTarget, groups, active, edits };
 }
-
-function contentFromBoundary(item) {
-  const message = item?.messages?.[0];
-  return message?.content;
+function source(index, id) {
+  const entry = index.byId.get(id);
+  if (!entry) fail(`Unknown or wrong-branch source ${id}.`);
+  if (!editable(entry)) fail(`Reserved or non-editable source ${id}.`);
+  return entry;
 }
-
-function savedSnapshot(branch, boundary, excludedIds) {
-  const sources = sourceById(boundary);
+function historicalContent(index, id, editId) {
+  const entry = source(index, id);
+  if (editId === null) return messageOf(entry).content;
+  const edit = index.byId.get(editId);
+  if (edit?.type !== "context_edit" || edit.targetId !== id) fail(`Stale edit reference ${editId} for ${id}.`);
+  return edit.replacement?.content ?? null;
+}
+function projectedContent(entry, content) {
+  const role = messageOf(entry).role;
+  return typeof content === "string" && ["assistant", "toolResult"].includes(role) ? [{ type: "text", text: content }] : content;
+}
+function versionContent(index, id, version) {
+  const entry = source(index, id);
+  const original = messageOf(entry).content;
+  if (contentVersion(original) === version) return original;
+  const rows = index.editsByTarget.get(id) ?? [];
+  for (let position = rows.length - 1; position >= 0; position--) {
+    const content = rows[position].replacement?.content;
+    if (content !== undefined) {
+      const projected = projectedContent(entry, content);
+      if (contentVersion(projected) === version) return projected;
+    }
+  }
+  fail(`Version ${version} of source ${id} is unavailable.`);
+}
+function visible(index, id) {
+  source(index, id);
+  const message = index.active.get(id)?.messages[0];
+  if (!message) fail(`Source ${id} is omitted; load it before this operation.`);
+  return message;
+}
+function exchangeClosure(index, ids) {
+  const selected = new Set(ids);
+  for (const id of ids) {
+    const entry = source(index, id);
+    const group = index.groups.get(id);
+    if (!group && messageOf(entry).role === "toolResult") fail(`Tool result ${id} has no matching tool call.`);
+    if (!group) continue;
+    if (group.duplicate || group.calls.size !== group.results.size) fail(`Tool exchange ${id} is incomplete or duplicated.`);
+    for (const member of group.ids) selected.add(member);
+  }
+  if (selected.size > MAX_SOURCES) fail("The complete tool exchange exceeds the source bound.");
+  return selected;
+}
+function snapshot(index, turnIds) {
   const saved = [];
-  for (const [id, item] of sources) {
-    if (excludedIds.has(id)) continue;
-    const content = contentFromBoundary(item);
-    if (content === undefined) continue;
-    saved.push({ id, editId: editIdAt(branch, id), version: hash(content), visible: item.messages.length > 0 });
+  for (const [id, item] of index.active) {
+    if (turnIds.has(id)) continue;
+    const message = item.messages[0];
+    saved.push({ id, editId: index.edits.get(id)?.id ?? null, visible: Boolean(message) });
   }
+  if (saved.length > MAX_SOURCES) fail("Too many active sources; compact or spill before entering a frame.");
   return saved;
 }
-
-function firstKeptId(branch, saved) {
-  const { byId } = branchIndex(branch);
-  return saved.map((item) => byId.get(item.id)).find((entry) => entry?.type === "message" || entry?.type === "custom_message")?.id ?? null;
+function nativeEdit(targetId, content) { return { type: "context_edit", targetId, replacement: content === null ? null : { content: structuredClone(content) } }; }
+function nativeMessage(content, details = {}) { return { type: "custom_message", customType: CONTEXT_MESSAGE_TYPE, content: structuredClone(content), display: false, details }; }
+function nativeCheckpoint(summary, firstKeptEntryId, operationId) { return { type: "compaction", summary, firstKeptEntryId, details: { compassOperation: operationId } }; }
+function latestSummary(boundary) {
+  return boundary.context.contextEntries.find((item) => item.sourceEntry.type === "compaction" && item.messages.some((message) => message.role === "compactionSummary"))?.sourceEntry ?? null;
 }
-
-function nativeEdit(targetId, content) {
-  return { type: "context_edit", targetId, replacement: content === null ? null : { content: clone(content) } };
-}
-function nativeMessage(content, details = {}) {
-  return { type: "custom_message", customType: CONTEXT_MESSAGE_TYPE, content, display: false, details };
-}
-function internalNote(text, details = {}) { return nativeMessage(text, details); }
-function compactSummary(text, firstKeptEntryId, details) {
-  return { type: "compaction", summary: text, firstKeptEntryId, details };
-}
-function checkContent(content, label) {
-  if (content === undefined || content === null || byteLength(content) > MAX_COPY_BYTES) fail(`${label} exceeds the 128 KiB context bound.`);
-}
-function pinnedIds(state) {
-  return new Set(state.pins.map((pin) => pin.id));
-}
-function ancestorPinnedIds(state) {
-  const scopes = new Set(["root", ...state.frames.map((frame) => frame.id)]);
-  return new Set(state.pins.filter((pin) => scopes.has(pin.scope)).map((pin) => pin.id));
-}
-function modelRoleForId(branch, id) { return messageOf(currentSource(branch, id))?.role; }
-
-function toolExchangeIds(branch, selectedIds) {
-  const calls = new Map();
-  const results = new Map();
-  const sourceIds = new Set(selectedIds);
-  for (const entry of branch) {
-    const message = messageOf(entry);
-    if (message?.role === "assistant" && Array.isArray(message.content)) {
-      for (const part of message.content) if (part?.type === "toolCall" && typeof part.id === "string") calls.set(part.id, entry.id);
-    }
-    if (message?.role === "toolResult" && typeof message.toolCallId === "string") results.set(message.toolCallId, entry.id);
-  }
-  for (const id of selectedIds) {
-    const role = modelRoleForId(branch, id);
-    if (role === "assistant") {
-      const message = messageOf(currentSource(branch, id));
-      const callIds = (message.content ?? []).filter((part) => part?.type === "toolCall").map((part) => part.id);
-      if (!callIds.length) continue;
-      const missing = callIds.filter((callId) => !results.has(callId));
-      if (missing.length) fail(`Tool exchange ${id} is incomplete; it cannot be dropped.`);
-      sourceIds.add(...callIds.map((callId) => results.get(callId)));
-    } else if (role === "toolResult") {
-      const message = messageOf(currentSource(branch, id));
-      const assistantId = calls.get(message.toolCallId);
-      if (!assistantId) fail(`Tool result ${id} has no matching assistant tool call.`);
-      sourceIds.add(assistantId);
-    }
-  }
-  return sourceIds;
-}
-
-function activeWatchIds(state, owner) {
-  return Object.entries(state.watches).filter(([, watch]) => watch.owner === owner).map(([id]) => id);
-}
-
 function operationFromBoundary(boundary, toolName) {
-  if (!boundary || boundary.message?.role !== "assistant" || !Array.isArray(boundary.message.content)) return null;
-  const calls = boundary.message.content.filter((part) => part?.type === "toolCall" && part.name === toolName);
-  if (calls.length !== 1 || boundary.toolResults?.length !== 1) return null;
-  const call = calls[0];
+  const calls = boundary.message?.role === "assistant" ? boundary.message.content.filter((part) => part.type === "toolCall") : [];
+  const own = calls.filter((call) => call.name === toolName);
+  if (!own.length) return null;
+  if (calls.length !== 1 || boundary.toolResults?.length !== 1) fail("Context mutation must be a standalone tool call, not part of a parallel tool batch.");
   const result = boundary.toolResults[0];
-  if (result.toolCallId !== call.id || result.isError || !isObject(result.details?.contextOperation)) return null;
-  return { ...result.details.contextOperation, callId: call.id };
+  if (result.isError) return null;
+  if (result.toolCallId !== own[0].id || !object(result.details?.contextOperation)) return null;
+  return { ...result.details.contextOperation, callId: own[0].id, id: boundary.messageEntryId };
+}
+
+function planCall({ next, index, boundary, operation, turnIds }) {
+  if (next.frames.length >= MAX_DEPTH) fail("Context frame depth limit (16) reached.");
+  ensureText(operation.task, "Frame task", 4_000);
+  const captures = operation.capture ?? [];
+  ensureIds(captures.map((item) => item.id), "capture IDs");
+  const refs = [];
+  const copies = [];
+  for (const item of captures) {
+    if (!["ref", "copy"].includes(item.mode)) fail("Capture mode must be ref or copy.");
+    const content = visible(index, item.id).content;
+    if (contentVersion(content) !== item.version) fail(`Stale capture ${item.id}.`);
+    if (item.mode === "ref") refs.push({ id: item.id, version: item.version });
+    else { ensureContent(content); copies.push({ ...item, content }); }
+  }
+  const saved = snapshot(index, turnIds);
+  const summary = latestSummary(boundary);
+  const frame = { id: operation.id, parent: next.frames.at(-1)?.id ?? "root", boundaryId: boundary.messageEntryId, saved, refs, summaryId: summary?.id ?? null };
+  const kept = exchangeClosure(index, [...refs.map((item) => item.id), ...next.pins.map((pin) => pin.id)]);
+  for (const id of kept) visible(index, id);
+  next.frames.push(frame);
+  const entries = summary ? [nativeCheckpoint("", saved[0]?.id ?? null, operation.id)] : [];
+  for (const [id, item] of index.active) if (item.messages.length && (turnIds.has(id) || !kept.has(id))) entries.push(nativeEdit(id, null));
+  for (const copy of copies) entries.push(nativeMessage(copy.content, { frame: frame.id, mode: "copy", source: copy.id, version: copy.version }));
+  entries.push(nativeMessage(`Frame ${frame.id}; context revision ${next.revision + 1}.\nTask: ${operation.task}\nExplicit ref sources: ${refs.map((ref) => ref.id).join(", ") || "none"}. Return explicitly with compass_context; exports default to none. Environment effects remain.`, { frame: frame.id, action: "call" }));
+  return entries;
+}
+function external(entry) {
+  const message = messageOf(entry);
+  return message?.role === "user" || (message?.role === "custom" && EXTERNAL_MESSAGES.has(message.customType));
+}
+function planReturn({ next, index, boundary, operation }) {
+  const frame = next.frames.at(-1);
+  if (!frame) fail("No active context frame.");
+  const watches = Object.keys(next.watches).filter((id) => next.watches[id].owner === frame.id);
+  if (watches.length) fail(`Frame owns active watches: ${watches.join(", ")}. Cancel or transfer them before returning.`);
+  ensureIds(operation.exportIds ?? [], "export IDs");
+  const boundaryPosition = index.positions.get(frame.boundaryId);
+  if (boundaryPosition === undefined) fail("Frame boundary is not on the active branch.");
+  const savedIds = new Set(frame.saved.map((item) => item.id));
+  const references = new Map(frame.refs.map((ref) => [ref.id, ref.version]));
+  const owned = index.branch.slice(boundaryPosition).filter(editable);
+  const summary = frame.summaryId === null ? null : index.byId.get(frame.summaryId);
+  if (frame.summaryId !== null && summary?.type !== "compaction") fail("Parent summary is unavailable on this branch.");
+  const firstKeptEntryId = frame.saved[0]?.id ?? summary?.id ?? owned.find(external)?.id ?? null;
+  const entries = latestSummary(boundary)?.id !== frame.summaryId
+    ? [nativeCheckpoint(summary?.summary ?? "", firstKeptEntryId, operation.id)] : [];
+  // Iterate raw owned entries, not just the currently visible tail: compaction can hide local process.
+  for (const entry of owned) if (!savedIds.has(entry.id) && !external(entry)) entries.push(nativeEdit(entry.id, null));
+  for (const saved of frame.saved) {
+    const version = next.writes[saved.id] ?? references.get(saved.id);
+    const content = version ? versionContent(index, saved.id, version) : saved.visible ? historicalContent(index, saved.id, saved.editId) : null;
+    entries.push(nativeEdit(saved.id, content));
+  }
+  for (const id of operation.exportIds ?? []) {
+    const content = visible(index, id).content;
+    ensureContent(content);
+    entries.push(nativeMessage(content, { frame: frame.id, action: "export", source: id }));
+  }
+  if (operation.result !== undefined && operation.result !== "") {
+    ensureText(operation.result, "Return value");
+    entries.push(nativeMessage(`Return from ${frame.id}:\n${operation.result}`, { frame: frame.id, action: "result" }));
+  }
+  next.frames.pop();
+  next.pins = next.pins.filter((pin) => pin.scope !== frame.id);
+  const remainingRefs = new Set(next.frames.flatMap((item) => item.refs.map((ref) => ref.id)));
+  next.writes = Object.fromEntries(Object.entries(next.writes).filter(([id]) => remainingRefs.has(id)));
+  entries.push(nativeMessage(`Returned from ${frame.id}; context revision ${next.revision + 1}. Local process released; environment effects remain.`, { frame: frame.id, action: "return" }));
+  return entries;
+}
+function planPins({ next, index, operation }) {
+  ensureIds(operation.ids);
+  if (!operation.ids.length) fail("Select sources to pin or unpin.");
+  const scope = next.frames.at(-1)?.id ?? "root";
+  for (const id of exchangeClosure(index, operation.ids)) {
+    if (operation.action === "pin") {
+      visible(index, id);
+      if (!next.pins.some((pin) => pin.id === id && pin.scope === scope)) next.pins.push({ id, scope });
+    } else next.pins = next.pins.filter((pin) => pin.id !== id || pin.scope !== scope);
+  }
+  if (next.pins.length > MAX_PINS) fail("At most 64 sources may be pinned.");
+  return [];
+}
+function planEdits({ next, index, operation }) {
+  ensureIds(operation.ids);
+  if (!operation.ids.length) fail("Select sources to edit.");
+  const ids = operation.action === "drop" ? exchangeClosure(index, operation.ids) : new Set(operation.ids);
+  if (operation.action === "replace" && ids.size !== 1) fail("Replacement requires exactly one source.");
+  const versions = new Map((operation.versions ?? []).map((item) => [item.id, item.version]));
+  const refs = new Set(next.frames.flatMap((frame) => frame.refs.map((ref) => ref.id)));
+  const entries = [];
+  for (const id of ids) {
+    const message = visible(index, id);
+    if (next.pins.some((pin) => pin.id === id)) fail(`Pinned source ${id} must be explicitly unpinned first.`);
+    if (message.role === "user") fail("Human messages cannot be replaced or dropped.");
+    if (operation.action === "replace" && message.role === "assistant" && message.content.some((part) => part.type === "toolCall")) fail("Assistant tool calls cannot be replaced; this would fabricate or orphan an execution.");
+    if (operation.action === "drop" && refs.has(id)) fail(`Referenced outer slot ${id} cannot be dropped.`);
+    const expected = operation.action === "replace" ? operation.version : versions.get(id);
+    ensureVersion(expected);
+    if (contentVersion(message.content) !== expected) fail(`Source ${id} changed since selection.`);
+    let content = null;
+    if (operation.action === "replace") {
+      ensureText(operation.content, "Replacement");
+      content = ["assistant", "toolResult"].includes(message.role) ? [{ type: "text", text: operation.content }] : operation.content;
+      ensureContent(content);
+    }
+    entries.push(nativeEdit(id, content));
+    if (refs.has(id)) next.writes[id] = contentVersion(content);
+  }
+  return entries;
+}
+function transitionEntries(state, branch, boundary, operation, entries) {
+  const intent = { type: "custom", customType: INTENT_TYPE, data: { operationId: operation.id, baseRevision: state.revision - 1 } };
+  const all = [...(boundary.entries ?? []), intent, ...entries];
+  const persisted = contextStateEntry(state);
+  persisted.data.commit = { operationId: operation.id, fromLeafId: branch.at(-1)?.id ?? null, count: all.length, digest: contentVersion({ entries: all.map(draftShape), state: persisted.data }) };
+  return [intent, ...entries, persisted];
+}
+
+export function planContextBoundary({ state: input, branch, boundary, toolName = "compass_context" }) {
+  const operation = operationFromBoundary(boundary, toolName);
+  if (!operation || operation.action === "search") return null;
+  const next = normalizeContextState(input);
+  if (operation.expectedRevision !== next.revision) fail(`Stale context revision ${operation.expectedRevision}; current revision is ${next.revision}.`);
+  if ((boundary.entries ?? []).some((entry) => entry.type !== "custom")) fail("Another extension proposed context changes; run this context operation at a separate boundary.");
+  const args = { next, index: sourceIndex(branch, boundary), boundary, operation, turnIds: new Set([boundary.messageEntryId, ...boundary.toolResultEntryIds]) };
+  let entries;
+  switch (operation.action) {
+    case "call": entries = planCall(args); break;
+    case "return": entries = planReturn(args); break;
+    case "pin": case "unpin": entries = planPins(args); break;
+    case "replace": case "drop": entries = planEdits(args); break;
+    default: fail(`Unknown context action ${operation.action}.`);
+  }
+  next.revision += 1;
+  if (!["call", "return"].includes(operation.action)) entries.push(nativeMessage(`Context ${operation.action} applied; revision ${next.revision}. Sources: ${(operation.ids ?? []).join(", ")}.`, { action: operation.action, revision: next.revision }));
+  return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: ["call", "return"].includes(operation.action) && boundary.outcome === "completed" };
 }
 
 function updateWatches(state, boundary) {
-  const next = clone(state.watches);
+  const watches = structuredClone(state.watches);
   for (const result of boundary.toolResults ?? []) {
-    if (!result?.toolName) continue;
-    const parsed = (() => {
-      try { return JSON.parse((result.content ?? []).filter((part) => part?.type === "text").map((part) => part.text).join("\n")); } catch { return null; }
-    })();
-    const details = isObject(result.details) ? result.details : parsed;
-    if (result.toolName === "watch" && details?.id && ["armed", "already-armed"].includes(details.status)) {
-      const owner = state.frames.at(-1)?.id ?? "root";
-      if (!next[details.id]) next[details.id] = { owner };
-    }
-    if (result.toolName === "unwatch" && Array.isArray(details?.cancelledIds)) {
-      for (const id of details.cancelledIds) delete next[id];
-    }
+    if (result.isError) continue;
+    const details = result.details;
+    if (result.toolName === "watch" && details?.id && ["armed", "already-armed"].includes(details.status) && !watches[details.id]) watches[details.id] = { owner: state.frames.at(-1)?.id ?? "root" };
+    if (result.toolName === "unwatch") for (const id of details?.cancelledIds ?? []) delete watches[id];
   }
-  return next;
+  return watches;
 }
-
-/** Bounded on-demand lookup. Hits are references; they do not authorize edits. */
 export function planWatchBoundary({ state: input, boundary }) {
   const state = normalizeContextState(input);
   const watches = updateWatches(state, boundary);
@@ -247,12 +384,11 @@ export function planWatchBoundary({ state: input, boundary }) {
   const next = { ...state, watches, revision: state.revision + 1 };
   return { state: next, entries: [contextStateEntry(next)], continue: false };
 }
-
 export function releaseWatchMessages(input, text) {
   const state = normalizeContextState(input);
-  if (typeof text !== "string" || !text.includes("WATCH_")) return null;
-  const ids = [...text.matchAll(/(?:^|\n)id:\s*(w\d+)\b/gim)].map((match) => match[1]);
-  if (!ids.length) return null;
+  if (typeof text !== "string" || !/^WATCH_(?:SETTLED|LOST):/.test(text)) return null;
+  if (/^repeat: round .*?(?:armed|still armed)/m.test(text)) return null;
+  const ids = [...text.matchAll(/(?:^|\n)id:\s*(w\d+)\b/g)].map((match) => match[1]);
   const watches = { ...state.watches };
   let changed = false;
   for (const id of ids) if (watches[id]) { delete watches[id]; changed = true; }
@@ -261,169 +397,22 @@ export function releaseWatchMessages(input, text) {
   return { state: next, entry: contextStateEntry(next) };
 }
 
-export function searchContext(branch, boundary, state, { query = "", ids = [], limit = 8 } = {}) {
+/** Search remains lexical until M3 adds explicit historical loading and semantic ranking. */
+export function searchContext(_branch, boundary, state, { query = "", ids = [], limit = 8 } = {}) {
   ensureIds(ids);
-  if (typeof query !== "string" || query.length > 400) fail("Search query must be at most 400 characters.");
-  if (!Number.isInteger(limit) || limit < 1 || limit > 16) fail("Search limit must be between 1 and 16.");
+  if (typeof query !== "string" || query.length > 400 || !Number.isInteger(limit) || limit < 1 || limit > 16) fail("Search requires query <=400 characters and limit 1..16.");
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   const selected = new Set(ids);
   const hits = [];
-  for (const item of [...(boundary?.context?.contextEntries ?? [])].reverse()) {
-    const source = item.sourceEntry;
-    if (!isEditable(source) || (selected.size && !selected.has(source.id)) || !item.messages.length) continue;
+  for (const item of [...boundary.context.contextEntries].reverse()) {
+    if (!editable(item.sourceEntry) || !item.messages.length || (selected.size && !selected.has(item.sourceEntry.id))) continue;
     const message = item.messages[0];
-    const text = textContent(message.content);
-    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-    if (terms.length && !terms.every((term) => text.toLowerCase().includes(term))) continue;
-    const start = terms.length ? Math.max(0, text.toLowerCase().indexOf(terms[0]) - 80) : 0;
-    hits.push({ id: source.id, role: message.role, version: hash(message.content), chars: text.length, pinned: state.pins.some((pin) => pin.id === source.id), excerpt: text.slice(start, start + 600) });
-    if (hits.length >= limit) break;
+    const text = textOf(message.content);
+    const lower = text.toLowerCase();
+    if (!terms.every((term) => lower.includes(term))) continue;
+    const start = terms.length ? Math.max(0, lower.indexOf(terms[0]) - 80) : 0;
+    hits.push({ id: item.sourceEntry.id, role: message.role, version: contentVersion(message.content), chars: text.length, pinned: state.pins.some((pin) => pin.id === item.sourceEntry.id), excerpt: text.slice(start, start + 600) });
+    if (hits.length === limit) break;
   }
   return { revision: state.revision, frame: state.frames.at(-1)?.id ?? "root", hits };
-}
-
-/** Plan entering a frame and keep only explicit references plus inherited pins. */
-function planCall({ next, branch, boundary, operation, sourceMap, turnIds, inheritedPins }) {
-  if (next.frames.length >= MAX_DEPTH) fail("Context frame depth limit (16) reached.");
-  ensureText(operation.task, "Frame task", 4_000);
-  const capture = Array.isArray(operation.capture) ? operation.capture : [];
-  ensureIds(capture.map((item) => item?.id), "capture IDs");
-  const refs = [];
-  const copies = [];
-  for (const item of capture) {
-    if (!isObject(item) || !["ref", "copy"].includes(item.mode)) fail("Each capture must specify mode ref or copy.");
-    const source = sourceMap.get(item.id);
-    if (!source?.messages?.length) fail(`Capture ${item.id} is not visible in the current context.`);
-    const content = contentFromBoundary(source);
-    if (hash(content) !== item.version) fail(`Capture ${item.id} is stale; search again for its current version.`);
-    if (item.mode === "ref") refs.push({ id: item.id, version: item.version });
-    else { checkContent(content, `Copy ${item.id}`); copies.push({ id: item.id, content, version: item.version }); }
-  }
-  const saved = savedSnapshot(branch, boundary, turnIds);
-  const frame = { id: operation.callId, parent: next.frames.at(-1)?.id ?? "root", boundaryId: boundary.messageEntryId, saved, refs };
-  next.frames.push(frame);
-  const keep = new Set([...refs.map((item) => item.id), ...inheritedPins]);
-  const entries = [compactSummary(`Frame ${frame.id} entered. Parent context is suspended; only explicit references and pinned material remain.`, firstKeptId(branch, saved), { compassFrame: frame.id, action: "call" })];
-  for (const [id, item] of sourceMap) {
-    if (turnIds.has(id)) entries.push(nativeEdit(id, null));
-    else if (!keep.has(id) && item.messages.length) entries.push(nativeEdit(id, null));
-    else if (keep.has(id) && !item.messages.length) {
-      const content = contentAt(branch, id);
-      if (content === null) fail(`Pinned or referenced source ${id} is unavailable in the current projection.`);
-      entries.push(nativeEdit(id, content));
-    }
-  }
-  for (const copy of copies) entries.push(nativeMessage(copy.content, { frame: frame.id, mode: "copy", source: copy.id, version: copy.version }));
-  entries.push(internalNote(`Frame ${frame.id}\nTask: ${operation.task}\nUse compass_context action=return to leave. Capture and export default to none. Environment changes are not rolled back.`, { frame: frame.id, action: "call" }));
-  return entries;
-}
-
-/** Plan returning to the parent projection while retaining Human steering. */
-function planReturn({ next, branch, operation, sourceMap }) {
-  const frame = next.frames.at(-1);
-  if (!frame) fail("No active context frame.");
-  const ownedWatches = activeWatchIds(next, frame.id);
-  if (ownedWatches.length) fail(`Frame owns active watches: ${ownedWatches.join(", ")}. Cancel or transfer them before returning.`);
-  const exportIds = Array.isArray(operation.exportIds) ? operation.exportIds : [];
-  ensureIds(exportIds, "export IDs");
-  const savedIds = new Set(frame.saved.map((item) => item.id));
-  const refs = new Set(frame.refs.map((item) => item.id));
-  const userIdsAfterBoundary = new Set();
-  const boundaryIndex = branch.findIndex((entry) => entry.id === frame.boundaryId);
-  for (const entry of branch.slice(boundaryIndex + 1)) if (messageOf(entry)?.role === "user") userIdsAfterBoundary.add(entry.id);
-  const preserve = new Set([...savedIds, ...userIdsAfterBoundary]);
-  const entries = [compactSummary(`Returned from frame ${frame.id}. Local work is released; exported values and Human messages remain.`, firstKeptId(branch, frame.saved), { compassFrame: frame.id, action: "return" })];
-  for (const [id, item] of sourceMap) {
-    if (!preserve.has(id) && item.messages.length && messageOf(currentSource(branch, id))?.role !== "user") entries.push(nativeEdit(id, null));
-  }
-  for (const saved of frame.saved) if (!refs.has(saved.id)) entries.push(nativeEdit(saved.id, saved.visible ? contentAt(branch, saved.id, saved.editId) : null));
-  for (const id of exportIds) {
-    const item = sourceMap.get(id);
-    if (!item?.messages?.length) fail(`Export ${id} is not visible in the current context.`);
-    const content = contentFromBoundary(item);
-    checkContent(content, `Export ${id}`);
-    entries.push(nativeMessage(content, { frame: frame.id, action: "export", source: id }));
-  }
-  if (operation.result !== undefined) {
-    ensureText(operation.result, "Frame result", 8_000);
-    entries.push(internalNote(`Return from ${frame.id}:\n${operation.result}`, { frame: frame.id, action: "result" }));
-  }
-  entries.push(internalNote(`Frame ${frame.id} returned; local context released.`, { frame: frame.id, action: "return" }));
-  next.frames.pop();
-  next.pins = next.pins.filter((pin) => pin.scope !== frame.id);
-  const activeRefs = new Set(next.frames.flatMap((item) => item.refs.map((ref) => ref.id)));
-  next.writes = Object.fromEntries(Object.entries(next.writes).filter(([id]) => activeRefs.has(id)));
-  return entries;
-}
-
-function planPins({ next, branch, operation, sourceMap, scope }) {
-  const ids = ensureIds(operation.ids);
-  if (!ids.length) fail("Select at least one source to pin or unpin.");
-  for (const id of ids) {
-    const item = sourceMap.get(id);
-    if (!item) currentSource(branch, id);
-    if (operation.action === "pin") {
-      if (!item.messages.length) fail(`Cannot pin omitted source ${id}; load it first.`);
-      if (!next.pins.some((pin) => pin.id === id && pin.scope === scope)) next.pins.push({ id, scope });
-    } else next.pins = next.pins.filter((pin) => pin.id !== id || pin.scope !== scope);
-  }
-  if (next.pins.length > MAX_PINS) fail("At most 64 source references may be pinned.");
-  return [];
-}
-
-function planEdits({ next, branch, operation, sourceMap, currentPins }) {
-  const ids = ensureIds(operation.ids);
-  if (!ids.length) fail("Select at least one source to replace or drop.");
-  const expanded = operation.action === "drop" ? toolExchangeIds(branch, ids) : new Set(ids);
-  if (operation.action === "replace" && expanded.size !== 1) fail("Replacement requires exactly one source.");
-  const refIds = new Set(next.frames.flatMap((frame) => frame.refs.map((ref) => ref.id)));
-  const expectedVersions = new Map(Array.isArray(operation.versions) ? operation.versions.map((item) => [item.id, item.version]) : []);
-  const entries = [];
-  for (const id of expanded) {
-    const source = currentSource(branch, id);
-    const item = sourceMap.get(id);
-    if (!item?.messages?.length) fail(`Source ${id} is omitted; search/load it before editing.`);
-    if (currentPins.has(id)) fail(`Pinned source ${id} must be explicitly unpinned first.`);
-    const actualVersion = hash(contentFromBoundary(item));
-    const role = messageOf(source)?.role;
-    if (role === "user") fail("Human messages cannot be replaced or dropped.");
-    if (operation.action === "drop" && refIds.has(id)) fail(`Referenced outer slot ${id} cannot be dropped; replace its value instead.`);
-    const expectedVersion = operation.action === "replace" ? operation.version : expectedVersions.get(id);
-    ensureVersion(expectedVersion);
-    if (expectedVersion !== actualVersion) fail(`Source ${id} changed since it was selected; no edit applied.`);
-    if (operation.action === "replace") ensureText(operation.content, "Replacement content");
-    const content = operation.action === "drop" ? null : ["assistant", "toolResult"].includes(role) ? [{ type: "text", text: operation.content }] : operation.content;
-    checkContent(content, `Replacement for ${id}`);
-    entries.push(nativeEdit(id, content));
-    if (refIds.has(id)) next.writes[id] = hash(content);
-  }
-  return entries;
-}
-
-/**
- * Convert one completed tool turn into append-only native boundary entries.
- * The returned state is metadata only; all message content remains in Pi's transcript.
- */
-export function planContextBoundary({ state: input, branch, boundary, toolName = "compass_context", watchResult = true }) {
-  const state = normalizeContextState(input);
-  const operation = operationFromBoundary(boundary, toolName);
-  if (!operation || operation.action === "search") return null;
-  if (operation.expectedRevision !== state.revision) fail(`Stale context revision ${operation.expectedRevision}; current revision is ${state.revision}.`);
-  const next = clone(state);
-  const sourceMap = sourceById(boundary);
-  const turnIds = new Set([boundary.messageEntryId, ...(boundary.toolResultEntryIds ?? [])]);
-  const scope = next.frames.at(-1)?.id ?? "root";
-  const entries = operation.action === "call"
-    ? planCall({ next, branch, boundary, operation, sourceMap, turnIds, inheritedPins: ancestorPinnedIds(next) })
-    : operation.action === "return"
-      ? planReturn({ next, branch, operation, sourceMap })
-      : ["pin", "unpin"].includes(operation.action)
-        ? planPins({ next, branch, operation, sourceMap, scope })
-        : ["replace", "drop"].includes(operation.action)
-          ? planEdits({ next, branch, operation, sourceMap, currentPins: pinnedIds(next) })
-          : fail(`Unknown context action ${operation.action}.`);
-  if (watchResult) next.watches = updateWatches(next, boundary);
-  next.revision += 1;
-  next.writes = Object.fromEntries(Object.entries(next.writes).filter(([id]) => next.frames.some((frame) => frame.refs.some((ref) => ref.id === id))));
-  entries.push(contextStateEntry(next));
-  return { state: next, entries, continue: ["call", "return"].includes(operation.action) && boundary.outcome === "completed" };
 }

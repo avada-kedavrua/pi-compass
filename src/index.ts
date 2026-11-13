@@ -1108,10 +1108,17 @@ function contextBoundaryPreview(ctx: any) {
   };
 }
 function restoreContext(ctx: any) {
-  let branch: any[] = [];
-  try { branch = ctx?.sessionManager?.getBranch?.() ?? []; } catch { branch = []; }
-  contextState = restoreContextState(branch);
-  return contextState;
+  try {
+    const branch = ctx?.sessionManager?.getBranch?.();
+    if (!Array.isArray(branch)) throw new Error("Native active-branch context is unavailable; no context state was reset.");
+    contextState = restoreContextState(branch);
+    return contextState;
+  } catch (error) {
+    // Hook exceptions alone do not stop Pi's provider request. Abort through the
+    // public lifecycle API if a context commit is corrupt or incomplete.
+    ctx?.abort?.();
+    throw error;
+  }
 }
 function contextOperationSchema() {
   const sourceId = Type.String({ minLength: 1, maxLength: 64, description: "Stable source entry ID returned by compass_context search; never use a message index." });
@@ -1146,7 +1153,8 @@ function registerContextTool(pi: any) {
     async execute(toolCallId: string, params: any, ...rest: any[]) {
       return serialized(async () => {
         const ctx = getContext(rest);
-        if (needsRestore) { state = restoreState(ctx); restoreContext(ctx); needsRestore = false; }
+        if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+        restoreContext(ctx);
         const action = String(params?.action ?? "");
         if (!Number.isInteger(params?.expectedRevision) || params.expectedRevision !== contextState.revision) {
           throw new Error(`Stale context revision ${params?.expectedRevision}; current revision is ${contextState.revision}. No context changed.`);
@@ -1973,6 +1981,7 @@ function errorSummary(event: any): string {
 
 export default function (pi: any) {
   state = emptyGoalRunState();
+  contextState = emptyContextState();
   needsRestore = true;
   loaderName = "";
   loaderSignature = "";
@@ -2062,22 +2071,28 @@ export default function (pi: any) {
 
   pi.on("message_end", async (event: any, ctx: any) => {
     const message = event?.message;
-    if (message?.role !== "user") return;
+    const human = message?.role === "user";
+    const nativeWatch = message?.role === "custom" && ["watch-condition", "watch-lost"].includes(message.customType);
+    if (!human && !nativeWatch) return;
     const text = messageText(message);
     if (!text) return;
     await serialized(async () => {
       if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
-      const watchRelease = releaseWatchMessages(contextState, text);
-      if (watchRelease) {
-        contextState = watchRelease.state;
-        try { pi.appendEntry?.(CONTEXT_STATE_TYPE, watchRelease.entry.data); } catch { /* next boundary can recover the in-memory ownership */ }
+      restoreContext(ctx);
+      if (nativeWatch) {
+        const watchRelease = releaseWatchMessages(contextState, text);
+        if (watchRelease) {
+          pi.appendEntry(CONTEXT_STATE_TYPE, watchRelease.entry.data);
+          restoreContext(ctx);
+        }
+        return;
       }
       const captured = captureHumanPrompt(state, text, { source: "message_end", messageId: String(message?.id ?? event?.messageId ?? "") });
       if (!captured.captured) return;
       state = captured.state;
       refreshAfterHumanInput(pi, ctx);
     });
-    if (explicitSubagentVisibilityRequest(text) === "human_prohibited_subagents") {
+    if (human && explicitSubagentVisibilityRequest(text) === "human_prohibited_subagents") {
       cancelActiveDelegations(pi, "Latest Human instruction prohibits Subagent execution.");
     }
   });
@@ -2090,8 +2105,8 @@ export default function (pi: any) {
     else {
       const branchState = restoreState(ctx);
       if (branchState.stateRevision > (state.stateRevision ?? 0) || (!state.goal.original && branchState.goal.original)) state = branchState;
-      restoreContext(ctx);
     }
+    restoreContext(ctx);
     ensureCurrentLoadout(pi, ctx);
     // Do not rebuild request history or append a volatile full-state anchor.
   });
@@ -2111,16 +2126,17 @@ export default function (pi: any) {
   pi.on("turn_end", async (event: any, ctx: any) => serialized(async () => {
     if (needsRestore) { state = restoreState(ctx); restoreContext(ctx); needsRestore = false; }
     const branch = ctx?.sessionManager?.getBranch?.() ?? [];
+    restoreContext(ctx);
     try {
       const planned = planContextBoundary({ state: contextState, branch, boundary: event });
       if (planned) {
-        contextState = planned.state;
+        // Pi commits only after all boundary handlers finish. Reconcile the
+        // committed branch on the next read, never activate this proposal here.
         return { entries: [...(event.entries ?? []), ...planned.entries], continue: planned.continue };
       }
       const watchPlan = planWatchBoundary({ state: contextState, boundary: event });
       if (!watchPlan) return;
-      contextState = watchPlan.state;
-      return { entries: [...(event.entries ?? []), ...watchPlan.entries], continue: false };
+      return { entries: [...(event.entries ?? []), ...watchPlan.entries] };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return {
@@ -2139,6 +2155,9 @@ export default function (pi: any) {
   // Capture explicit writes, failed tools, and structured answers returned by ask-user-questions.
   // All updates are serialized so a trace event cannot overwrite a concurrent Goal update.
   pi.on("tool_call", async (event: any) => serialized(async () => {
+    if (event?.toolName === "compass_context" && event?.parentToolCallId && event?.input?.action !== "search") {
+      return { block: true, reason: "Context mutations require a direct standalone compass_context call, not a nested Code Mode call. No context changed." };
+    }
     const rawTargets = explicitWriteTargets(event);
     if (!rawTargets.length) return;
     const cwd = state.projectRoot || process.cwd();

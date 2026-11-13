@@ -1,113 +1,160 @@
-# Compass v0.10.0 — architecture and implementation TODO
+# Compass v0.10.0 — requirements, milestones and delivery gates
 
-Status: development contract, not an implemented or runtime-accepted release.
+Status: development in progress. The frame prototype at `c355469` is not ready for Human acceptance. Its passing tests did not cover the defects found in the requirement audit. This document is the single implementation checklist; unchecked items are not implemented or proven.
 
-## Objective and engineering contract
+## Source of requirements
 
-Minimize total cost to finish a Goal without reducing quality. Prefer a coherent design over a small patch. Refactor or replace existing mechanisms when that reduces coupling, runtime cost, memory, maintenance or future development. Do not ship legacy adapters, duplicate control planes or old/new implementations in parallel. A large diff is acceptable; shotgun edits and speculative abstractions are not.
+Original Pi session `01a1b90f-8faa-752a-bb77-8132146df4d9`:
 
-The Human is the Router; separately managed Pi sessions are Workers. Compass does not add a router, cross-session scheduler or agent loop. Runtime validates deterministic mechanics; the Agent owns semantic decisions. Conventions remain in global/project AGENTS.md and explicit Human instructions, not a Compass registry.
+- `d3f836a4`, `3e29e232`: ownership boundaries; RouteSet/DAG separation; Agent-owned attention; append-only context edits; compact continuity and caveats.
+- `32aac06e`: combine pi-subagents/pi-await; enumerate TODOs; implement, review, commit and push.
+- `3e76102b`, `5890f58d`: route choice/acceptance; nested problem solving; active Skills; reserved/pinned/working slots; explicit capture/export; spill/recovery and shared values.
+- Questionnaire `fffd355d`: frames affect context only; explicit input/output default none; shared slots are same-session; competing routes may stop only after explicit acceptance.
+- Questionnaire `f0645421`: function-like tasks; ref/copy; optional coroutine/async evaluation; exact/subset repeated-result relocation; similarity advisory; semantic source/range search; Human-approved DAG and acceptance; semantic step checks or optional independent reviewer; one Compass Skill; filesystem effects remain the Agent's responsibility.
+- Questionnaire `cb8490fc`: no additional Pi session for a frame; only work adopting a DAG requires approval.
+- Questionnaire `f9ad3946`: ref writes survive failure/interruption; uncaptured parent context may be searched; Agent returns explicitly; active owned watches prevent return.
+- `2ca81fba`, `569c8b29`: optimal coherent design, not minimal patches; no legacy/compatibility unless requested; root-cause fixes; evidence; research concrete uncertainties.
+- `8aa06cf7`, subsequent instructions: finish the development work locally, then Human tests in a separate Compass session; explain delivery in plain language.
 
-Research baseline: Pi 1.5.2; installed pi-subagents 0.88.0; sibling pi-await 1.3.0 candidate revision 4, commit `8a51e51`. Do not modify pi-await or global Pi configuration here. A source/API inspection is not live compatibility proof.
+Earlier speculative assistant suggestions are not additional Human requirements. In particular, an embedding database, character-offset editing, a second scheduler, forced optimization modes, and an always-running watchdog are not assumed requirements.
 
-## Confirmed semantics
+## Non-negotiable boundaries
 
-### Tasks and execution
+1. Human is Router; different Human-managed sessions are Workers. No extra Router, cross-session scheduler or Agent Loop.
+2. Pi owns raw append-only history, system/tool prompt state, branches and compaction. Never write session files or mutate the read-only session manager.
+3. Frames use the same running session and loop. Context rollback is not filesystem/environment rollback.
+4. Runtime handles deterministic state, references, versions, pairing, approval identity, dependency readiness and measurement. Agent handles semantic attention, route selection, caveats and judgment.
+5. pi-subagents owns child execution/status/cancellation; pi-await owns observation/watch lifecycle/wakes. Do not duplicate their execution loops or timers.
+6. Reserved instructions include Pi prompt/tool state and global/project AGENTS.md. Ordinary work appends. Context optimization may invalidate a cached suffix; never promise provider cache hits from prefix tests.
+7. Original Goal, Current Goal, Human constraints/decisions, plan and acceptance remain one GoalRun authority. Raw messages are referenced, not copied into another transcript store.
+8. No old/new implementation tracks or schema migration adapters in the delivered development contract. Preserving Pi's original transcript and Git history is explicitly required, not a reason to retain obsolete executable code.
+9. Simple work does not require a DAG, frame, subagent or verification ceremony. No unconditional setup call or search per task.
+10. A Human approval authorizes a plan; it does not prove execution success. Self-reported certainty is not independent proof. Implement the requested explicit semantic checks rather than silently dropping them or pretending code can prove semantics.
 
-Reuse the task as the unit of work. A route is an alternative strategy, not a DAG sibling. A DAG is optional; when used, its concrete definition and acceptance criteria require structured Human approval before execution. Material changes invalidate that approval; ordinary status changes do not.
+## Completion rules
 
-A task may run in the parent, through deterministic Code Mode, through an in-place context frame, or through pi-subagents when independent execution is justified. Do not create a second task registry or infer a new scheduler from this vocabulary. Current automatic delegation remains explicitly declared and read-only until its authority is deliberately changed.
+A TODO is complete only when its behavior exists, affected consumers agree, relevant failure paths are checked, and local evidence is recorded here. An API name, design paragraph, mock event-bus test, or unrelated passing suite is insufficient.
 
-Human approval is authorization and semantic alignment, not evidence that execution succeeded. Task completion, Agent assessment, independent review and Goal acceptance remain distinct. Do not use self-reported "100% confidence" as a proof gate. Unknown evidence stays unknown. Verification intensity must justify its cost.
+Each milestone gets a scoped diff review and commit. Independent review is used where it adds value, and findings are resolved before handoff. Human performs real interactive/provider acceptance after development; missing implementation and locally reproducible bugs are not delegated to Human as "acceptance".
 
-Explicitly authorized alternative routes may stop competitors only after a clear acceptance gate passes. Cancellation acknowledgements and actual termination are different facts. Filesystem effects are the Agent's responsibility; frame pop does not roll them back.
+Evaluations end with evidence and a decision: implement, reuse a native capability, or explicitly defer with a reason. An evaluation must not be silently removed from scope, and a proposed option must not silently become a mandatory runtime subsystem.
 
-### In-place calls and lambda capture
+## M0 — requirement coverage and honest baseline
 
-The required function-like task does not start another Pi Session, AgentSession or Agent Loop. The same session switches its active messages between LLM requests.
+- [x] Recover original Human inputs and structured questionnaire answers; distinguish requirements, proposals and superseded instructions.
+- [x] Enumerate all known gaps and reproduce the frame defects locally, without provider requests.
+- [x] Replace premature completion checkboxes with this single milestone/TODO contract.
+- [ ] Keep each requirement assigned to a milestone through final reconciliation; no unassigned "later" list.
 
-- A frame is the context scope of a call.
-- Capture and export are explicit; both default to none, apart from reserved instructions and the call's own definition.
-- `ref` changes the enclosing logical slot. Writes persist even if the call fails, is interrupted or never returns normally.
-- `copy` has a private value. Local changes do not change the enclosing slot. Prefer reference/version metadata and copy-on-write over eager transcript copies.
-- Returning releases local working context and restores the parent with selected exports. It does not restore model hidden state or environment state.
-- Shared slots are scoped to frames of this one session, not writable cross-session shared memory.
-- The Agent explicitly enters and returns; finishing a turn or waiting for Human input does not imply pop.
+Audit baseline: native in-memory probes at `c355469` reproduced parent-summary loss, child-process resurrection after compaction, invisible-parent search failure, pin loss after native compaction, failing drop, orphan tool results after ref capture, and premature repeating-watch ownership release. Existing `npm test` still passed 200/200. This proves inadequate coverage, not correctness.
 
-The native subagent backend is complementary, not a substitute for this same-session requirement. pi-subagents 0.88.0 local foreground children already share the parent process; detached runners can reuse processes. Do not assume a process startup per child or claim coroutine savings without measurement.
+## M1 — correct canonical context and frame transitions
 
-## Context, retention and recovery
+Goal: make the native projection reliable before adding more operations.
 
-Pi remains the only raw transcript store. GoalRun is the single Compass state owner. Store bounded control metadata, source IDs and versions rather than another copy of message history.
+- [x] Centralize branch/source/edit indexing; use one index per operation, not rebuild it for every source.
+- [x] Preserve the parent checkpoint/summary and omitted-source state by stable references.
+- [x] On return, release all frame-owned process entries, including entries hidden by an intervening native compaction; do not resurrect them.
+- [x] Restore explicit ref value versions after compaction; keep copy changes local; retain ref writes on failure/interruption.
+- [x] Preserve complete tool exchanges for existing capture, pin, edits, drop and return operations. Reject tool-call rewrites that would fabricate an execution. M3 loading must reuse this boundary.
+- [x] Fix drop and stale/wrong-branch/reserved failures without mutation or misleading errors.
+- [x] Reconcile state from committed branch-local records; a returned boundary proposal is not a committed transition. Detect partial persistence rather than guessing or silently resetting an active frame.
+- [x] Cover nested entry/return, native compaction, pre-existing parent summaries, branch navigation/reload, abort and boundary composition with the installed Pi projection/boundary contracts.
+- [x] Resolve independent M1 review findings; scoped confirmation found no further issues.
 
-- Reserved: Pi-owned system/prompt/tool state, including global/project instructions. Do not rewrite or reorder it.
-- Pinned: active material requirements, Skills, facts and their caveats, with explicit scope. Reading a Skill for current work must not be followed by silently discarding it; it is not active forever.
-- Working: process material the Agent may retain, offload, recover or release.
+Exit: regressions reproduce the audit defects before fixing them; targeted checks pass after the fix. No new AgentSession/loop and no raw transcript mutation. Remaining live-provider limitations stay explicit.
 
-Normal requests append. Earlier deletions, replacements or moves can invalidate the cached suffix; reserved-prefix stability alone does not guarantee a cache hit. Do not inject full GoalRun state or a volatile instruction block before every request.
+Local M1 evidence (scoped independent review confirmed): six targeted regressions failed on the prior implementation, including dropped parent summaries, resurrected child process, incomplete exchanges, failed drop, tool-call rewrite and silently ignored mixed batches. Independent review found two further P1 defects: stale steering/watch state could erase a newly committed frame, and the commit digest excluded resulting control state. Both were reproduced as failing installed-runner tests and fixed; native wakes now reconcile committed state, Human text cannot spoof a native wake, and the digest binds the resulting state. Frame identity uses persisted entry IDs, not assumed session-global provider call IDs. Current context core/installed-runner checks 23/23, full tests 216/216, core 89/89, preflight and syntax/diff checks pass. LSP probing is not a clean/typecheck claim: one check was inconclusive and a pre-existing `Record<string, any>` rule finding remains in an untouched index section. Runner tests use the installed Pi implementation with registry/lifecycle adapters, not a live AgentSession or provider. Context control schema is v2 only; prototype v1 state is explicitly rejected, never migrated or silently reset.
 
-Search is available on demand, not a mandatory step before each call. Select useful capture arguments up front; return bounded snippets and stable source IDs, often enough to avoid a second load. Additional parent context may be explicitly searched/loaded when needed. Context isolation manages attention, not filesystem security. Start with inexpensive text/metadata lookup and Agent semantic selection; do not add an embedding store without evidence.
+## M2 — slots, retention and complete message operations
 
-Offload saves recoverable content before removing its active contribution. Pointers carry purpose, source/version and caveats. Missing, stale, wrong-branch or reserved targets fail visibly. Do not require separate lesson/ledger/memory records for every operation. Compaction remains a safety mechanism for finite windows.
+- [ ] Provide an explicit source/value ownership model: Reserved, scoped Pinned and Working, without a second transcript or conventions registry.
+- [ ] Stable source IDs and versioned references; same-session shared bindings; explicit ref/copy capture and return with empty defaults.
+- [ ] Copy-on-write rather than eager history duplication where the native protocol permits it; evaluate move semantics without breaking tool envelopes or evidence identity.
+- [ ] Implement replace/drop and selected-range movement/reordering at protocol-safe boundaries; exact source/range selection, not guessed message indices.
+- [ ] Preserve active Skill content after it is read, with explicit scope and retirement; preserve material temporary Human requirements and handling state.
+- [ ] Make pins survive native compaction and frame changes. Do not ban compaction to conceal an inconsistent projection.
+- [ ] Carry sources, versions and caveats through summaries, exports and derived replacements. Agent-authored edits must not masquerade as original tool observations.
+- [ ] Preserve Human steering, structured answers and material external results across pop without copying the whole subproblem transcript.
+- [ ] Keep schemas stable and mutation receipts actionable: actual resulting revision, applied/rejected/unknown status, no full-state echo or mandatory follow-up poll.
 
-### Native projection mechanism
+Exit: protocol integrity, scoped retention and source identity are checked on representative text/image/tool messages, not just isolated user strings. Semantic adequacy remains the Agent's judgment and Human acceptance.
 
-Use Pi's documented actionable `turn_end` boundary to append native context edits, compaction checkpoints, hidden frame procedure messages and compact frame metadata. `compass_context` is a same-session tool: it queues an operation, but does not create an AgentSession, child process or scheduler. The boundary is the only commit point, including an aborted assistant turn; no private SessionManager mutation is needed.
+## M3 — retrieval, spill and repeated-result optimization
 
-`src/context-core.mjs` is a pure planner. It keeps source IDs, prior edit IDs, content versions, frame ownership, pins, reference writes and watch ownership only. Raw content remains in Pi's append-only transcript. `call` creates a new projection with explicit `ref`/`copy` capture; `return` restores the saved source versions, preserves user steering, and exports only requested sources. `replace` uses optimistic versions; Human messages cannot be replaced/dropped, complete tool exchanges are required for drops, and referenced outer slots cannot be dropped. Search is bounded and returns stable IDs/snippets/versions.
+- [ ] Search both the active view and recoverable parent/branch-local history on demand; return bounded snippets, stable IDs, versions, provenance and useful ranges.
+- [ ] Provide explicit load/recovery of uncaptured or spilled material; snippets may suffice without a forced second call.
+- [ ] Provide semantic retrieval/ranking when chosen; compare native capabilities and bounded semantic calls before introducing dependencies or an embedding store. Lexical matching must not be labeled semantic search.
+- [ ] Spill selected content to an allowed project artifact before replacing it with a recoverable pointer; preserve purpose, source/version, caveats and integrity checks.
+- [ ] Verify artifact write before context removal; missing/stale/wrong-scope artifacts fail visibly. No hidden environment rollback.
+- [ ] Detect exact repeated read-only results and verified subset relations using source identity/read ranges, not bare text equality alone.
+- [ ] Relocate the prior covered information to the append end without losing a larger old superset; preserve protocol envelopes and tell the Agent what changed.
+- [ ] Never automatically transform a non-exact/similarity-only match or Reserved material. Offer bounded, non-repetitive advisory hints when justified.
+- [ ] Measure scan/index, storage and cache-edit overhead; allow Agent policy to avoid optimizations whose total cost exceeds their benefit.
 
-A frame-owned `watch` is recorded from pi-await's existing tool-result metadata and released from its native cancellation or wake messages; Compass does not create a second watch mechanism. Parent-owned watches do not block a child. A return fails closed while an owned watch remains active. This is ownership bookkeeping, not a replacement for pi-await's authoritative watch state.
+Exit: repeated/subset/changed-file cases preserve information; spill round trips work; retrieval does not require searching on every frame call.
 
-Native compaction, ordinary requests and reload all consume the same canonical projection. The raw session remains unchanged; a context custom entry is only bounded metadata. Boundary drafts are applied only by Pi after validation. If a boundary operation is rejected, Compass appends a compact rejection message and does not advance context state. The implementation still needs nested/reload/provider acceptance coverage and must not be described as a zero-cost or zero-compaction guarantee.
+## M4 — native extension composition and unified work calls
 
-### Repeated results
+- [ ] Reuse task identity and explicit parent/code/subagent intent; attach optional frame scope rather than create a parallel task registry.
+- [ ] Integrate serial same-session calls and independently justified native child work; no silent executor conversion.
+- [ ] Establish explicit supported launch/configuration for a child to use Compass recursively; do not assume extension inheritance.
+- [ ] Correlate and consume native child results; unknown runs remain unknown, never duplicate-dispatched. Preserve native activation/user preferences.
+- [ ] Track watches by native arm identity and frame owner; native live status is authoritative, including nested Code Mode calls.
+- [ ] Handle native custom wake/lost messages and repeating rounds correctly. A repeating wake is not terminal completion.
+- [ ] Block return only for live watches owned by that frame; support explicit cancel/ownership transfer; parent watches do not block a child.
+- [ ] Reconcile reload/branch changes and finished watches without another observer, timer loop or mandatory polling.
+- [ ] Expose/reuse optional asynchronous execution with started/result semantics under Agent control; do not force every tool asynchronous.
+- [ ] Evaluate coroutine-like interleaving versus native parallel Code Mode/subagents/await using measurable costs; do not build a second scheduler to satisfy an analogy.
 
-Exact text equality is not sufficient authorization to delete an arbitrary message. Preserve source identity, read ranges, observation context, pins and complete exchanges. A new subset does not replace an old superset. Never deduplicate reserved material or turn similar text into an automatic replacement.
+Exit: native APIs are the execution authorities. No assumed notification delivery or compatibility inferred from a fake bus. Human performs actual child/provider interaction acceptance.
 
-Evaluate replacing an older read-only result body with a source pointer while preserving its protocol envelope, rather than moving isolated tool messages. Detection and application are separate; the Agent controls optimization policy. Count edit/cache costs and avoid repetitive similarity notices.
+## M5 — Human-approved DAG and evidence-bearing progression
 
-## External input and native extensions
+- [ ] A DAG remains optional. Creating/adopting one produces a draft, not automatic execution.
+- [ ] Present the concrete tasks, dependencies, executors and acceptance criteria through structured ask_user_question before execution.
+- [ ] Bind approval to the exact Goal/plan/acceptance definition and questionnaire identity. Declined, partial, custom-modified and UI-error results remain distinct.
+- [ ] Material changes invalidate approval; ordinary status updates do not. Reject stale approval without mutation.
+- [ ] Block both automatic delegation and parent/code DAG task progression before approval. No recovery sweep bypasses the gate.
+- [ ] Support Human additions/revisions and re-approval; arbitrary text or Agent-reported "Human approved" is not a stamp.
+- [ ] Require an explicit semantic step check against approved criteria, evidence and unresolved caveats before dependency progression; preserve failed/inconclusive results.
+- [ ] Evaluate optional independent reviewer/watchdog through pi-subagents where justified; no always-on extra model loop and no numeric-confidence fiction.
+- [ ] Keep task completion, Agent assessment, independent review and final Goal acceptance distinct. Unknown evidence never becomes pass.
+- [ ] Represent material Human optimization declarations in the same approved constraints/decisions, without another policy registry.
 
-- pi-subagents owns isolated execution, native activation/loading, status, completion and exact-identity cancellation. Retain explicit executor intent and fail closed on unknown runs; do not launch duplicates.
-- pi-await owns observation, watch lifecycle, cancellation and wake delivery. Do not wrap its timers or use watches to duplicate native child-completion notifications.
-- A frame cannot return while it owns active watches. Parent-owned watches do not block a child. Repeating watches require explicit cancellation or transfer to the parent. Keep only ownership references; native watch state remains authoritative.
-- New Human input and structured answers can arrive while a frame runs. Pi supports steering; ask_user_question can also execute inside a frame. Such requirements and their handling must not disappear on pop. Preserve external event references without returning the entire child process.
-- Child tools/extensions are not automatically inherited in every pi-subagents execution mode. Recursive Compass use requires an explicit native launch contract, not an assumed ambient extension.
-- Prefer Pi's existing parallel tools, Code Mode batching, native background children and pi-await Started/wake behavior. Optional asynchronous execution does not justify a new coroutine scheduler.
+Exit: unapproved and stale plans cannot execute; clear approval can proceed; semantic checks are explicit and traceable, not claimed to be mathematically proven by runtime.
 
-## Implementation TODO
+## M6 — route choice, exploration and acceptance-gated stopping
 
-- [x] Establish native extension contracts and record Human decisions.
-- [x] Remove per-request full anchors and redundant native activation policy; cover prefix preservation and loader/executor diagnostics.
-- [x] Independently review the foundation and fix its material findings.
-- [x] Probe native parent restoration across child compaction without another AgentSession.
-- [ ] Define the remaining unified task/context contracts and replace obsolete mechanisms rather than retain compatibility layers.
-- [x] Implement the native in-place frame core: explicit capture/return, versioned ref/copy, branch-local native edits, complete-exchange protection and aborted-turn ref persistence.
-- [x] Add nested-frame, reload-from-active-branch, external native-compaction and system-message recovery coverage.
-- [ ] Validate branch navigation plus active Skills, material Human requirements and caveats under real frame projection; runtime keeps these semantic retention decisions with the Agent.
-- [x] Integrate bounded pi-await watch ownership and external input preservation without duplicate observers/wakes; verify lost-watch/reload behavior against the native package contract.
-- [ ] Bind DAG/acceptance approval to exact revisions; integrate explicit native delegation and acceptance-gated route stopping.
-- [ ] Evaluate optional repeated-result clearing and asynchronous execution against total completion cost.
-- [ ] Consolidate the Agent-facing Skill and current documentation; remove dead code, redundant state/tests and obsolete active contracts.
-- [ ] Run targeted/full/core checks and preflight; independent review; commit and push coherent milestones.
-- [ ] Human performs actual Pi/provider acceptance and supplies feedback separately.
+- [ ] Distinguish alternative routes from a chosen route's DAG; no automatic route fan-out from merely mentioning alternatives.
+- [ ] Use structured questions to align default/recommended versus Human-selected routes when the decision matters.
+- [ ] Represent explicit authorization for parallel exploration, its scope/budget and result correlation; do not infer authorization from task size.
+- [ ] Compare results against shared acceptance criteria and caveats, not first-finished-wins.
+- [ ] Allow exact-identity cancellation of competitors only after the explicit acceptance gate passes.
+- [ ] Track cancellation request/acknowledgement/terminal status separately; unknown termination remains unknown.
+- [ ] Leave filesystem/worktree/environment coordination to the Agent and native execution capabilities; remove redundant Compass global write-lock policy.
+- [ ] Instruct the Agent to stop and revisit root cause when new evidence invalidates the route; provide nested context operations without pretending code can recognize every semantic failure.
 
-## Foundation evidence
+Exit: unauthorized exploration and premature cancellation are rejected; accepted-route evidence is retained; no new Router or scheduler.
 
-Current source requires Pi >=1.5.2. The foundation is not a v0.10.0 release; package/release-manifest promotion follows completed implementation.
+## M7 — simplify, measure, document and deliver
 
-- `npm test`: 200/200 pass after the frame-core implementation; `npm run test:core`: 89/89 pass before the frame-only additions.
-- Static and non-static preflight pass; checking this repository itself produces the expected target/package-overlap warning.
-- `git diff --check` passes.
-- Independent foundation review found two P2 issues (loader/executor diagnostics and stale gate text), both fixed.
-- Prefix tests use the real installed Pi runner/Responses serializer with constructed messages and fake extension activation/persistence. They do not prove provider cache hits or live extension acceptance.
-- Native SessionManager projection, frame-core tests (including nested/reload/compaction) and an extension boundary integration test pass; no live provider run, same-session frame cost comparison, branch-navigation proof or zero-compaction guarantee is claimed.
+- [ ] Deliver one progressively loaded Compass Skill covering attention, work calls, native children/waits, root-cause investigation, approval and acceptance. Do not require multiple overlapping orchestration guides per task.
+- [ ] Remove obsolete compatibility/migration/fallback implementations, duplicate state and dead API/schema/control paths; retain relevant behavioral coverage, not historical-format tests for their own sake.
+- [ ] Align current design, tool contract, README, package identity, preflight and installed native extension versions. Historical evidence is not current compatibility proof.
+- [ ] Replace false completion/documentation claims with actual local evidence and known limitations.
+- [ ] Review touched scope for cohesion, coupling, repeated indexing/copying, schema overhead, extra calls and lifecycle cleanup. Refactor rather than apply shotgun patches.
+- [ ] Measure representative local transition/search memory and CPU costs plus request/context sizes. Collect native usage evidence where available; do not invent provider/cache/cost measurements.
+- [ ] Run targeted checks, full/core tests, static and installed-Pi preflight; independent review of high-risk boundaries; resolve findings.
+- [ ] Reconcile every requirement against this list; report implemented, evaluated/reused, explicitly deferred and Human-only acceptance separately.
+- [ ] Commit and push coherent milestones; verify actual Git state. Explain in plain language what changed and give a short real-session test guide.
+- [ ] Human performs actual Compass/provider acceptance and provides a feedback path. This is the only remaining verification ownership transferred to Human, not development TODOs.
 
-## Sources
+## Native reference baseline
 
-- [DeepSeekHarness Super-agent article](https://x.com/DeepSeekHarness/article/2116857257245987236): isolated workers, Inline/Spill, optional asynchronous Started/result delivery. The historical inspected commit is unknown.
-- [Anthropic context engineering](https://www.anthropic.com/research/effective-context-engineering-for-ai-agents): notes, compaction and subagents are complementary.
-- [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching): exact rendered prefixes and eligibility matter.
-- [Anthropic context editing](https://platform.claude.com/docs/en/build-with-claude/context-editing): selective result clearing, not unrestricted message relocation.
-- Installed Pi `docs/extensions.md`, `docs/session-format.md`, `docs/compaction.md`, public session-manager declarations and `buildSessionProjection()` implementation.
-- Installed pi-subagents `docs/extension-api.md` and delegation declarations; sibling pi-await README, handoff and watch tool implementation.
+Last inspected local baseline: Pi 1.5.2; pi-subagents 0.88.0; sibling pi-await 1.3.0 candidate revision 4 (`8a51e51`). Recheck versions/contracts when integrating, without modifying pi-await or global Pi settings.
+
+- Pi public extension boundary/session-format/compaction contracts and installed SessionManager projection implementation.
+- Installed pi-subagents `docs/extension-api.md` and delegation declarations; native child lifecycle/status/cancellation contracts.
+- Sibling pi-await README/handoff and watch result/custom-message contracts.
+- DeepSeekHarness article and source were research inputs, not a replacement architecture or proof of local behavior. The historical inspected commit remains unknown.
