@@ -152,6 +152,7 @@ function normalizeExecutionRecord(value, fallbackRevision = 1) {
     primaryProviderDiagnostics: normalizeProviderDiagnostics(item.primaryProviderDiagnostics),
     requestId: typeof item.requestId === "string" ? item.requestId.slice(0, 128) : "",
     ownerRunId: typeof item.ownerRunId === "string" ? item.ownerRunId.slice(0, 128) : "",
+    ...(typeof item.frameScope === "string" && item.frameScope.trim() ? { frameScope: item.frameScope.trim().slice(0, 64) } : {}),
     runId: typeof item.runId === "string" && item.runId.trim() ? item.runId.trim().slice(0, 128) : null,
     error: typeof item.error === "string" ? clip(item.error, 600) : "",
     primaryError: typeof item.primaryError === "string" ? clip(item.primaryError, 400) : "",
@@ -182,6 +183,7 @@ function normalizeExecutionRecord(value, fallbackRevision = 1) {
   return {
     requestId,
     runId: typeof value.runId === "string" && value.runId.trim() ? value.runId.trim().slice(0, 128) : null,
+    ...(typeof value.frameScope === "string" && value.frameScope.trim() ? { frameScope: value.frameScope.trim().slice(0, 64) } : {}),
     taskIds,
     planRevision: Number.isInteger(value.planRevision) && value.planRevision > 0 ? value.planRevision : fallbackRevision,
     stateVersion: Number.isInteger(value.stateVersion) && value.stateVersion >= 0 ? value.stateVersion : 0,

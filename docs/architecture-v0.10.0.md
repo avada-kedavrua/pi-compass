@@ -125,16 +125,18 @@ Exit: repeated/subset/changed-file cases preserve information; spill round trips
 
 ## M4 — native extension composition and unified work calls
 
-- [ ] Reuse task identity and explicit parent/code/subagent intent; attach optional frame scope rather than create a parallel task registry.
-- [ ] Integrate serial same-session calls and independently justified native child work; no silent executor conversion.
+- [x] Reuse task identity and explicit parent/code/subagent intent; attach optional frame scope rather than create a parallel task registry. DAG tasks and native execution receipts now retain an optional `frameScope`; native child identity remains `(ownerRunId, nodeId, requestId)`.
+- [x] Integrate serial same-session calls and independently justified native child work; no silent executor conversion.
 - [ ] Establish explicit supported launch/configuration for a child to use Compass recursively; do not assume extension inheritance.
-- [ ] Correlate and consume native child results; unknown runs remain unknown, never duplicate-dispatched. Preserve native activation/user preferences.
-- [ ] Track watches by native arm identity and frame owner; native live status is authoritative, including nested Code Mode calls.
-- [ ] Handle native custom wake/lost messages and repeating rounds correctly. A repeating wake is not terminal completion.
-- [ ] Block return only for live watches owned by that frame; support explicit cancel/ownership transfer; parent watches do not block a child.
-- [ ] Reconcile reload/branch changes and finished watches without another observer, timer loop or mandatory polling.
-- [ ] Expose/reuse optional asynchronous execution with started/result semantics under Agent control; do not force every tool asynchronous.
-- [ ] Evaluate coroutine-like interleaving versus native parallel Code Mode/subagents/await using measurable costs; do not build a second scheduler to satisfy an analogy.
+- [x] Correlate and consume native child results; unknown runs remain unknown, never duplicate-dispatched. Preserve native activation/user preferences.
+- [x] Track watches by native arm identity and frame owner; native live status is authoritative, including nested Code Mode calls.
+- [x] Handle native custom wake/lost messages and repeating rounds correctly. A repeating wake is not terminal completion.
+- [x] Block return only for live watches owned by that frame; native `unwatch` identity and explicit `compass_context(action=transfer)` ownership transfer are supported; parent watches do not block a child.
+- [x] Reconcile reload/branch changes and finished watches without another observer, timer loop or mandatory polling.
+- [x] Reuse native structured delegation and pi-await asynchronous execution with started/result and wake semantics under Agent control; Compass does not force every tool asynchronous.
+- [x] Evaluate coroutine-like interleaving versus native parallel Code Mode/subagents/await: native composition remains the optimal local boundary, so no second scheduler or coroutine loop was added.
+
+**M4 local result (current installed contracts):** Compass does not claim recursive child extension inheritance. The installed pi-subagents contract starts children with the resolved agent tool/extension projection; its default child boundary omits `subagent`, and the Compass structured request only grants the read-only role allowlist. A child cannot use Compass recursively through this path; recursive use remains fail-closed/deferred until a documented launch configuration is supplied. The installed pi-await contract owns arm identity/lifecycle, exact cancellation, repeating rounds, native wakes/lost notices, and active-branch reconciliation; Compass consumes those records and never polls or runs a second observer. Local regressions use the installed Pi projection/runner adapters, not a live AgentSession/provider; Human must perform actual child/provider acceptance.
 
 Exit: native APIs are the execution authorities. No assumed notification delivery or compatibility inferred from a fake bus. Human performs actual child/provider interaction acceptance.
 

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  CONTEXT_MESSAGE_TYPE, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
+  CONTEXT_MESSAGE_TYPE, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, releaseWatchMessages, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
 } from "../src/context-core.mjs";
 import {
   SessionManager, appendDrafts, applyOperation, assertPaired, contextPreview, modelText, queueOperation, sourceVersion,
@@ -260,6 +260,54 @@ test("owned watches block return until native cancellation; no duplicate watcher
   assert.throws(() => planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary }), /active watches/);
   const cancelled = planWatchBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: { toolResults: [{ toolName: "unwatch", details: { cancelledIds: ["w1"], cancelledInstanceIds: ["native-arm"] }, content: [] }] } });
   appendDrafts(manager, cancelled.entries);
+  applyOperation(manager, { action: "return" });
+  assert.equal(restoreContextState(manager.getBranch()).frames.length, 0);
+});
+
+test("a parent-owned native watch does not block a nested frame return", () => {
+  const manager = host();
+  user(manager, "parent");
+  const arm = planWatchBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: {
+    toolResults: [{ toolName: "watch", details: { id: "w-parent", instanceId: "parent-arm", kind: "event", target: "user_bash", status: "armed" }, content: [] }],
+  } });
+  appendDrafts(manager, arm.entries);
+  applyOperation(manager, { action: "call", task: "nested work" });
+  applyOperation(manager, { action: "return" });
+  assert.equal(restoreContextState(manager.getBranch()).watches["w-parent"].owner, "root");
+  assert.equal(restoreContextState(manager.getBranch()).frames.length, 0);
+});
+
+test("native repeating wakes retain ownership until terminal or lost lifecycle", () => {
+  const manager = host();
+  user(manager, "parent");
+  applyOperation(manager, { action: "call", task: "repeat wait" });
+  const arm = planWatchBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: {
+    toolResults: [{ toolName: "watch", details: { id: "w1", instanceId: "native-repeat", kind: "event", target: "user_bash", prompt: "repeat", repeatMs: 1000, status: "armed" }, content: [] }],
+  } });
+  appendDrafts(manager, arm.entries);
+  const repeat = planWatchBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: { toolResults: [] } });
+  assert.equal(repeat, null);
+  const repeated = releaseWatchMessages(restoreContextState(manager.getBranch()), "WATCH_SETTLED:match\nid: w1\nkind: event\ntarget: user_bash\nrepeat: round 1 settled, round 2 armed (every 1000ms)");
+  assert.equal(repeated, null);
+  const lost = releaseWatchMessages(restoreContextState(manager.getBranch()), "WATCH_LOST: 1 watch\n  w1 [event] user_bash — repeat");
+  assert.ok(lost);
+  assert.equal(lost.state.watches.w1, undefined);
+});
+
+test("native cancellation uses exact arm identity and transfer releases a frame owner", () => {
+  const manager = host();
+  user(manager, "parent");
+  applyOperation(manager, { action: "call", task: "owned wait" });
+  const armed = planWatchBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: {
+    toolResults: [{ toolName: "watch", details: { id: "w1", instanceId: "arm-a", kind: "event", target: "user_bash", status: "armed" }, content: [] }],
+  } });
+  appendDrafts(manager, armed.entries);
+  const staleCancel = planWatchBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: { toolResults: [{ toolName: "unwatch", details: { cancelledIds: ["w1"], cancelledInstanceIds: ["arm-b"] }, content: [] }] } });
+  assert.equal(staleCancel, null, "a cancellation for another native arm must not release the live watch");
+  const transferBoundary = queueOperation(manager, { action: "transfer", watchIds: ["w1"], watchScope: "root" });
+  const transferred = planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: transferBoundary });
+  appendDrafts(manager, [...transferBoundary.entries, ...transferred.entries]);
+  assert.equal(restoreContextState(manager.getBranch()).watches.w1.owner, "root");
   applyOperation(manager, { action: "return" });
   assert.equal(restoreContextState(manager.getBranch()).frames.length, 0);
 });

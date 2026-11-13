@@ -90,6 +90,8 @@ function normalizeTask(raw, index) {
   }
   const writeScope = typeof raw.writeScope === "string" ? raw.writeScope.trim() : "";
   const dispatchReason = clipped(raw.dispatchReason, 400);
+  const frameScope = optionalText(raw.frameScope);
+  if (frameScope.length > 64) throw new Error(`Task "${id}" frameScope must be at most 64 characters.`);
   if (executor === "subagent" && writeScope.toLowerCase() !== "read-only") {
     throw new Error(`Task "${id}" uses executor=subagent and must set writeScope="read-only".`);
   }
@@ -106,6 +108,7 @@ function normalizeTask(raw, index) {
     executor,
     agent,
     dispatchReason,
+    ...(frameScope ? { frameScope } : {}),
     status: "pending",
     evidence: "",
     reason: "",
@@ -150,6 +153,7 @@ function taskSignature(task) {
     executor: ALLOWED_EXECUTORS.has(task.executor) ? task.executor : "parent",
     agent: task.executor === "subagent" && ALLOWED_AGENTS.has(task.agent) ? task.agent : "",
     dispatchReason: task.executor === "subagent" ? (task.dispatchReason ?? "") : "",
+    frameScope: task.frameScope ?? "",
   });
 }
 

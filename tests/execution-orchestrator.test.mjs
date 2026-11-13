@@ -278,19 +278,22 @@ test("execution events and usage metadata survive GoalRun normalization", () => 
   });
   state.plan.execution = {
     requestId: "wave",
+    frameScope: "frame-root",
     taskIds: ["a", "b"],
     planRevision: state.plan.revision,
     stateVersion: state.plan.stateVersion,
     status: "completed",
     results: [{
       id: "a", status: "done", agent: "scout", model: PRIMARY_MODEL, fallbackAttempted: false,
-      requestId: "req-a", ownerRunId: "wave", runId: "run-a", summary: "Found entry point",
+      requestId: "req-a", ownerRunId: "wave", runId: "run-a", frameScope: "frame-a", summary: "Found entry point",
       usage: { input: 100, output: 20, cacheRead: 50, cacheWrite: 0, cost: 0.01, turns: 1, toolCalls: 2, durationMs: 500 },
     }],
   };
   state = recordExecutionEvent(state, { status: "completed", summary: "Wave completed", text: "a=done" });
   const normalized = normalizeGoalRunState(state);
+  assert.equal(normalized.plan.execution.frameScope, "frame-root");
   assert.equal(normalized.plan.execution.results[0].runId, "run-a");
+  assert.equal(normalized.plan.execution.results[0].frameScope, "frame-a");
   assert.equal(normalized.plan.execution.results[0].usage.cost, 0.01);
   assert.ok(normalized.events.some((item) => item.kind === "subagent_execution"));
 });

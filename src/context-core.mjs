@@ -64,7 +64,12 @@ export function normalizeContextState(raw) {
   for (const pin of raw.pins) if (!object(pin) || typeof pin.id !== "string" || !scopes.has(pin.scope) || !object(raw.values[pin.key]) || (pin.goalVersion !== undefined && (!Number.isSafeInteger(pin.goalVersion) || pin.goalVersion < 1))) fail("Invalid pin owner or value.");
   if (Object.keys(raw.values).length > MAX_SOURCES) fail("Too many active value bindings; retire or spill unused values.");
   for (const head of Object.values(raw.values)) validateValue(head);
-  for (const watch of Object.values(raw.watches)) if (!object(watch) || !scopes.has(watch.owner)) fail("Invalid watch owner.");
+  for (const watch of Object.values(raw.watches)) {
+    if (!object(watch) || !scopes.has(watch.owner)) fail("Invalid watch owner.");
+    if (watch.instanceId !== undefined && (typeof watch.instanceId !== "string" || !watch.instanceId.trim())) fail("Invalid native watch identity.");
+    for (const field of ["kind", "target", "prompt"]) if (watch[field] !== undefined && typeof watch[field] !== "string") fail(`Invalid native watch ${field}.`);
+    if (watch.repeat !== undefined && typeof watch.repeat !== "boolean") fail("Invalid native watch repeat state.");
+  }
   return structuredClone({ schemaVersion: raw.schemaVersion, revision: raw.revision, frames: raw.frames, pins: raw.pins, values: raw.values, watches: raw.watches });
 }
 
@@ -261,7 +266,7 @@ function external(entry) {
 function planReturn({ next, index, boundary, operation }) {
   const frame = next.frames.at(-1);
   if (!frame) fail("No active context frame.");
-  const watches = Object.keys(next.watches).filter((id) => next.watches[id].owner === frame.id);
+  const watches = Object.entries(next.watches).filter(([, watch]) => watch.owner === frame.id).map(([id]) => id);
   if (watches.length) fail(`Frame owns active watches: ${watches.join(", ")}. Cancel or transfer them before returning.`);
   ensureIds(operation.exportIds ?? [], "export IDs");
   const boundaryPosition = index.positions.get(frame.boundaryId);
@@ -522,6 +527,11 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
   switch (operation.action) {
     case "call": entries = planCall(args); break;
     case "return": entries = planReturn(args); break;
+    case "transfer": {
+      const transferred = planWatchTransfer(args);
+      entries = [nativeMessage(`Native watch ownership transferred; watches: ${transferred.join(", ")}; scope: ${operation.watchScope ?? operation.scope}.`, { action: "transfer", watches: transferred, scope: operation.watchScope ?? operation.scope })];
+      break;
+    }
     case "pin": case "unpin": entries = planPins(args); break;
     case "replace": case "drop": entries = planEdits(args); break;
     case "load": entries = planLoad(args); break;
@@ -536,15 +546,70 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
   return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: ["call", "return"].includes(operation.action) && boundary.outcome === "completed" };
 }
 
+function activeWatchScopes(state) {
+  return new Set(["root", ...state.frames.map((frame) => frame.id)]);
+}
+function watchOwner(state, details) {
+  const scope = typeof details?.frameScope === "string" && details.frameScope.trim()
+    ? details.frameScope.trim()
+    : state.frames.at(-1)?.id ?? "root";
+  if (!activeWatchScopes(state).has(scope)) fail(`Native watch frame scope ${scope} is not active.`);
+  return scope;
+}
+function watchDetails(state, details) {
+  const id = typeof details?.id === "string" && details.id.trim() ? details.id.trim() : "";
+  if (!id) return null;
+  const instanceId = typeof details?.instanceId === "string" && details.instanceId.trim() ? details.instanceId.trim() : null;
+  const existing = state.watches[id];
+  if (existing && instanceId && existing.instanceId && existing.instanceId !== instanceId) {
+    fail(`Native watch identity for ${id} conflicts with the active arm; reconcile the native watch before mutating context.`);
+  }
+  return {
+    owner: existing?.owner ?? watchOwner(state, details),
+    ...(instanceId ? { instanceId } : {}),
+    ...(typeof details.kind === "string" ? { kind: details.kind } : {}),
+    ...(typeof details.target === "string" ? { target: details.target } : {}),
+    ...(typeof details.prompt === "string" ? { prompt: details.prompt } : {}),
+    ...(typeof details.repeatMs === "number" ? { repeatMs: details.repeatMs, repeat: true } : {}),
+  };
+}
 function updateWatches(state, boundary) {
   const watches = structuredClone(state.watches);
   for (const result of boundary.toolResults ?? []) {
     if (result.isError) continue;
     const details = result.details;
-    if (result.toolName === "watch" && details?.id && ["armed", "already-armed"].includes(details.status) && !watches[details.id]) watches[details.id] = { owner: state.frames.at(-1)?.id ?? "root" };
-    if (result.toolName === "unwatch") for (const id of details?.cancelledIds ?? []) delete watches[id];
+    if (result.toolName === "watch" && details && ["armed", "already-armed"].includes(details.status)) {
+      const id = typeof details.id === "string" ? details.id : "";
+      const watch = watchDetails({ ...state, watches }, details);
+      if (watch && id) watches[id] = watch;
+    }
+    if (result.toolName === "unwatch") {
+      const instanceIds = Array.isArray(details?.cancelledInstanceIds)
+        ? details.cancelledInstanceIds.filter((id) => typeof id === "string")
+        : [];
+      if (instanceIds.length) {
+        for (const [id, watch] of Object.entries(watches)) if (instanceIds.includes(watch.instanceId)) delete watches[id];
+      } else {
+        for (const id of Array.isArray(details?.cancelledIds) ? details.cancelledIds : []) if (typeof id === "string") delete watches[id];
+      }
+    }
   }
   return watches;
+}
+function planWatchTransfer({ next, operation }) {
+  const ids = operation.watchIds ?? operation.ids;
+  ensureIds(ids, "watch IDs");
+  if (!ids.length) fail("Select one or more native watch IDs to transfer.");
+  const scope = operation.watchScope ?? operation.scope;
+  if (typeof scope !== "string" || !activeWatchScopes(next).has(scope)) fail(`Watch transfer scope ${scope || ""} is not active.`);
+  const current = next.frames.at(-1)?.id ?? "root";
+  for (const id of ids) {
+    const watch = next.watches[id];
+    if (!watch) fail(`Unknown or finished native watch ${id}.`);
+    if (watch.owner !== current) fail(`Native watch ${id} is owned by ${watch.owner}; only its owner may transfer it.`);
+  }
+  for (const id of ids) next.watches[id].owner = scope;
+  return ids;
 }
 export function planWatchBoundary({ state: input, boundary }) {
   const state = normalizeContextState(input);
@@ -556,11 +621,25 @@ export function planWatchBoundary({ state: input, boundary }) {
 export function releaseWatchMessages(input, text) {
   const state = normalizeContextState(input);
   if (typeof text !== "string" || !/^WATCH_(?:SETTLED|LOST):/.test(text)) return null;
-  if (/^repeat: round .*?(?:armed|still armed)/m.test(text)) return null;
-  const ids = [...text.matchAll(/(?:^|\n)id:\s*(w\d+)\b/g)].map((match) => match[1]);
+  // Native pi-await explicitly says a repeating round remains armed. Only a
+  // terminal wake or LOST notice releases ownership; no observer is needed.
+  if (/^repeat:\s*round \d+ settled(?:, round \d+ armed| and the watch is still armed)(?: \(every \d+ms\))?$/m.test(text)) return null;
+  const ids = [...text.matchAll(/(?:^|\n)id:\s*([^\s\n]+)/g)].map((match) => match[1]);
+  if (ids.length === 0 && text.startsWith("WATCH_LOST:")) {
+    ids.push(...[...text.matchAll(/^\s{2}(\S+)\s+\[[^\]]+\]/gm)].map((match) => match[1]));
+  }
   const watches = { ...state.watches };
   let changed = false;
-  for (const id of ids) if (watches[id]) { delete watches[id]; changed = true; }
+  for (const id of ids) {
+    const watch = watches[id];
+    if (!watch) continue;
+    const kind = /^kind:\s*(.+)$/m.exec(text)?.[1];
+    const target = /^target:\s*(.*)$/m.exec(text)?.[1];
+    if (watch.kind && kind && watch.kind !== kind) continue;
+    if (watch.target && target && watch.target !== target) continue;
+    delete watches[id];
+    changed = true;
+  }
   if (!changed) return null;
   const next = { ...state, watches, revision: state.revision + 1 };
   return { state: next, entry: contextStateEntry(next) };

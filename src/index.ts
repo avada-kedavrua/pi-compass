@@ -503,10 +503,11 @@ function executionConstraints() {
     .filter((value: any) => typeof value === "string" && value.trim())
     .slice(0, 12);
 }
-function executionRecordForWave(waveId: string, tasks: any[], planRevision: number, stateVersion: number, requestIds: string[], policy: any) {
+function executionRecordForWave(waveId: string, tasks: any[], planRevision: number, stateVersion: number, requestIds: string[], policy: any, frameScope: string | null = null) {
   return {
     requestId: waveId,
     runId: null,
+    ...(frameScope ? { frameScope } : {}),
     taskIds: tasks.map((task: any) => task.id),
     planRevision,
     stateVersion,
@@ -523,6 +524,7 @@ function executionRecordForWave(waveId: string, tasks: any[], planRevision: numb
       fallbackAttempted: false,
       requestId: requestIds[index],
       ownerRunId: waveId,
+      ...((task.frameScope || frameScope) ? { frameScope: task.frameScope || frameScope } : {}),
       runId: null,
       error: "",
       primaryError: "",
@@ -658,6 +660,10 @@ async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") 
 
     const waveId = randomUUID();
     const selectedPlanRevision = state.plan.revision;
+    const frameScope = (() => {
+      try { return restoreContextState(ctx?.sessionManager?.getBranch?.() ?? []).frames.at(-1)?.id ?? null; }
+      catch { return null; }
+    })();
     const selectedGoalVersion = state.goal.version;
     const requestIds = ready.map(() => randomUUID());
     const requests = ready.map((task: any, index: number) => buildSubagentDelegationRequest({
@@ -678,7 +684,7 @@ async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") 
         || executionUnresolved(state.plan.execution)) return false;
       const started = transitionTasks(state, "start", currentReady.map((task: any) => ({ id: task.id })), updateTasks);
       state = started.state;
-      state.plan.execution = executionRecordForWave(waveId, currentReady, state.plan.revision, state.plan.stateVersion ?? 0, requestIds, wavePolicy);
+      state.plan.execution = executionRecordForWave(waveId, currentReady, state.plan.revision, state.plan.stateVersion ?? 0, requestIds, wavePolicy, frameScope);
       state = recordExecutionEvent(state, {
         status: "dispatching",
         summary: `Auto-dispatched ${currentReady.length} read-only Subagent task(s) (${wavePolicy.mode}).`,
@@ -1184,12 +1190,15 @@ function contextOperationSchema() {
   const version = Type.String({ pattern: "^[a-f0-9]{24}$", maxLength: 24, description: "Value version returned by search or a mutation receipt; edits fail closed if it changed." });
   const binding = Type.String({ maxLength: 129, description: "Optional exact scoped binding from search; defaults to the current lexical binding." });
   return Type.Object({
-    action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "replace", "drop", "load", "move", "spill", "mark"] }),
+    action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"] }),
     expectedRevision: Type.Integer({ minimum: 0, description: "Context revision from the latest committed native context receipt or compass_state cursor." }),
     task: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "Required for call: the local procedure and objective." })),
     capture: Type.Optional(Type.Array(Type.Object({ id: sourceId, mode: Type.String({ enum: ["ref", "copy"] }), version, binding: Type.Optional(binding) }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true })),
     exportIds: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Sources explicitly returned to the parent frame; default none." })),
-    ids: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Exact source IDs for retrieval, retention, movement, spill or edits." })),
+    ids: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Exact source IDs for retrieval, retention, movement, spill, edits, or native watch transfer." })),
+    watchIds: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 8, uniqueItems: true, description: "Exact native pi-await watch IDs for action=transfer; use the native arm identity, not a display index." })),
+    watchScope: Type.Optional(Type.String({ maxLength: 64, description: "Destination frame scope for action=transfer; root or an active frame ID." })),
+
     version: Type.Optional(version),
     binding: Type.Optional(binding),
     sourceScope: Type.Optional(Type.String({ enum: ["active", "parent", "history", "all"], description: "Source recovery scope; active branch only, never sibling sessions." })),
@@ -1199,7 +1208,8 @@ function contextOperationSchema() {
     lifetime: Type.Optional(Type.String({ enum: ["goal", "session"], description: "Retention lifetime, default current Goal. Frame ownership still ends on return." })),
     purpose: Type.Optional(Type.String({ minLength: 1, maxLength: 1000, description: "Why this spill artifact is needed." })),
     range: Type.Optional(Type.Object({ part: Type.Optional(Type.Integer({ minimum: 0 })), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }, { additionalProperties: false, description: "Exact part/line selection bound to the full source version. Images support part selection without line bounds." })),
-    scope: Type.Optional(Type.String({ maxLength: 64, description: "Pin ownership: root or an active frame ID; defaults to the current frame." })),
+    scope: Type.Optional(Type.String({ maxLength: 64, description: "Pin ownership, or transfer destination: root or an active frame ID; defaults to the current frame for pins." })),
+
     kind: Type.Optional(Type.String({ enum: ["working", "memory", "human", "skill"], description: "Value classification, not proof or an authorization grant." })),
     caveats: Type.Optional(Type.Array(Type.String({ maxLength: 600 }), { maxItems: 12, description: "Material qualifications; omitted writes preserve existing caveats." })),
     sources: Type.Optional(Type.Array(sourceId, { maxItems: 32, uniqueItems: true, description: "Existing branch-local evidence source IDs for derived replacements." })),
@@ -1219,7 +1229,7 @@ function registerContextTool(pi: any) {
       "Frames/edits change attention, not Pi's append-only transcript or environment. Spill writes an explicit artifact; no filesystem rollback occurs.",
       "Use search only when needed. Pass stable source IDs and versions; never infer them from message positions.",
       "A ref is shared and survives interruption; a copy is private and forks on write. Human originals and executed calls are read-only; explicit private copies are data.",
-      "A frame cannot return while it owns active pi-await watches; cancel or explicitly transfer them first.",
+      "A frame cannot return while it owns live pi-await watches; use native unwatch, or action=transfer to move an owned watch to an active parent/root scope first. Repeating wakes remain live and do not complete ownership.",
     ],
     parameters: contextOperationSchema(),
     async execute(toolCallId: string, params: any, ...rest: any[]) {
@@ -1236,7 +1246,7 @@ function registerContextTool(pi: any) {
           const result = searchContext(branch, { context: contextBoundaryPreview(ctx) }, contextState, params);
           return readResult(JSON.stringify(result), { contextRevision: contextState.revision, hits: result.hits.length });
         }
-        if (!["call", "return", "pin", "unpin", "replace", "drop", "load", "move", "spill", "mark"].includes(action)) {
+        if (!["call", "return", "search", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"].includes(action)) {
           throw new Error(`Unknown context action ${action}. No context changed.`);
         }
         const prepared = await prepareContextOperation({ state: contextState, branch: ctx?.sessionManager?.getBranch?.() ?? [], boundary: { context: contextBoundaryPreview(ctx) }, operation: { ...params, callId: toolCallId, goalVersion: state.goal.version }, projectRoot: contextCwd(ctx) });
@@ -1353,6 +1363,7 @@ function taskDefinitionSchema() {
     agent: Type.Optional(Type.String({ enum: ["scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"], description: "pi-subagents role, used only when executor=subagent. Defaults to scout." })),
     writeScope: Type.Optional(Type.String({ maxLength: 200, description: "Owned path/file/directory/glob scope for writable tasks, or exact value read-only for read-only investigations. A subagent task must be read-only." })),
     dispatchReason: Type.Optional(Type.String({ minLength: 12, maxLength: 400, description: "Required when executor=subagent: why a separate semantic context is worth the extra model call instead of using parent reasoning or deterministic Code Mode. Prefer independent exploration, coverage, or review; do not delegate trivial deterministic work." })),
+    frameScope: Type.Optional(Type.String({ maxLength: 64, description: "Optional active Compass frame scope for this work; it correlates native execution without creating another task registry." })),
   }, { additionalProperties: false });
 }
 function planCreateSchema() {
@@ -1449,7 +1460,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           dependencyReady,
           approval: dagApprovalStatus(state),
           blocked,
-          tasks: plan.tasks.map((task: any) => ({ id: task.id, title: clip(task.title, 100), status: task.status, dependsOn: task.dependsOn, executor: task.executor || "parent", ...(task.executor === "subagent" ? { agent: task.agent || "scout" } : {}), writeScope: task.writeScope || null, reason: task.reason ? clip(task.reason, 140) : null })),
+          tasks: plan.tasks.map((task: any) => ({ id: task.id, title: clip(task.title, 100), status: task.status, dependsOn: task.dependsOn, executor: task.executor || "parent", ...(task.executor === "subagent" ? { agent: task.agent || "scout" } : {}), writeScope: task.writeScope || null, frameScope: task.frameScope || null, reason: task.reason ? clip(task.reason, 140) : null })),
           acceptance: { status: acceptance.status, total: acceptance.total, reportedPass: acceptance.passed, failed: acceptance.failed, blocked: acceptance.blocked, unverified: acceptance.unverified },
           goalOutcome: outcome,
           execution: plan.execution ? clone(plan.execution) : null,
@@ -2140,6 +2151,15 @@ export default function (pi: any) {
       persistState(pi);
     });
   });
+
+  // Branch navigation is a native lifecycle boundary. Re-read the committed
+  // branch-local context here; pi-await owns live observer disposal and reports
+  // any lost arm through its native custom message, so Compass does not poll.
+  pi.on("session_tree", async (_event: any, ctx: any) => serialized(async () => {
+    if (!ctx?.sessionManager?.getBranch) return;
+    restoreContext(ctx);
+    needsRestore = false;
+  }));
 
   pi.on("session_shutdown", async () => serialized(async () => {
     const execution = state.plan?.execution;
