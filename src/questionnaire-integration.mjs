@@ -45,10 +45,11 @@ export function normalizeQuestionnaireRecord(value, { preserveFullText = false }
   const globalNote = typeof value.globalNote === "string"
     ? (preserveFullText ? value.globalNote : clip(value.globalNote, 600))
     : "";
+  if (value.error || value.isError === true || value.ok === false) return null;
   const cancelled = value.outcome === "declined" || value.cancelled === true;
   const suppliedOutcome = ["answered", "partial", "declined"].includes(value.outcome) ? value.outcome : null;
   if (!cancelled && answers.length === 0 && unanswered.length === 0 && !globalNote) return null;
-  const outcome = cancelled ? "declined" : suppliedOutcome ?? (unanswered.length ? "partial" : "answered");
+  const outcome = cancelled ? "declined" : unanswered.length ? "partial" : suppliedOutcome ?? "answered";
   return {
     outcome,
     answers,

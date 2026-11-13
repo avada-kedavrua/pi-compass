@@ -213,6 +213,20 @@ function traceFromEntries(entries: any[]): any[] {
   }
   return found.slice(-MAX_TRACE_ENTRIES);
 }
+function persistedAssistantEntryId(ctx: any, toolCallId: string): string {
+  if (!toolCallId) return "";
+  let branch: any[] = [];
+  try { branch = ctx?.sessionManager?.getBranch?.() ?? []; } catch { return ""; }
+  for (const entry of [...branch].reverse()) {
+    const message = entry?.message;
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+    const matchingCall = message.content.some((part: any) => part?.type === "toolCall" && part.id === toolCallId);
+    if (!matchingCall) continue;
+    const id = entry.id ?? entry.entryId;
+    return typeof id === "string" && id.trim() ? id : "";
+  }
+  return "";
+}
 function restoreState(ctx: any): any {
   let restored: any = null;
   let branch: any[] = [];
@@ -680,7 +694,7 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
       await serialized(async () => {
         const execution = state.plan?.execution;
         if (!execution || execution.requestId !== waveId || execution.status !== "dispatching") return;
-        state.plan = updateTasks(state.plan, currentReady.map((task: any) => ({ id: task.id, status: "pending" })));
+        state.plan = updateTasks(state.plan, execution.taskIds.map((id: string) => ({ id, status: "pending" })));
         state.plan.execution = null;
         state = recordExecutionEvent(state, {
           status: "failed",
@@ -968,8 +982,8 @@ async function handleCompassToolResult(pi: any, event: any, ctx: any) {
 
     if (["compass_plan_create", "compass_plan_revise"].includes(toolName) && state.plan?.approvalRequest && !dagApprovalStatus(state).approved) {
       const request = state.plan.approvalRequest;
-      const approvalPrompt = `Before any DAG task starts, present the exact structured Human question below through ask_user_question. Do not execute or treat text/partial/custom/UI-error output as approval. Preserve its exact question and option labels so Compass can correlate the response.\n\nQuestion: ${request.question}\nOptions: ${JSON.stringify(["Approve this exact DAG", "Revise the DAG"])}\n\nApproval request: ${request.id}`;
-      const details = { ...(event?.details && typeof event.details === "object" ? clone(event.details) : {}), dagApproval: dagApprovalStatus(state), approvalQuestion: request.question, approvalOptions: ["Approve this exact DAG", "Revise the DAG"] };
+      const approvalPrompt = `Before any DAG task starts, present the exact structured Human questionnaire in the dagApprovalRequest field through ask_user_question. Do not execute or treat text/partial/custom/UI-error output as approval. Preserve its entire question, header, multiSelect, option descriptions and preview unchanged so Compass can correlate the response. Approval request: ${request.id}`;
+      const details = { ...(event?.details && typeof event.details === "object" ? clone(event.details) : {}), dagApproval: dagApprovalStatus(state), dagApprovalRequest: { id: request.id, questionnaire: request.questionnaire } };
       const content = Array.isArray(event?.content) ? [...event.content] : [];
       content.push({ type: "text", text: approvalPrompt });
       return { content, details };
@@ -1394,9 +1408,9 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const result = noMutation(() => renewDagApprovalRequest(state));
           state = result.state;
           afterMutation(pi, contextCwd(ctx));
-          return stateResult(`Present this exact structured Human question before any task progression. Approval request ${result.request.id}: ${result.request.question}`, {
+          return stateResult(`Present this exact structured Human questionnaire before any task progression. Approval request ${result.request.id}; use its complete question, header, options, descriptions, preview, and multiSelect value unchanged.`, {
             mutation: "dag_approval_request",
-            approvalRequest: { id: result.request.id, question: result.request.question, options: ["Approve this exact DAG", "Revise the DAG"] },
+            approvalRequest: { id: result.request.id, questionnaire: result.request.questionnaire },
           });
         });
       },
@@ -2286,10 +2300,11 @@ export default function (pi: any) {
 
   // Capture explicit writes, failed tools, and structured answers returned by ask-user-questions.
   // All updates are serialized so a trace event cannot overwrite a concurrent Goal update.
-  pi.on("tool_call", async (event: any) => serialized(async () => {
+  pi.on("tool_call", async (event: any, ctx: any) => serialized(async () => {
     if (/ask.*user.*question|ask_user_question/i.test(String(event?.toolName ?? ""))) {
       const callId = String(event?.toolCallId ?? event?.callId ?? "");
-      const bound = bindDagApprovalQuestionnaire(state, event?.input, callId);
+      const sourceEntryId = persistedAssistantEntryId(getContext([ctx]), callId);
+      const bound = bindDagApprovalQuestionnaire(state, event?.input, sourceEntryId, callId);
       if (bound.bound) persistState(pi);
     }
     if (event?.toolName === "compass_context" && event?.parentToolCallId && event?.input?.action !== "search") {
@@ -2347,9 +2362,11 @@ export default function (pi: any) {
       const text = resultText(result);
       const details = result?.details && typeof result.details === "object" && !Array.isArray(result.details) ? result.details : null;
       const sourceCallId = String(event?.toolCallId ?? event?.callId ?? "");
-      if (details?.error || (failed && state.plan.approvalRequest?.toolCallId === sourceCallId)) {
+      const sourceEntryId = persistedAssistantEntryId(getContext([ctx]), sourceCallId);
+      if ((details?.error || failed) && sourceEntryId) {
         const recorded = recordHumanQuestionnaireFailure(state, {
           source: toolName,
+          sourceEntryId,
           sourceCallId,
           errorCode: details?.error ?? "unknown",
           reason: text || "The structured questionnaire tool failed before returning a Human answer.",
@@ -2361,7 +2378,9 @@ export default function (pi: any) {
         return;
       }
       if (!failed && ((text && !/\b(no answer yet|waiting for user|awaiting user response|pending user input)\b/i.test(text)) || details)) {
-        const captured = captureHumanDecision(state, { source: toolName, sourceCallId, text, details });
+        const sourceEntryId = persistedAssistantEntryId(getContext([ctx]), String(event?.toolCallId ?? event?.callId ?? ""));
+        if (!sourceEntryId) return;
+        const captured = captureHumanDecision(state, { source: toolName, sourceEntryId, sourceCallId, text, details });
         if (captured.captured) {
           state = captured.state;
           persistState(pi);

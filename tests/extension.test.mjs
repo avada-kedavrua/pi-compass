@@ -81,15 +81,20 @@ function fakePi(options = {}) {
 }
 const ctx = (pi, cwd = "/tmp/example-project") => ({ cwd, sessionManager: { getBranch: () => pi.branch(), getEntries: () => pi.branch() }, ui: { notify() {} } });
 function latestState(pi) { return pi.entries.filter((entry) => entry.customType === "pi-compass-v2.goalrun").at(-1)?.data; }
+function persistToolCall(pi, callId, entryId = `assistant-${callId}`) {
+  pi.entries.push({ id: entryId, type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: callId, name: "ask_user_question", arguments: {} }] } });
+  return entryId;
+}
 function approvedDagState(state) {
   const request = state.plan.approvalRequest;
   assert.ok(request, "a draft DAG must have an identity-bound approval request");
   const callId = `human-approval-${request.id}`;
-  const input = { questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] };
-  const bound = bindDagApprovalQuestionnaire(state, input, callId);
+  const sourceEntryId = `assistant-${callId}`;
+  const input = { questions: [structuredClone(request.questionnaire)] };
+  const bound = bindDagApprovalQuestionnaire(state, input, sourceEntryId, callId);
   assert.equal(bound.bound, true);
   return captureHumanDecision(bound.state, {
-    source: "ask_user_question", sourceCallId: callId,
+    source: "ask_user_question", sourceEntryId, sourceCallId: callId,
     details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] },
   }).state;
 }
@@ -106,7 +111,8 @@ async function approveDag(pi) {
   const request = state?.plan?.approvalRequest;
   assert.ok(request, "a draft DAG must have an identity-bound approval request");
   const callId = `human-approval-${request.id}`;
-  const input = { questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] };
+  const input = { questions: [structuredClone(request.questionnaire)] };
+  persistToolCall(pi, callId);
   await pi.events.get("tool_call")({ toolName: "ask_user_question", toolCallId: callId, input }, ctx(pi));
   await pi.events.get("tool_execution_end")({
     toolName: "ask_user_question", toolCallId: callId, isError: false,
@@ -1138,10 +1144,24 @@ test("message_end captures Human steering messages and applies explicit Goal rep
   assert.ok(state.sessionDirectives.some((directive) => directive.goalVersion === 1 && /不用 cd/.test(directive.text)), "the directive remains archived in state history");
 });
 
+test("questionnaire hooks require a persisted assistant source, not a provider-call claim", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  await captureGoal(pi, "Goal: choose a deployment route");
+  await pi.events.get("tool_execution_end")({
+    toolName: "ask_user_question",
+    toolCallId: "fabricated-call-id",
+    isError: false,
+    result: { details: { answers: [{ questionIndex: 0, question: "Route?", kind: "custom", answer: "SSH" }] } },
+  }, ctx(pi));
+  assert.equal(latestState(pi).humanDecisions.length, 0, "a provider call ID without a persisted assistant tool call is not Human-decision identity");
+});
+
 test("ask-user-questions answers remain available on demand without repeated injection", async () => {
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi, "Goal: complete the PPTX delivery");
+  persistToolCall(pi, "ask-call-1");
   await pi.events.get("tool_execution_end")({
     toolName: "ask_user_question",
     toolCallId: "ask-call-1",
@@ -1174,6 +1194,7 @@ test("ask-user-question UI load failures are not recorded as Human declines", as
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi, "Goal: continue the implementation after a Human choice");
+  persistToolCall(pi, "ask-call-error");
   const original = {
     toolName: "ask_user_question",
     toolCallId: "ask-call-error",

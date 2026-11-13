@@ -29,6 +29,7 @@ import {
   transitionTasks,
   revisePlanState,
   bindDagApprovalQuestionnaire,
+  renewDagApprovalRequest,
   dagApprovalStatus,
   recordTaskAssessment,
 } from "../src/goal-run-v0-9-0.mjs";
@@ -45,13 +46,16 @@ const tasks = [
 function withGoal(prompt = "Create a reliable full-stack smoke test") {
   return captureHumanPrompt(emptyGoalRunState(), prompt).state;
 }
+function approvalInput(request) { return { questions: [structuredClone(request.questionnaire)] }; }
 function approvePlan(state) {
   const request = state.plan.approvalRequest;
   const callId = `approval-${request.id}`;
-  const bound = bindDagApprovalQuestionnaire(state, { questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] }, callId);
+  const sourceEntryId = `entry-${request.id}`;
+  const bound = bindDagApprovalQuestionnaire(state, approvalInput(request), sourceEntryId, callId);
   assert.equal(bound.bound, true);
   return captureHumanDecision(bound.state, {
     source: "ask_user_question",
+    sourceEntryId,
     sourceCallId: callId,
     details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] },
   }).state;
@@ -283,14 +287,14 @@ test("explicit Goal replacement must be top-level and directive fragments stay a
 test("ask-user-question choices are kept as authoritative decisions and included in the anchor", () => {
   let state = withGoal("Goal: deliver the feature");
   const captured = captureHumanDecision(state, {
-    source: "ask_user_question", sourceCallId: "q1",
+    source: "ask_user_question", sourceEntryId: "entry-q1", sourceCallId: "q1",
     text: 'User has answered your questions: "Delivery"="Push origin/main only".',
   });
   assert.equal(captured.captured, true);
   assert.equal(captured.state.humanDecisions[0].goalVersion, 1);
   assert.match(buildGoalAnchor(captured.state), /Push origin\/main only/);
   const duplicate = captureHumanDecision(captured.state, {
-    source: "ask_user_question", sourceCallId: "q1", text: "duplicate",
+    source: "ask_user_question", sourceEntryId: "entry-q1", sourceCallId: "different-provider-id", text: "duplicate",
   });
   assert.equal(duplicate.captured, false);
 });
@@ -299,6 +303,7 @@ test("structured questionnaire answers preserve choice semantics without storing
   const state = withGoal("Goal: build the local development workflow");
   const captured = captureHumanDecision(state, {
     source: "ask_user_question",
+    sourceEntryId: "entry-structured-q1",
     sourceCallId: "structured-q1",
     text: `User has answered your questions: "Frontend"="Local Vite". selected preview: ${"large-preview-body ".repeat(400)}`,
     details: {
@@ -338,6 +343,7 @@ test("partial questionnaire answers and declined questionnaires retain their dis
   const state = withGoal("Goal: choose a deployment approach");
   const partial = captureHumanDecision(state, {
     source: "ask_user_question",
+    sourceEntryId: "entry-partial-q1",
     sourceCallId: "partial-q1",
     text: 'User has answered your questions: "Tunnel"="SSH". unanswered: "Port policy". global note: keep the host closed.',
     details: {
@@ -353,6 +359,7 @@ test("partial questionnaire answers and declined questionnaires retain their dis
 
   const declined = captureHumanDecision(partial.state, {
     source: "ask_user_question",
+    sourceEntryId: "entry-declined-q1",
     sourceCallId: "declined-q1",
     text: "User declined to answer questions",
     details: { answers: [], cancelled: true, globalNote: "Ask again after the demo." },
@@ -366,6 +373,7 @@ test("questionnaire UI and validation errors are events, not Human decisions", (
   const state = withGoal("Goal: select an execution route");
   const failed = recordHumanQuestionnaireFailure(state, {
     source: "ask_user_question",
+    sourceEntryId: "entry-failed-q1",
     sourceCallId: "failed-q1",
     errorCode: "session_load_failed",
     reason: "The dialog module failed to import.",
@@ -375,11 +383,12 @@ test("questionnaire UI and validation errors are events, not Human decisions", (
   assert.equal(failed.state.events.at(-1).kind, "human_questionnaire_error");
   assert.equal(failed.state.events.at(-1).status, "session_load_failed");
   const duplicate = recordHumanQuestionnaireFailure(failed.state, {
-    source: "ask_user_question", sourceCallId: "failed-q1", errorCode: "no_ui",
+    source: "ask_user_question", sourceEntryId: "entry-failed-q1", sourceCallId: "failed-q1", errorCode: "no_ui",
   });
   assert.equal(duplicate.captured, false);
   const mistakenDecision = captureHumanDecision(state, {
     source: "ask_user_question",
+    sourceEntryId: "entry-failed-q2",
     sourceCallId: "failed-q2",
     text: "User declined to answer questions",
     details: { answers: [], cancelled: true, error: "no_ui" },
@@ -723,22 +732,50 @@ test("ready pending tasks can be completed directly, but dependency gates still 
 test("DAG progression requires a correlated exact approval; partial and custom answers do not approve", () => {
   let state = revisePlanState(withGoal(), { acceptanceCriteria, tasks }).state;
   const request = state.plan.approvalRequest;
-  assert.match(request.question, /executor=parent/);
-  assert.match(request.question, /API request returns expected data/);
+  assert.equal(request.question, "Approve this exact Goal DAG for execution?");
+  const approvalPreview = request.questionnaire.options[0].preview;
+  assert.match(approvalPreview, /executor=parent/);
+  assert.match(approvalPreview, /output=/);
+  assert.match(approvalPreview, /writeScope=src\/smoke/);
+  assert.match(approvalPreview, /API request returns expected data/);
   assert.equal(dagApprovalStatus(state).approved, false);
   assert.throws(() => transitionTasks(state, "start", [{ id: "api" }], updateTasks), /no current correlated Human approval/);
   assert.equal(state.plan.tasks[0].status, "pending", "rejected progression does not mutate state");
 
   const callId = "questionnaire-call-1";
-  assert.equal(bindDagApprovalQuestionnaire(state, { questions: [{ question: `${request.question} altered`, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] }, callId).bound, false);
-  const bound = bindDagApprovalQuestionnaire(state, { questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] }, callId);
+  const alteredQuestionnaire = approvalInput(request);
+  alteredQuestionnaire.questions[0].options[0].description += " altered";
+  assert.equal(bindDagApprovalQuestionnaire(state, alteredQuestionnaire, "entry-questionnaire-call-1", callId).bound, false);
+  for (const alter of [
+    (input) => { input.questions[0].options[0].preview += " altered"; },
+    (input) => { input.questions[0].multiSelect = true; },
+    (input) => { input.questions[0].header += " altered"; },
+  ]) {
+    const altered = approvalInput(request);
+    alter(altered);
+    assert.equal(bindDagApprovalQuestionnaire(state, altered, "entry-questionnaire-call-1", callId).bound, false);
+  }
+  const bound = bindDagApprovalQuestionnaire(state, approvalInput(request), "entry-questionnaire-call-1", callId);
   assert.equal(bound.bound, true);
   const unrelated = captureHumanDecision(bound.state, { sourceCallId: "wrong-call", details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION }] } }).state;
   assert.equal(dagApprovalStatus(unrelated).approved, false, "unrelated questionnaire cannot authorize the DAG");
 
-  const partialBound = bindDagApprovalQuestionnaire(state, { questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] }, callId);
-  const partial = captureHumanDecision(partialBound.state, { sourceCallId: callId, details: { unanswered: [0], answers: [] } }).state;
+  const partialBound = bindDagApprovalQuestionnaire(state, approvalInput(request), "entry-questionnaire-call-1", callId);
+  const partial = captureHumanDecision(partialBound.state, { sourceEntryId: "entry-questionnaire-call-1", sourceCallId: callId, details: { unanswered: [0], answers: [] } }).state;
   assert.equal(dagApprovalStatus(partial).approved, false, "partial response does not approve");
+
+  const qualifiedBound = bindDagApprovalQuestionnaire(state, approvalInput(request), "entry-qualified", "reused-provider-id");
+  const qualified = captureHumanDecision(qualifiedBound.state, { sourceEntryId: "entry-qualified", sourceCallId: "reused-provider-id", details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, notes: "Only after removing task smoke." }], globalNote: "Do not execute until the API is reviewed." } }).state;
+  assert.equal(dagApprovalStatus(qualified).approved, false, "conditional notes withhold authorization");
+
+  const renewed = renewDagApprovalRequest(partial).state;
+  const renewedRequest = renewed.plan.approvalRequest;
+  const fresh = bindDagApprovalQuestionnaire(renewed, approvalInput(renewedRequest), "entry-fresh", "reused-provider-id");
+  const freshDecision = captureHumanDecision(fresh.state, { sourceEntryId: "entry-fresh", sourceCallId: "reused-provider-id", details: { answers: [{ questionIndex: 0, question: renewedRequest.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] } });
+  assert.equal(dagApprovalStatus(freshDecision.state).approved, true, "renewed exact approval remains current despite reused provider call ID");
+  assert.equal(freshDecision.state.humanDecisions.length, 2, "distinct persisted exchanges sharing a provider ID are both retained");
+  const duplicate = captureHumanDecision(freshDecision.state, { sourceEntryId: "entry-fresh", sourceCallId: "different-provider-id", details: { answers: [{ questionIndex: 0, question: renewedRequest.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION }] } });
+  assert.equal(duplicate.kind, "duplicate", "only the same persisted exchange is deduplicated");
 
   const revised = revisePlanState(state, { acceptanceCriteria, tasks: tasks.map((task) => task.id === "api" ? { ...task, acceptance: "API route and health semantics are documented with readiness evidence" } : task) }).state;
   assert.notEqual(revised.plan.approvalRequest.id, request.id, "material revision gets a new approval identity");
@@ -757,6 +794,27 @@ test("task completion is separate from version-bound semantic assessment and unr
   assert.deepEqual(readyTasks(state.plan).map((task) => task.id), ["ui"], "inconclusive prerequisite does not unlock dependents");
   state = recordTaskAssessment(state, { taskId: "api", status: "pass", evidence: "Additional evidence confirms the approved acceptance criterion.", caveats: [], unresolvedCaveats: [] }).state;
   assert.ok(state.plan.tasks.find((task) => task.id === "api").assessment.planRevision === state.plan.revision);
+});
+
+test("replanning invalidation clears descendant assessments before rerun", () => {
+  const chain = [
+    { id: "a", title: "A", acceptance: "A has evidence", dependsOn: [], writeScope: "read-only" },
+    { id: "b", title: "B", acceptance: "B has evidence", dependsOn: ["a"], writeScope: "read-only" },
+    { id: "c", title: "C", acceptance: "C has evidence", dependsOn: ["b"], writeScope: "read-only" },
+  ];
+  let state = revisePlanState(withGoal(), { acceptanceCriteria: ["All chain nodes pass"], tasks: chain }).state;
+  state = approvePlan(state);
+  for (const id of ["a", "b", "c"]) state = completeAndAssess(state, id, `Original execution evidence for ${id}.`);
+  state = revisePlanState(state, { acceptanceCriteria: ["All chain nodes pass"], tasks: chain.map((task) => task.id === "a" ? { ...task, acceptance: "A has new evidence" } : task) }).state;
+  assert.equal(state.plan.tasks.find((task) => task.id === "b").assessment, null);
+  assert.equal(state.plan.tasks.find((task) => task.id === "c").assessment, null);
+  state = approvePlan(state);
+  state = completeAndAssess(state, "a", "New A execution evidence.");
+  assert.deepEqual(readyTasks(state.plan).map((task) => task.id), ["b"]);
+  state = transitionTasks(state, "done", [{ id: "b", evidence: "B rerun evidence." }], updateTasks).state;
+  assert.deepEqual(readyTasks(state.plan).map((task) => task.id), [], "B cannot unlock C before fresh assessment");
+  state = recordTaskAssessment(state, { taskId: "b", status: "pass", evidence: "Fresh B assessment after rerun.", caveats: [], unresolvedCaveats: [] }).state;
+  assert.deepEqual(readyTasks(state.plan).map((task) => task.id), ["c"]);
 });
 
 test("ordinary task status updates preserve approval while material Human constraints invalidate it", () => {

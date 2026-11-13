@@ -226,6 +226,7 @@ export function createOrRevisePlan(currentState, input) {
         && task.dependsOn.some((dep) => preservedById.get(dep)?.status !== "done")) {
         task.status = "pending";
         task.evidence = "";
+        task.assessment = null;
         task.reason = "Invalidated because a prerequisite changed during replanning.";
         invalidated = true;
       }

@@ -32,6 +32,12 @@ test("full questionnaire projection preserves complete answer text and strips pr
   assert.ok(bounded.answers[0].answer.length <= 500);
 });
 
+test("questionnaire errors are not decisions and unanswered indexes override an answered outcome", () => {
+  assert.equal(normalizeQuestionnaireRecord({ error: "session_load_failed", cancelled: true }), null);
+  assert.equal(normalizeQuestionnaireRecord({ isError: true, answers: [{ questionIndex: 0, question: "Q", kind: "custom", answer: "A" }] }), null);
+  assert.equal(normalizeQuestionnaireRecord({ outcome: "answered", answers: [{ questionIndex: 0, question: "Q", kind: "option", answer: "A" }], unanswered: [1] }).outcome, "partial");
+});
+
 test("questionnaire failure rewrites the misleading decline envelope into a tool error", () => {
   const details = { answers: [], cancelled: true, error: "session_load_failed" };
   const event = {

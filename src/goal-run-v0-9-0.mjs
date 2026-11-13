@@ -84,6 +84,7 @@ function normalizeHumanDecisionRecord(value, index, fallbackVersion = 1) {
     id: typeof value.id === "string" && /^H\d+$/.test(value.id) ? value.id : `H${index + 1}`,
     at: typeof value.at === "string" ? value.at.slice(0, 64) : timestamp(),
     source: clip(value.source || "migration", 80),
+    sourceEntryId: typeof value.sourceEntryId === "string" ? value.sourceEntryId.slice(0, 128) : "",
     sourceCallId: typeof value.sourceCallId === "string" ? value.sourceCallId.slice(0, 128) : "",
     goalVersion: Number.isInteger(value.goalVersion) && value.goalVersion > 0
       ? value.goalVersion
@@ -782,7 +783,7 @@ export function captureHumanDecision(stateValue, input) {
   const state = normalizeGoalRunState(stateValue);
   const source = typeof input?.source === "string" ? input.source : "ask-user-questions";
   const rawDetails = input?.details && typeof input.details === "object" && !Array.isArray(input.details) ? input.details : null;
-  if (rawDetails?.error) return { state, captured: false, kind: "questionnaire_error", error: String(rawDetails.error) };
+  if (rawDetails?.error || rawDetails?.isError === true || rawDetails?.ok === false) return { state, captured: false, kind: "questionnaire_error", error: String(rawDetails.error ?? "questionnaire_error") };
   const questionnaire = normalizeQuestionnaireRecord(rawDetails);
   // Structured results are the source of truth. The package's model-facing
   // envelope may echo a selected option's full preview; preserve that raw
@@ -791,10 +792,11 @@ export function captureHumanDecision(stateValue, input) {
     ? questionnaireSummary(questionnaire, "")
     : (typeof input?.text === "string" && input.text.trim() ? nonEmpty(input.text, "text", 2600) : "");
   if (!text && !questionnaire) return { state, captured: false, kind: "no_decision" };
+  const sourceEntryId = typeof input?.sourceEntryId === "string" ? input.sourceEntryId : "";
   const sourceCallId = typeof input?.sourceCallId === "string" ? input.sourceCallId : "";
   const approvalRequest = state.plan.approvalRequest;
-  const correlatedApprovalAnswer = Boolean(approvalRequest?.toolCallId && approvalRequest.toolCallId === sourceCallId);
-  if (sourceCallId && state.humanDecisions.some((item) => item.sourceCallId === sourceCallId)) {
+  const correlatedApprovalAnswer = Boolean(approvalRequest?.sourceEntryId && approvalRequest.sourceEntryId === sourceEntryId);
+  if (sourceEntryId && state.humanDecisions.some((item) => item.sourceEntryId === sourceEntryId)) {
     return { state, captured: false, kind: "duplicate" };
   }
   const last = state.humanDecisions.at(-1);
@@ -806,6 +808,7 @@ export function captureHumanDecision(stateValue, input) {
     id,
     at: timestamp(),
     source,
+    sourceEntryId,
     sourceCallId,
     goalVersion: state.goal.version ?? 1,
     text,
@@ -821,6 +824,7 @@ export function captureHumanDecision(stateValue, input) {
       state.plan.approval = {
         requestId: approvalRequest.id,
         binding: approvalRequest.binding,
+        sourceEntryId,
         sourceCallId,
         goalVersion: state.goal.version ?? 1,
         approvedAt: timestamp(),
@@ -842,13 +846,14 @@ export function captureHumanDecision(stateValue, input) {
 export function recordHumanQuestionnaireFailure(stateValue, input) {
   const state = normalizeGoalRunState(stateValue);
   const source = typeof input?.source === "string" ? input.source : "ask-user-questions";
+  const sourceEntryId = typeof input?.sourceEntryId === "string" ? input.sourceEntryId.slice(0, 128) : "";
   const sourceCallId = typeof input?.sourceCallId === "string" ? input.sourceCallId.slice(0, 120) : "";
   const suppliedCode = typeof input?.errorCode === "string" ? input.errorCode : "";
   const errorCode = QUESTIONNAIRE_ERRORS.has(suppliedCode) ? suppliedCode : "unknown";
-  if (sourceCallId && state.events.some((event) => event.kind === "human_questionnaire_error" && event.ref === sourceCallId)) {
+  if (sourceEntryId && state.events.some((event) => event.kind === "human_questionnaire_error" && event.ref === sourceEntryId)) {
     return { state, captured: false, kind: "duplicate" };
   }
-  if (state.plan.approvalRequest?.toolCallId && state.plan.approvalRequest.toolCallId === sourceCallId) {
+  if (state.plan.approvalRequest?.sourceEntryId && state.plan.approvalRequest.sourceEntryId === sourceEntryId) {
     state.plan.approvalRequest.status = "questionnaire_error";
   }
   const reason = clip(input?.reason, 360);
@@ -857,7 +862,7 @@ export function recordHumanQuestionnaireFailure(stateValue, input) {
     source,
     summary: `Questionnaire unavailable (${errorCode}).`,
     text: reason || `The questionnaire did not produce a Human decision. Error code: ${errorCode}.`,
-    ref: sourceCallId,
+    ref: sourceEntryId || sourceCallId,
     status: errorCode,
     goalVersion: state.goal.version ?? 1,
   });
@@ -2143,17 +2148,19 @@ export function renewDagApprovalRequest(stateValue) {
   const state = normalizeGoalRunState(stateValue);
   if (!state.plan?.tasks?.length || state.plan.goal !== state.goal.current) throw new Error("A current Goal DAG is required to request approval. No state changed.");
   if (state.plan.execution && ["dispatching", "running", "unknown"].includes(state.plan.execution.status)) throw new Error("Cannot request new approval while a Subagent batch is unresolved. No state changed.");
-  state.plan.approvalRequest = createDagApprovalRequest(state);
+  state.plan.approvalRequest = null;
   state.plan.approval = null;
+  state.plan.approvalRequest = createDagApprovalRequest(state);
   return { state, request: state.plan.approvalRequest };
 }
 
-export function bindDagApprovalQuestionnaire(stateValue, input, toolCallId) {
+export function bindDagApprovalQuestionnaire(stateValue, input, sourceEntryId, toolCallId = "") {
   const state = normalizeGoalRunState(stateValue);
   const request = state.plan.approvalRequest;
   if (!request || request.status !== "awaiting_questionnaire" || !matchesDagApprovalQuestion(request, input)) return { state, bound: false };
-  if (typeof toolCallId !== "string" || !toolCallId.trim()) return { state, bound: false };
-  request.toolCallId = toolCallId.slice(0, 128);
+  if (typeof sourceEntryId !== "string" || !sourceEntryId.trim()) return { state, bound: false };
+  request.sourceEntryId = sourceEntryId.slice(0, 128);
+  request.toolCallId = typeof toolCallId === "string" ? toolCallId.slice(0, 128) : "";
   request.status = "presented";
   return { state, bound: true, requestId: request.id };
 }

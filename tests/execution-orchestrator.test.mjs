@@ -313,12 +313,12 @@ test("GoalRun normalization preserves unknown usage/cost fields as null", () => 
 function approvePlan(state) {
   const request = state.plan.approvalRequest;
   const callId = `approval-${request.id}`;
-  const bound = bindDagApprovalQuestionnaire(state, {
-    questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }],
-  }, callId);
+  const sourceEntryId = `entry-${request.id}`;
+  const bound = bindDagApprovalQuestionnaire(state, { questions: [structuredClone(request.questionnaire)] }, sourceEntryId, callId);
   assert.equal(bound.bound, true);
   return captureHumanDecision(bound.state, {
     source: "ask_user_question",
+    sourceEntryId,
     sourceCallId: callId,
     details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] },
   }).state;
