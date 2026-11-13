@@ -144,6 +144,75 @@ export function searchSources(index, state, { query = "", ids = [], scope = "act
   }
   return { method: "lexical", scope, query, hits, scanned, truncated };
 }
+function rangeBounds(range) {
+  if (!range) return null;
+  return { part: range.part ?? 0, startLine: range.startLine ?? 1, endLine: range.endLine ?? Number.MAX_SAFE_INTEGER };
+}
+function sameRange(left, right) {
+  return JSON.stringify(rangeBounds(left)) === JSON.stringify(rangeBounds(right));
+}
+function containsRange(outer, inner) {
+  if (!outer) return true;
+  if (!inner) return false;
+  const a = rangeBounds(outer), b = rangeBounds(inner);
+  return a.part === b.part && a.startLine <= b.startLine && a.endLine >= b.endLine;
+}
+function textOf(content) {
+  const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  return blocks.filter((part) => part.type === "text").map((part) => part.text).join("\n").slice(0, 8192);
+}
+
+/** Exact/subset findings require the same immutable source identity and version. Similarity is advisory only. */
+export function analyzeRepeatedSelections(index, state, selections, scope = "all") {
+  scopes(scope);
+  if (!Array.isArray(selections) || selections.length > 16) fail("Comparison requires at most 16 explicit source selections.");
+  const resolved = selections.map((selection) => {
+    if (!selection || typeof selection !== "object") fail("Comparison selections require source IDs and versions.");
+    const item = resolveSource(index, state, selection, scope);
+    if (item.role === "user" || (item.role !== "toolResult" && !item.head?.readOnly)) return null;
+    return { id: item.id, binding: item.binding, version: item.version, range: item.range, content: item.content, role: item.role };
+  }).filter(Boolean);
+  const exact = [];
+  const subsets = [];
+  const similarities = [];
+  for (let left = 0; left < resolved.length; left++) for (let right = left + 1; right < resolved.length; right++) {
+    const a = resolved[left], b = resolved[right];
+    if (a.id === b.id && a.version === b.version) {
+      if (sameRange(a.range, b.range)) exact.push({ source: a.id, version: a.version, first: left, second: right, range: a.range });
+      else if (containsRange(a.range, b.range)) subsets.push({ source: a.id, version: a.version, superset: left, subset: right, supersetRange: a.range, subsetRange: b.range });
+      else if (containsRange(b.range, a.range)) subsets.push({ source: a.id, version: a.version, superset: right, subset: left, supersetRange: b.range, subsetRange: a.range });
+      continue;
+    }
+    const termsA = new Set(textOf(a.content).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
+    const termsB = new Set(textOf(b.content).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
+    if (!termsA.size || !termsB.size) continue;
+    let intersection = 0;
+    for (const term of termsA) if (termsB.has(term)) intersection++;
+    const score = intersection / (termsA.size + termsB.size - intersection);
+    if (score >= 0.35) similarities.push({ first: left, second: right, score: Number(score.toFixed(3)), advisory: "Different source identity; inspect before acting. No automatic edit or relocation." });
+  }
+  return { exact, subsets, similarities, automaticEdits: 0 };
+}
+
+/** Preserve the Agent's bounded semantic ordering while verifying each native source and requested range. */
+export function rankVerifiedSources(index, state, selections, scope = "all") {
+  scopes(scope);
+  if (!Array.isArray(selections) || selections.length > 16 || new Set(selections.map((item) => item?.id)).size !== selections.length) fail("Ranked retrieval requires at most 16 unique source selections.");
+  const sources = selections.map((selection, rank) => {
+    const item = resolveSource(index, state, selection, scope);
+    const blocks = typeof item.content === "string" ? [{ type: "text", text: item.content }] : item.content;
+    const text = blocks.filter((part) => part.type === "text").map((part) => part.text).join("\n");
+    return {
+      rank, id: item.id, binding: item.binding, version: item.version, range: item.range,
+      selectedVersion: contentVersion(item.content), role: item.role, origin: item.origin,
+      snippet: text.slice(0, 600), truncated: text.length > 600,
+      selectedParts: blocks.map((part, partIndex) => ({ part: partIndex, type: part.type, ...(part.type === "image" ? { mimeType: part.mimeType } : {}) })),
+      caveats: item.caveats, provenance: item.provenance,
+    };
+  });
+  return { method: "agent-selected-verified", ranking: "caller-order; not a runtime semantic score", sources };
+}
+
 export function resolveSource(index, state, { id, binding, version, range } = {}, scope = "all") {
   scopes(scope);
   if (typeof id !== "string" || !index.byId.has(id)) fail(`Unknown or wrong-branch source ${id}.`);

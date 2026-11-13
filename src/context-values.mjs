@@ -31,8 +31,8 @@ export function valueContent(index, head) {
   let content;
   if (head.field === "operation") {
     const operation = entry.message?.details?.contextOperation;
-    if (entry.message?.role !== "toolResult" || entry.message.toolName !== "compass_context" || !["replace", "spill"].includes(operation?.action)) fail("Value has no matching persisted write operation.");
-    content = operation.action === "spill" ? operation.pointer : operation.content;
+    if (entry.message?.role !== "toolResult" || entry.message.toolName !== "compass_context" || !["replace", "spill", "move"].includes(operation?.action)) fail("Value has no matching persisted write operation.");
+    content = operation.action === "spill" ? operation.pointer : operation.action === "move" ? operation.remaining : operation.content;
   } else if (head.field === "questionnaire") {
     content = questionnaireContent(entry);
     if (!content) fail("Questionnaire source is not a genuine structured Human answer.");

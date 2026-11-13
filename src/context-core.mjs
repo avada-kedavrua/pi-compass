@@ -2,7 +2,7 @@ import {
   VALUE_MESSAGE_TYPE, adoptValue, bindingKey, contentVersion, copyValue, currentValue, dataBlocks, isValueMessage, logicalSource, questionnaireContent,
   nativeValueViews, rawMessage as messageOf, releaseFrameValues, renderValue, validateValue, valueContent, valueMessage, writeValue,
 } from "./context-values.mjs";
-import { resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
+import { analyzeRepeatedSelections, rankVerifiedSources, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
 import { loadContextArtifact, writeContextArtifact } from "./context-artifacts.mjs";
 export { contentVersion } from "./context-values.mjs";
 
@@ -429,7 +429,37 @@ function sourceDataDraft(state, operation, selected, action, number = 0, owner =
   Object.assign(draft.details, { action, derived: true, referenceId: id, origin: head.origin });
   return draft;
 }
+function cutTextRange(content, range) {
+  const part = range.part ?? 0;
+  const isString = typeof content === "string";
+  const blocks = isString ? [{ type: "text", text: content }] : structuredClone(content);
+  const block = blocks[part];
+  if (!block || block.type !== "text") fail("Selected-range movement requires one native text part.");
+  const lines = block.text.split("\n");
+  const start = range.startLine ?? 1;
+  const end = range.endLine ?? lines.length;
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || end > lines.length) fail("Requested line range is stale or out of bounds.");
+  const selected = lines.slice(start - 1, end).join("\n");
+  const remaining = [...lines.slice(0, start - 1), ...lines.slice(end)].join("\n");
+  if (!remaining.trim()) fail("Range movement cannot remove the entire source; use drop only for an eligible whole working value.");
+  if (isString) return { selected, remaining, range: { part: 0, startLine: start, endLine: end } };
+  blocks[part] = { ...block, text: remaining };
+  return { selected: [{ ...block, text: selected }], remaining: blocks, range: { part, startLine: start, endLine: end } };
+}
+
 export async function prepareContextOperation({ state, branch, boundary, operation, projectRoot }) {
+  if (operation.action === "move" && operation.range) {
+    ensureIds(operation.ids);
+    if (operation.ids.length !== 1) fail("Selected-range movement requires exactly one versioned source.");
+    const index = sourceIndex(branch, boundary);
+    const selected = resolveSource(index, state, { id: operation.ids[0], binding: operation.binding, version: operation.version }, operation.sourceScope ?? "all");
+    const sourceEntry = index.byId.get(selected.id);
+    if (selected.role === "assistant" && sourceEntry.message?.content?.some?.((part) => part.type === "toolCall")) fail("Assistant tool-call records are immutable.");
+    if (!(["assistant", "toolResult"].includes(selected.role))) fail("Selected-range movement is limited to Agent-authored text or a complete read-only tool result; Human messages are immutable.");
+    if (selected.role === "toolResult") exchangeClosure(index, [selected.id]);
+    const cut = cutTextRange(selected.content, operation.range);
+    return { operation: { ...operation, range: cut.range, selectedRange: cut.selected, remaining: cut.remaining, preserveSource: selected.role === "toolResult" } };
+  }
   if (!["spill", "load"].includes(operation.action)) return { operation };
   ensureIds(operation.ids);
   if (operation.ids.length !== 1) fail("Artifact operations require exactly one versioned source.");
@@ -483,10 +513,36 @@ function planSpill({ next, index, operation, boundary }) {
   next.values[value.key] = head;
   return writeView(next, value, head, operation.pointer);
 }
-function planMove({ next, index, operation }) {
+function planMove({ next, index, operation, boundary }) {
   ensureIds(operation.ids);
   if (!operation.ids.length) fail("Select versioned source values to move to the append end.");
-  if (operation.range) fail("Load an exact range as a separate data value before moving it; a whole source cannot be silently split.");
+  if (operation.range) {
+    if (operation.ids.length !== 1 || operation.selectedRange === undefined || operation.remaining === undefined) fail("Selected-range move requires a freshly verified source range.");
+    const id = operation.ids[0];
+    const value = currentValue(next, index, id, { key: operation.binding });
+    assertWritableValue(next, value);
+    ensureVersion(operation.version);
+    if (value.version !== operation.version) fail(`Source ${id} changed since selection.`);
+    const preserveSource = value.message?.role === "toolResult";
+    if (value.head.readOnly && !preserveSource) fail("This value is read-only and cannot be range-moved.");
+    if (!preserveSource && (value.message?.role !== "assistant" || value.message.content?.some?.((part) => part.type === "toolCall"))) fail("Human messages and executed call records cannot be range-moved.");
+    if (operation.preserveSource !== preserveSource) fail("Prepared source-preservation mode does not match the selected source.");
+    if (preserveSource) exchangeClosure(index, [value.nativeId]);
+    const verifiedCut = cutTextRange(value.content, operation.range);
+    if (contentVersion(verifiedCut.selected) !== contentVersion(operation.selectedRange) || (!preserveSource && contentVersion(verifiedCut.remaining) !== contentVersion(operation.remaining))) fail(`Selected range payload changed after preparation for source ${id}.`);
+    const moved = sourceDataDraft(next, operation, {
+      id: value.id, version: value.version, range: operation.range, content: operation.selectedRange,
+      caveats: value.head.caveats, provenance: [...new Set([...value.head.sources, value.id])],
+    }, "move-range");
+    if (preserveSource) return [moved];
+    const head = {
+      entryId: boundary.toolResultEntryIds[0], field: "operation", version: contentVersion(operation.remaining), kind: value.head.kind,
+      readOnly: false, rendered: true, handling: value.head.handling, caveats: [...value.head.caveats], sources: [...value.head.sources],
+    };
+    next.values[value.key] = head;
+    const remainder = renderValue({ ...value, head }, operation.remaining, head);
+    return [nativeEdit(value.nativeId, remainder), moved];
+  }
   const versions = new Map((operation.versions ?? []).map((item) => [item.id, item.version]));
   const entries = [];
   for (const id of operation.ids) {
@@ -731,9 +787,15 @@ export function planRetentionBoundary({ state: input, branch, boundary }) {
 
 /** On-demand lexical recovery; no cross-session store or sibling-branch traversal. */
 export function searchContext(branch, boundary, state, options = {}) {
-  const result = searchSources(sourceIndex(branch, boundary), state, { ...options, scope: options.sourceScope ?? options.scope ?? "active" });
+  const index = sourceIndex(branch, boundary);
+  const scope = options.sourceScope ?? options.scope ?? "active";
+  const result = searchSources(index, state, { ...options, scope });
+  const repetition = options.compare === undefined ? undefined : analyzeRepeatedSelections(index, state, options.compare, scope);
+  const ranked = options.rankedSources === undefined ? undefined : rankVerifiedSources(index, state, options.rankedSources, scope);
   return {
     revision: state.revision, frame: state.frames.at(-1)?.id ?? "root", ...result,
+    ...(repetition ? { repetition } : {}),
+    ...(ranked ? { ranked } : {}),
     hits: result.hits.map((hit) => ({ ...hit, sources: hit.provenance, kind: state.values[hit.binding]?.kind ?? hit.kind ?? (hit.role === "user" ? "human" : "working"), pinned: state.pins.some((pin) => pin.key === hit.binding) })),
   };
 }

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  CONTEXT_MESSAGE_TYPE, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, releaseWatchMessages, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
+  CONTEXT_MESSAGE_TYPE, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, prepareContextOperation, releaseWatchMessages, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
 } from "../src/context-core.mjs";
 import {
   SessionManager, appendDrafts, applyOperation, assertPaired, contextPreview, modelText, queueOperation, sourceVersion,
@@ -58,6 +58,68 @@ test("uncaptured parent ranges load as editable data copies with actionable expo
   assert.match(modelText(manager), /local interpretation/);
   assert.deepEqual(manager.getEntry(parent), original);
   assertPaired(manager);
+});
+
+test("selected-range move cuts only verified Agent text and appends a qualified data copy", async () => {
+  const manager = host();
+  const id = manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "intro\nmove this line\nkeep this line" }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "stop", timestamp: Date.now() });
+  const original = structuredClone(manager.getEntry(id));
+  const boundary = queueOperation(manager, { action: "move", ids: [id], version: sourceVersion(manager, id), range: { part: 0, startLine: 2, endLine: 2 } });
+  const prepared = await prepareContextOperation({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary, operation: boundary.toolResults[0].details.contextOperation });
+  boundary.toolResults[0].details.contextOperation = prepared.operation;
+  const planned = planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary });
+  appendDrafts(manager, [...boundary.entries, ...planned.entries]);
+  const text = modelText(manager);
+  assert.match(text, /keep this line/);
+  assert.match(text, /move this line/);
+  assert.deepEqual(manager.getEntry(id), original, "raw assistant record remains append-only");
+  const moved = manager.getBranch().find((entry) => entry.type === "custom_message" && entry.details?.action === "move-range");
+  assert.equal(moved.details.origin.id, id);
+  assert.deepEqual(moved.details.origin.range, { part: 0, startLine: 2, endLine: 2 });
+  assertPaired(manager);
+});
+
+test("selected tool-result range relocates as data while preserving the complete execution envelope", async () => {
+  const manager = host();
+  manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "range-read", name: "read", arguments: { path: "file.txt" } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
+  const id = manager.appendMessage({ role: "toolResult", toolCallId: "range-read", toolName: "read", content: [{ type: "text", text: "first line\nretained superset\nlast line" }], isError: false, timestamp: Date.now() });
+  const raw = structuredClone(manager.getEntry(id));
+  const boundary = queueOperation(manager, { action: "move", ids: [id], version: sourceVersion(manager, id), range: { part: 0, startLine: 2, endLine: 2 } });
+  const prepared = await prepareContextOperation({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary, operation: boundary.toolResults[0].details.contextOperation });
+  boundary.toolResults[0].details.contextOperation = prepared.operation;
+  const planned = planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary });
+  appendDrafts(manager, [...boundary.entries, ...planned.entries]);
+  assert.deepEqual(manager.getEntry(id), raw);
+  assert.match(modelText(manager), /retained superset/);
+  assert.match(modelText(manager), /Selected source data/);
+  assertPaired(manager);
+});
+
+test("exact repetition and source-range subsets require stable read-only identity", () => {
+  const manager = host();
+  const exchange = toolExchange(manager, ["read"]);
+  const id = exchange.results[0];
+  const version = sourceVersion(manager, id);
+  const compare = (selections) => searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { compare: selections }).repetition;
+  assert.equal(compare([{ id, version }, { id, version }]).exact.length, 1);
+  assert.equal(compare([{ id, version }, { id, version, range: { part: 0, startLine: 1, endLine: 1 } }]).subsets.length, 1);
+  const human = user(manager, "same words as source-0");
+  assert.equal(compare([{ id: human, version: sourceVersion(manager, human) }, { id, version }]).exact.length, 0);
+  const addRead = (callId, resultText) => {
+    manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: callId } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
+    return manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text: resultText }], isError: false, timestamp: Date.now() });
+  };
+  const first = addRead("similar-a", "configuration region EU west");
+  const other = addRead("similar-b", "configuration region EU north");
+  const similar = compare([{ id: first, version: sourceVersion(manager, first) }, { id: other, version: sourceVersion(manager, other) }]);
+  assert.ok(similar.similarities.length, `different source identities may produce a bounded advisory only: ${JSON.stringify(similar)}`);
+  assert.equal(similar.automaticEdits, 0);
+  const ranked = searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), {
+    rankedSources: [{ id: other, version: sourceVersion(manager, other) }, { id: first, version: sourceVersion(manager, first), range: { part: 0, startLine: 1, endLine: 1 } }],
+  }).ranked;
+  assert.equal(ranked.method, "agent-selected-verified");
+  assert.deepEqual(ranked.sources.map((source) => source.id), [other, first]);
+  assert.throws(() => searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { rankedSources: [{ id: first, version: "0".repeat(24) }] }), /stale/);
 });
 
 test("moving a result payload keeps its complete parallel execution envelope", () => {
@@ -234,6 +296,17 @@ test("branch navigation restores branch-local frames, not a higher-revision sibl
   assert.doesNotMatch(modelText(manager), /branch A|nested A|branch B/);
   manager.branch(branchB);
   assert.match(modelText(manager), /branch B/);
+});
+
+test("return preserves material native external results without exporting child process", () => {
+  const manager = host();
+  applyOperation(manager, { action: "call", task: "await one native result" });
+  manager.appendCustomMessageEntry("subagent-result", "Native read-only child evidence; inspect before acceptance.", true);
+  manager.appendCustomMessageEntry("watch-condition", "Native event result with a material finding.", true);
+  applyOperation(manager, { action: "return" });
+  assert.match(modelText(manager), /Native read-only child evidence/);
+  assert.match(modelText(manager), /Native event result with a material finding/);
+  assert.doesNotMatch(modelText(manager), /await one native result/);
 });
 
 test("return preserves new Human steering without exporting the full child process", () => {
