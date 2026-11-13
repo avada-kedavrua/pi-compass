@@ -1,29 +1,20 @@
 {
   "name": "pi-compass-v2",
-  "version": "0.9.1",
-  "sourceBaseline": "0.8.0",
+  "version": "0.10.0",
+  "sourceBaseline": "0.9.1",
   "goalRunSchemaVersion": 7,
-  "minimumPiVersion": "1.4.0",
-  "testedPiRuntime": "Pi 1.4.0; v0.9.1 live runtime pending user-side acceptance",
-  "piSubagentsPinned": "0.84.0",
+  "minimumPiVersion": "1.5.2",
+  "testedPiRuntime": "Pi 1.5.2 (installed local host; no live provider acceptance)",
+  "piSubagentsPinned": "0.88.1",
   "askUserQuestionSourceVersion": "2.15.0",
-  "liveEvidence": "No v0.9.1 live run yet; v0.9.0 user evidence showed all local tests pass but blocked before Pi start by pi-subagents version pin and configuration drift",
+  "liveEvidence": "No 0.10.0 live provider run. Installed host identity/API checks are local evidence only; earlier v0.9.1/0.8.0 evidence is historical and does not validate these bytes.",
   "releaseCaveats": [
-    "v0.9.1 exact bytes still require live Pi acceptance",
-    "natural provider fallback not exercised",
-    "parent-only cost baseline unavailable"
+    "Implementation remains in progress; M2 and M3 retain explicitly incomplete requirements",
+    "M5 approval and semantic-progression paths exist in source but require final milestone review and evidence reconciliation",
+    "Human-only live Pi/provider acceptance remains pending",
+    "Natural provider fallback and parent-only cost baseline are not established"
   ],
-  "localValidation": {
-    "npmCiOmitPeer": "PASS; no package-local node_modules/typebox installed",
-    "coreTests": "89/89 PASS",
-    "nonExtensionTests": "127/127 PASS",
-    "fullTests": "127 pass; extension.test.mjs blocked at import because this build environment has no Pi host TypeBox package",
-    "staticPreflight": "PASS; package, GoalRun cursor/API, host peer declaration, no local TypeBox copy and target separation",
-    "subagentsContract": "37/37 PASS against supplied pi-subagents@0.84.0 report; no live dispatch",
-    "syntax": "Changed TypeScript, JavaScript and shell files pass syntax checks",
-    "hostTypeboxResolver": "Resolver mechanics smoke passed against a temporary module fixture; not a TypeBox/runtime test",
-    "livePi": "NOT RUN; exact v0.9.1 live acceptance remains a user-side requirement"
-  },
+  "validationLog": "No current milestone validation log is recorded yet; do not infer test counts from historical release evidence.",
   "inheritedLiveEvidence": {
     "pi": "1.4.0",
     "piSubagents": "0.83.1",

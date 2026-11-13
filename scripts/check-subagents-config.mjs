@@ -8,7 +8,8 @@ const option = (name, fallback) => {
   const index = args.indexOf(name);
   return index >= 0 && args[index + 1] && !args[index + 1].startsWith("--") ? args[index + 1] : fallback;
 };
-const expectedVersion = option("--expected", "0.84.0");
+const releaseManifest = JSON.parse(fs.readFileSync(new URL("../RELEASE-MANIFEST.json", import.meta.url), "utf8"));
+const expectedVersion = option("--expected", releaseManifest.piSubagentsPinned);
 const settingsPath = path.resolve(option("--settings", path.join(os.homedir(), ".pi", "agent", "settings.json")));
 const runtimePath = path.resolve(option("--runtime-config", path.join(os.homedir(), ".pi", "agent", "extensions", "subagent", "config.json")));
 const packagePath = path.resolve(option("--package", path.join(os.homedir(), ".pi", "agent", "npm", "node_modules", "pi-subagents", "package.json")));

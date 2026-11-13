@@ -44,14 +44,16 @@ chmod 700 "$TMP_AGENT/sessions"
 node --version > "$OUT/node-version.txt" 2>&1
 npm --version > "$OUT/npm-version.txt" 2>&1
 pi --version > "$OUT/pi-version.txt" 2>&1 || true
-if node --input-type=module - "$OUT/pi-version.txt" > "$OUT/pi-version-check.txt" 2>&1 <<'NODE'
+if PI_COMPASS_ROOT="$ROOT" node --input-type=module - "$OUT/pi-version.txt" > "$OUT/pi-version-check.txt" 2>&1 <<'NODE'
 import fs from 'node:fs';
 const text = fs.readFileSync(process.argv[2], 'utf8');
 const match = text.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
 if (!match) { console.error(`Cannot parse Pi version from: ${text.trim() || "empty output"}`); process.exit(1); }
 const version = match.slice(1).map(Number);
-const ok = version[0] > 1 || (version[0] === 1 && (version[1] > 4 || (version[1] === 4 && version[2] >= 0)));
-console.log(`Detected Pi ${version.join(".")}; minimum required: 1.4.0; ${ok ? "PASS" : "FAIL"}`);
+const manifest = JSON.parse(fs.readFileSync(`${process.env.PI_COMPASS_ROOT}/RELEASE-MANIFEST.json`, 'utf8'));
+const minimum = manifest.minimumPiVersion.split('.').map(Number);
+const ok = version[0] > minimum[0] || (version[0] === minimum[0] && (version[1] > minimum[1] || (version[1] === minimum[1] && version[2] >= minimum[2])));
+console.log(`Detected Pi ${version.join(".")}; minimum required: ${manifest.minimumPiVersion}; ${ok ? "PASS" : "FAIL"}`);
 if (!ok) process.exit(1);
 NODE
 then PI_VERSION_RC=0; else PI_VERSION_RC=$?; fi
@@ -72,7 +74,7 @@ node "$ROOT/scripts/export-subagents-rpc-contract.mjs" --package "$SUBAGENTS_ROO
   printf 'Evidence bundle: %s.tar.gz\n' "$OUT"
   exit 4
 }
-if node "$ROOT/scripts/check-subagents-contract.mjs" --package "$SUBAGENTS_ROOT" --expected 0.84.0 > "$OUT/contract-check.log" 2>&1; then CONTRACT_RC=0; else CONTRACT_RC=$?; fi
+if node "$ROOT/scripts/check-subagents-contract.mjs" --package "$SUBAGENTS_ROOT" > "$OUT/contract-check.log" 2>&1; then CONTRACT_RC=0; else CONTRACT_RC=$?; fi
 
 if (cd "$ROOT" && npm test) > "$OUT/npm-test.log" 2>&1; then TEST_RC=0; else TEST_RC=$?; fi
 if (cd "$ROOT" && npm run test:core) > "$OUT/npm-test-core.log" 2>&1; then CORE_RC=0; else CORE_RC=$?; fi

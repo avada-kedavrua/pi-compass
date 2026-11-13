@@ -13,8 +13,8 @@ const option = (name, fallback = "") => {
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const settingsInput = option("--settings");
 const runtimeInput = path.resolve(option("--runtime-config", path.join(os.homedir(), ".pi", "agent", "extensions", "subagent", "config.json")));
-const settingsPatchPath = path.resolve(option("--patch", path.join(scriptDir, "..", "config", "pi-subagents-settings.v0.84.0.patch.json")));
-const runtimePatchPath = path.resolve(option("--runtime-patch", path.join(scriptDir, "..", "config", "pi-subagents-runtime.v0.84.0.json")));
+const settingsPatchPath = path.resolve(option("--patch", path.join(scriptDir, "..", "config", "pi-subagents-settings.patch.json")));
+const runtimePatchPath = path.resolve(option("--runtime-patch", path.join(scriptDir, "..", "config", "pi-subagents-runtime.json")));
 const settingsOut = path.resolve(option("--out", path.join(os.tmpdir(), "pi-settings.proposed.json")));
 const runtimeOut = path.resolve(option("--runtime-out", path.join(os.tmpdir(), "pi-subagents-config.proposed.json")));
 

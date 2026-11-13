@@ -10,7 +10,8 @@ const option = (name, fallback) => {
 };
 const reportPath = option("--report", "");
 const packageRoot = path.resolve(option("--package", path.join(os.homedir(), ".pi", "agent", "npm", "node_modules", "pi-subagents")));
-const expectedVersion = option("--expected", "0.84.0");
+const releaseManifest = JSON.parse(fs.readFileSync(new URL("../RELEASE-MANIFEST.json", import.meta.url), "utf8"));
+const expectedVersion = option("--expected", releaseManifest.piSubagentsPinned);
 let reportText = "";
 if (reportPath) {
   try { reportText = fs.readFileSync(path.resolve(reportPath), "utf8"); }

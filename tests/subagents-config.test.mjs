@@ -7,16 +7,16 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const patch = JSON.parse(fs.readFileSync(path.join(root, "config", "pi-subagents-settings.v0.84.0.patch.json"), "utf8"));
-const runtime = JSON.parse(fs.readFileSync(path.join(root, "config", "pi-subagents-runtime.v0.84.0.json"), "utf8"));
+const patch = JSON.parse(fs.readFileSync(path.join(root, "config", "pi-subagents-settings.patch.json"), "utf8"));
+const runtime = JSON.parse(fs.readFileSync(path.join(root, "config", "pi-subagents-runtime.json"), "utf8"));
 
 function containsKey(value, key) {
   if (!value || typeof value !== "object") return false;
   return Object.entries(value).some(([name, child]) => name === key || containsKey(child, key));
 }
 
-test("recommended pi-subagents 0.84.0 configuration separates Pi settings from extension runtime config", () => {
-  assert.ok(patch.packages.includes("npm:pi-subagents@0.84.0"));
+test("recommended pi-subagents 0.88.1 configuration separates Pi settings from extension runtime config", () => {
+  assert.ok(patch.packages.includes("npm:pi-subagents@0.88.1"));
   assert.equal(patch.subagents.defaultModel, "cliproxyapi/gpt-6-luna");
   assert.equal(patch.subagents.defaultThinking, "high");
   assert.ok(patch.subagents.modelScope.allow.includes("jrt/deepseek-v4.1-flash"));
@@ -53,7 +53,7 @@ test("subagents config checker validates both configuration surfaces and fails u
   const packagePath = path.join(dir, "pi-subagents-package.json");
   fs.writeFileSync(settingsPath, JSON.stringify({ ...patch, subagents: structuredClone(patch.subagents) }, null, 2));
   fs.writeFileSync(runtimePath, JSON.stringify(runtime, null, 2));
-  fs.writeFileSync(packagePath, JSON.stringify({ name: "pi-subagents", version: "0.84.0" }));
+  fs.writeFileSync(packagePath, JSON.stringify({ name: "pi-subagents", version: "0.88.1" }));
   const script = path.join(root, "scripts", "check-subagents-config.mjs");
   const args = [script, "--settings", settingsPath, "--runtime-config", runtimePath, "--package", packagePath, "--strict"];
   const good = spawnSync(process.execPath, args, { encoding: "utf8" });
@@ -93,7 +93,7 @@ test("installed package contract exporter includes delegation declarations and r
   for (const subdir of ["docs", "src/api", "bundle"]) fs.mkdirSync(path.join(packageRoot, subdir), { recursive: true });
   fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({
     name: "pi-subagents",
-    version: "0.84.0",
+    version: "0.88.1",
     exports: { "./delegation": { types: "./src/api/delegation.d.ts", default: "./bundle/delegation.js" } },
     pi: { extensions: ["./bundle/index.js"] },
   }));
@@ -128,7 +128,7 @@ test("installed pi-subagents contract checker validates the pinned structured-de
     SUBAGENT_DELEGATION_CANCEL_EVENT: "prompt-template:subagent:cancel",
   };
   fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({
-    name: "pi-subagents", version: "0.84.0",
+    name: "pi-subagents", version: "0.88.1",
     exports: { "./delegation": { types: "./src/api/delegation.d.ts", default: "./bundle/delegation.js" } },
     pi: { extensions: ["./bundle/index.js"] },
   }));
@@ -138,19 +138,19 @@ test("installed pi-subagents contract checker validates the pinned structured-de
   fs.writeFileSync(path.join(packageRoot, "bundle/delegation.js"), `export { ${Object.keys(events).join(", ")} };`);
   fs.writeFileSync(path.join(packageRoot, "docs/extension-api.md"), "Structured delegation API is foreground-only and must not be integrated by recursively invoking the `subagent` tool inside a tool_call hook.");
   const script = path.join(root, "scripts", "check-subagents-contract.mjs");
-  const good = spawnSync(process.execPath, [script, "--package", packageRoot, "--expected", "0.84.0"], { encoding: "utf8" });
+  const good = spawnSync(process.execPath, [script, "--package", packageRoot], { encoding: "utf8" });
   assert.equal(good.status, 0, `${good.stdout}\n${good.stderr}`);
   assert.match(good.stdout, /Contract check passed/);
   const reportPath = path.join(dir, "collected-contract.txt");
   const exporter = spawnSync(process.execPath, [path.join(root, "scripts", "export-subagents-rpc-contract.mjs"), "--package", packageRoot, "--out", reportPath], { encoding: "utf8" });
   assert.equal(exporter.status, 0, `${exporter.stdout}\n${exporter.stderr}`);
-  const reportCheck = spawnSync(process.execPath, [script, "--report", reportPath, "--expected", "0.84.0"], { encoding: "utf8" });
+  const reportCheck = spawnSync(process.execPath, [script, "--report", reportPath], { encoding: "utf8" });
   assert.equal(reportCheck.status, 0, `${reportCheck.stdout}\n${reportCheck.stderr}`);
   assert.match(reportCheck.stdout, /Contract check passed: .*collected report/);
   const badManifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
   badManifest.version = "0.83.0";
   fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify(badManifest));
-  const bad = spawnSync(process.execPath, [script, "--package", packageRoot, "--expected", "0.84.0"], { encoding: "utf8" });
+  const bad = spawnSync(process.execPath, [script, "--package", packageRoot], { encoding: "utf8" });
   assert.notEqual(bad.status, 0, "a stale installed package must fail closed");
   assert.match(bad.stdout, /FAIL pinned version/);
   fs.rmSync(dir, { recursive: true, force: true });
@@ -183,8 +183,8 @@ test("dual config proposal separates settings and runtime config, migrates mispl
   const originalBytes = fs.readFileSync(settingsPath);
   const originalRuntimeBytes = fs.readFileSync(runtimePath);
   const script = path.join(root, "scripts", "merge-subagents-settings.mjs");
-  const settingsPatchPath = path.join(root, "config", "pi-subagents-settings.v0.84.0.patch.json");
-  const runtimePatchPath = path.join(root, "config", "pi-subagents-runtime.v0.84.0.json");
+  const settingsPatchPath = path.join(root, "config", "pi-subagents-settings.patch.json");
+  const runtimePatchPath = path.join(root, "config", "pi-subagents-runtime.json");
   const result = spawnSync(process.execPath, [script, "--settings", settingsPath, "--runtime-config", runtimePath, "--patch", settingsPatchPath, "--runtime-patch", runtimePatchPath, "--out", settingsOut, "--runtime-out", runtimeOut], { encoding: "utf8" });
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.ok(!result.stdout.includes("do-not-print"), "settings values must not be printed");
@@ -197,7 +197,7 @@ test("dual config proposal separates settings and runtime config, migrates mispl
   assert.ok(merged.subagents.defaultExtensions.includes("/custom/child-extension.js"), "unrelated child extensions are preserved");
   assert.ok(merged.subagents.defaultExtensions.includes(patch.subagents.defaultExtensions[0]), "the configured model provider extension is added");
   assert.equal(merged.packages.filter((item) => item.startsWith("npm:pi-subagents@")).length, 1);
-  assert.ok(merged.packages.includes("npm:pi-subagents@0.84.0"));
+  assert.ok(merged.packages.includes("npm:pi-subagents@0.88.1"));
   assert.equal(merged.subagents.defaultModel, "cliproxyapi/gpt-6-luna");
   assert.equal(merged.subagents.agentOverrides.researcher.customRetainedField, "preserve-me");
   assert.ok(!("fallbackModels" in merged.subagents.agentOverrides.researcher));

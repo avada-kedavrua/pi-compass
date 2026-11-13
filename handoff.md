@@ -1,121 +1,29 @@
-# Pi Compass V2 v0.9.1 — Handoff
+# Compass v0.10.0 development handoff
 
-## 1. Delivery status
+## Delivery status
 
-v0.9.1 is a corrective release built on the delivered v0.9.0 source. It addresses the three blockers found in the user's 2026-10-31 live-acceptance attempt:
+**Implementation is in progress; this is not a release-complete handoff.** The current source aligns its native identity records to the locally inspected Pi `1.5.2` and pi-subagents `0.88.1` baseline. Local package/API inspection is not live acceptance. No provider was called for this work.
 
-1. Pi warned because `typebox` was listed under `dependencies` instead of as a host-provided peer.
-2. The package required `pi-subagents@0.83.1`, while the user's installed package is `0.84.0`.
-3. `/compass-live-acceptance` assumed the Pi process working directory itself contained both `package.json` and `README.md`, then emitted a misleading instruction to start Pi from the Compass package directory.
+The exact human-acceptance boundary is a real interactive Pi/provider run on final committed bytes. Source inspection and local tests show correlated Human approval gating for DAG progression/dispatch and explicit semantic task assessments; this is not proof of the real Human UI or provider lifecycle. The architecture checklist still has unchecked M5 items despite those code paths, so reconcile checklist/evidence before marking them complete. M2 and M3 retain explicitly open requirements. Do not call the work release-ready until remaining implementation, measurement, review and evidence reconciliation in `docs/architecture-v0.10.0.md` are resolved.
 
-The exact v0.9.1 bytes have not yet completed real Pi/provider live acceptance. This package is a candidate for that run, not a claimed production-accepted release.
+## Baseline and evidence
 
-## 2. What the uploaded evidence actually proves
+- Local `pi --version`: `1.5.2`.
+- Installed package manifest: `pi-subagents@0.88.1`.
+- The current contract checker inspects the installed declaration/export/API shape. This proves only the checked source contract, not dispatch, provider behavior, cache behavior, cost, or completion correctness.
+- `RELEASE-MANIFEST.json` is the source for current release identity and the expected native versions. No current-milestone test counts are asserted there; historical validation records apply only to their named earlier source bytes.
+- No live provider acceptance was run.
 
-Reviewed: `pi-compass-live-evidence-20261031T012954Z.tar.gz` and the terminal output supplied with it.
+## Configuration safety
 
-| Check | Evidence |
-|---|---|
-| Pi | 1.4.0 |
-| Node / npm | 22.22.1 / 10.9.4 |
-| Core suite | 89/89 PASS |
-| Full v0.9.0 suite | 187/187 PASS |
-| Static preflight | PASS |
-| Installed pi-subagents | 0.84.0 |
-| Old contract check | 35/36 PASS; the sole failure was the exact version pin |
-| Proposed settings/runtime config | All checks passed except the same installed-version pin |
-| Live Pi process | Not started |
+The proposal merger reads the user's Pi settings and pi-subagents runtime config, preserves unrelated values, and writes separate private proposals. It does not modify global Pi settings. Review both resulting files before any eventual isolated acceptance run; do not copy proposals into global config as part of development validation. The native tool preference remains owned by Pi/user settings.
 
-The installed 0.84.0 `src/api/delegation.d.ts` and `bundle/delegation.js` bodies are byte-for-byte identical to the retained 0.83.1 baseline. The new contract report is preserved at `evidence/pi-subagents-0.84.0-contract.txt`; the checker now expects 0.84.0 and still checks the full public event/type surface and documented foreground-only integration constraint.
+## Remaining development work
 
-The current user configuration had drift (tool allowlists, model allowlist, worker model scope, concurrency and unsupported runtime keys). The generated proposal repaired those fields, while preserving unrelated fields. The original `settings.json` and pi-subagents runtime config were not modified. The live launcher continues to use isolated proposed copies.
+Use `docs/architecture-v0.10.0.md` as the implementation checklist, while reconciling its stale M5 unchecked markers against the implemented approval/assessment paths and their regression tests. Remaining substantive gaps include scoped-retention/retrieval/repeated-result requirements (M2/M3), representative local measurements, and final independent review/reconciliation. Do not mark anything complete because the documentation now names it.
 
-The uploaded evidence summary explicitly says `Pi was not started`. Therefore the live acceptance did not fail in the runtime; it was blocked by preflight contract/config checks. The separate `ENOENT` shown in the terminal output came from invoking the command with a working directory that had no root `package.json`.
+## Eventual Human-only live acceptance
 
-## 3. Implemented in v0.9.1
+After the missing local implementation and reviews are complete, run the isolated acceptance harness against the exact candidate package in a separate Compass session. It starts an isolated Pi process and can incur provider cost. The expected command is `bash scripts/run-live-acceptance.sh`; in the opened TUI, run `/compass-live-acceptance` and require a passing bounded report. Also perform live structured-questionnaire checks for fully answered, partial, declined and UI/error outcomes. The harness must not overwrite global Pi settings or include credentials/session transcripts in uploaded evidence.
 
-### 3.1 TypeBox host dependency
-
-- Removed `typebox` from `dependencies`.
-- Declared `peerDependencies.typebox = "*"`, matching Pi's host-provided package contract.
-- Added `scripts/register-pi-host-typebox.mjs`. Full tests and non-static preflight resolve `typebox` from the installed Pi package, not from a Compass-local copy.
-- `npm ci --omit=peer --ignore-scripts` omits the host peer from the Compass package tree. This matters because a package-local TypeBox copy can bypass Pi's host module mapping.
-- Static preflight verifies the peer declaration and fails if `node_modules/typebox` exists locally.
-- The live launcher refuses to proceed when a package-local TypeBox copy is present.
-
-### 3.2 pi-subagents 0.84.0
-
-- Updated the exact version pin, configuration patch filenames, default checkers and tests to `pi-subagents@0.84.0`.
-- Retained strict contract checks; this is not a version-only bypass.
-- Added the supplied 0.84.0 source-contract report. The declaration and runtime export match the 0.83.1 baseline byte-for-byte.
-- No downgrade is required for the user's installed 0.84.0 package.
-
-### 3.3 Live acceptance project root
-
-`/compass-live-acceptance` now:
-- uses the current project if it has a readable `package.json`, `README.md`, and safe visible entries;
-- otherwise falls back to the Compass package directory;
-- accepts an explicit project root: `/compass-live-acceptance /path/to/project`;
-- records the selected fixture root as the execution `projectRoot`;
-- no longer instructs the user to start Pi from a particular directory.
-
-Pure tests cover current-root selection, fallback, and explicit-root behavior.
-
-## 4. Validation boundary for this build
-
-The uploaded v0.9.0 evidence proves 187/187 full tests and 89/89 core tests for the previous bytes. It does not prove that v0.9.1's changed files pass those tests.
-
-This build environment has no installed Pi package, so it cannot resolve the host TypeBox module or run the complete extension suite without substituting a fake dependency. No fake TypeBox module is used. The following are run on the v0.9.1 bytes and recorded in `docs/validation-v0.9.1.md`:
-- core tests;
-- non-Extension tests;
-- package/GoalRun static preflight;
-- the supplied pi-subagents 0.84.0 contract report check;
-- syntax checks for changed JS/TS and shell files.
-
-The user's Pi environment must rerun `npm test`, full preflight, and the live acceptance harness on the exact v0.9.1 package. Do not infer runtime success from the fake-Pi unit tests or contract source checks.
-
-## 5. User-side verification
-
-Extract v0.9.1 into a new directory. Do not overwrite the working Compass installation. From the extracted package root:
-
-```bash
-npm ci --ignore-scripts --omit=peer
-npm run test:core
-npm run test:non-extension
-npm test
-
-bash scripts/run-live-acceptance.sh
-```
-
-`npm ci --omit=peer` intentionally removes/omits the package-local TypeBox copy. It operates only on the extracted Compass package's `node_modules`; using a new extraction directory avoids disturbing other local work.
-
-When the isolated Pi TUI opens, run:
-
-```text
-/compass-live-acceptance
-```
-
-The launcher starts Pi from the extracted Compass package directory. If invoking the command manually from another project, the command now falls back to the Compass package when the current directory lacks the required fixture files. To test a specific app package, pass its root:
-
-```text
-/compass-live-acceptance /path/to/project
-```
-
-The smoke makes at least three read-only child model calls and may incur provider cost. It checks real request/response correlation, two parallel independent children, a dependency-gated later child, and that `code`/`parent` tasks remain undispatched. The report must say `PASS`.
-
-Then perform the questionnaire checks:
-1. Fully answer a questionnaire; confirm selected values and notes persist in GoalRun.
-2. Partially answer; confirm unanswered indexes remain distinct.
-3. Cancel; confirm this is a Human decline.
-4. Trigger a no-UI or validation error; confirm the model sees a questionnaire-unavailable error, not a Human decline, and GoalRun records `human_questionnaire_error` without a duplicate generic failure.
-
-Upload only the generated `pi-compass-live-evidence-*.tar.gz` if the run is blocked or fails. Do not upload settings, auth, model files, API keys, or session transcripts.
-
-## 6. Remaining proof
-
-- Exact v0.9.1 live Pi + pi-subagents 0.84.0 request/response and DAG scheduling.
-- Live questionnaire middleware behavior in Pi 1.4.0.
-- Natural provider quota fallback remains unforced; unit tests cover classification and one-time fallback.
-- A matched parent-only cost baseline remains unavailable.
-
-These are explicit acceptance gaps, not silently marked complete.
+If implementation remains blocked, report the precise gap and do not interpret a blocked preflight or a passing mock/adapter test as runtime acceptance.
