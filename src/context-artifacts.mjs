@@ -1,26 +1,33 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, lstat, realpath } from "node:fs/promises";
+import { open, realpath } from "node:fs/promises";
 import path from "node:path";
 import { contentVersion } from "./context-values.mjs";
 
 const FORMAT = "pi-compass-v2.context-artifact";
 function sha256(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
-async function targetPath(projectRoot, relativePath, allowMissing = false) {
-  const root = await realpath(projectRoot);
+async function withArtifactTarget(projectRoot, relativePath, fn) {
   if (typeof relativePath !== "string" || !relativePath || path.isAbsolute(relativePath) || relativePath.includes("\\")) throw new Error("Artifact path must be project-root relative.");
   const segments = relativePath.split("/");
   if (segments.some((segment) => !segment || segment === "." || segment === "..")) throw new Error("Artifact path may not contain dot, parent or empty segments.");
-  let target = root;
-  for (const [index, segment] of segments.entries()) {
-    target = path.join(target, segment);
-    let stat;
-    try { stat = await lstat(target); }
-    catch (error) { if (allowMissing && index === segments.length - 1 && error.code === "ENOENT") continue; throw error; }
-    if (stat.isSymbolicLink()) throw new Error("Artifact paths may not traverse symlinks.");
-    if (index < segments.length - 1 ? !stat.isDirectory() : !stat.isFile()) throw new Error("Artifact path has the wrong file type.");
+  // Node has no openat/openat2 interface. Linux descriptor paths let each single
+  // component be opened with NOFOLLOW, while a held parent descriptor prevents
+  // a concurrent ancestor-to-symlink replacement from redirecting the next open.
+  // Other platforms fail closed instead of silently using a check/open race.
+  if (process.platform !== "linux") throw new Error("Race-safe context artifacts require Linux /proc/self/fd; no artifact was opened.");
+  const root = await realpath(projectRoot);
+  const directories = [];
+  const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
+  try {
+    directories.push(await open(root, flags));
+    if (await realpath(`/proc/self/fd/${directories[0].fd}`) !== root) throw new Error("Artifact root changed during resolution.");
+    for (const segment of segments.slice(0, -1)) {
+      directories.push(await open(`/proc/self/fd/${directories.at(-1).fd}/${segment}`, flags));
+    }
+    return await fn({ root, target: `/proc/self/fd/${directories.at(-1).fd}/${segments.at(-1)}` });
+  } finally {
+    await Promise.allSettled(directories.map((directory) => directory.close()));
   }
-  return { root, target };
 }
 function validateSelection({ source, binding, version, purpose, caveats, provenance, content, range }) {
   if (typeof source !== "string" || !source || typeof binding !== "string" || !binding || !/^[a-f0-9]{24}$/.test(version)) throw new Error("Artifact requires exact source/binding/version identity.");
@@ -32,15 +39,15 @@ function validateSelection({ source, binding, version, purpose, caveats, provena
 }
 async function verifiedRead(request, descriptor) {
   if (!/^[a-f0-9]{64}$/.test(descriptor.sha256) || !Number.isSafeInteger(descriptor.bytes) || descriptor.bytes < 1) throw new Error("An immutable artifact digest and byte length are required.");
-  const { root, target } = await targetPath(request.projectRoot, request.relativePath);
-  if (descriptor.projectRoot !== root) throw new Error("Artifact belongs to a different project root.");
-  const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
-  let bytes;
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.size !== descriptor.bytes) throw new Error("Artifact byte length changed.");
-    bytes = await handle.readFile();
-  } finally { await handle.close(); }
+  const bytes = await withArtifactTarget(request.projectRoot, request.relativePath, async ({ root, target }) => {
+    if (descriptor.projectRoot !== root) throw new Error("Artifact belongs to a different project root.");
+    const handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.size !== descriptor.bytes) throw new Error("Artifact byte length or file type changed.");
+      return await handle.readFile();
+    } finally { await handle.close(); }
+  });
   if (bytes.byteLength !== descriptor.bytes || sha256(bytes) !== descriptor.sha256) throw new Error("Artifact digest or byte length does not verify.");
   let envelope;
   try { envelope = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
@@ -58,11 +65,13 @@ export async function writeContextArtifact({ projectRoot, relativePath, source, 
   try {
     const manifest = { source, binding, version, range, purpose, caveats: [...caveats], provenance: [...provenance], contentVersion: contentVersion(content) };
     validateSelection({ ...manifest, content });
-    const { root, target } = await targetPath(projectRoot, relativePath, true);
     const bytes = Buffer.from(JSON.stringify({ format: FORMAT, formatVersion: 1, manifest, content }), "utf8");
-    const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    created = true;
-    try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+    const root = await withArtifactTarget(projectRoot, relativePath, async ({ root, target }) => {
+      const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      created = true;
+      try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+      return root;
+    });
     // The receipt covers the complete envelope, including caveats/provenance,
     // not just payload bytes whose metadata could otherwise be changed silently.
     const artifact = { path: relativePath, projectRoot: root, sha256: sha256(bytes), bytes: bytes.byteLength, ...manifest };

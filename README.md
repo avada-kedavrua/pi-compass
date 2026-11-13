@@ -6,7 +6,7 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 
 - Same-session attention frames with explicit `ref`/`copy` capture, scoped values, copy-on-write, versioned source IDs and protocol-safe return/drop/edit operations.
 - Qualified retention through native compaction boundaries. Pinned data is user-context data, not system authority; original Human messages and executed calls remain read-only.
-- On-demand active/parent/history lexical retrieval, exact version/range loads, whole-value moves, and verified project-relative artifact spill/reload.
+- On-demand active/parent/history lexical recovery, source-verified Agent ranking, exact range loads and moves, and verified project-relative artifact spill/reload.
 - Explicit Skill retention and `active|handled|retired` handling with Goal/session lifetimes. Failed or truncated reads cannot be activated as complete Skills.
 - Human-approved DAGs: exact structured questionnaire correlation, material-change invalidation, evidence-bearing assessments, dependency gating, unknown-run fail-closed behavior, and native structured delegation.
 - RouteSets separate from DAGs: explicit route selection, Human-authorized bounded exploration, shared acceptance/caveat comparison, and acceptance-gated competitor cancellation.
@@ -16,7 +16,7 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 
 - No second Pi session, transcript store, conventions registry, scheduler, polling observer, or automatic route fan-out.
 - Lexical retrieval is not semantic search. Similarity and repeated/subset-result automation are not silently claimed.
-- Filesystem effects are not rolled back by Compass. Artifact writes report possible orphans if a later native commit fails.
+- Filesystem effects are not rolled back by Compass. Artifact writes report possible orphans if readback or a later native commit fails. Race-safe spill/reload currently requires Linux `/proc/self/fd`; other platforms fail closed rather than use a symlink check/open race.
 - Stock Pi 1.5.2 has no general awaited post-compaction canonical-restoration boundary. Compass uses request-side qualified overlays and later existing native boundaries instead of modifying Pi.
 - Recursive Compass use inside pi-subagents children is fail-closed because the installed delegation contract does not inherit Compass extensions.
 - Local tests use installed Pi projection/runner adapters. Real AgentSession/provider behavior, provider cost/cache behavior, and semantic quality require the separate Human acceptance below.
@@ -48,7 +48,7 @@ In a disposable Pi session rooted at this package (or an explicit safe fixture p
 1. Run `/compass-preflight` and confirm the active registry and native dependencies.
 2. Capture a simple Goal and verify the light loadout remains light.
 3. Use `compass_context` for a small `call`/`return`, then search and pin one qualified value. Compact or navigate only through native Pi operations and verify the value remains qualified.
-4. Run `/compass-live-acceptance` only if provider cost is acceptable. It performs real read-only child work and writes a bounded report under `/tmp`.
+4. In **another fresh disposable session, before capturing any Goal**, run `/compass-live-acceptance` only if provider cost is acceptable. It performs real read-only child work and writes a bounded report under `/tmp`.
 5. Inspect the report and session behavior. A local test pass is not a live provider acceptance result.
 
 Do not use a production session for the live acceptance command. It refuses non-empty Goal state, but provider calls and filesystem fixtures still have real effects.
