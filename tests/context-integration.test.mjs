@@ -11,7 +11,7 @@ let nextCall = 0;
 
 // Real installed boundary chaining and session projection; tool registry/lifecycle
 // actions are adapters. This is not a live AgentSession/provider acceptance test.
-async function setup(laterHandler) {
+async function setup(laterHandler, earlierContextHandler) {
   const manager = SessionManager.inMemory("/context-integration");
   const handlers = new Map();
   const tools = new Map();
@@ -27,6 +27,7 @@ async function setup(laterHandler) {
   };
   extensionFactory(api);
   const extensions = [{ path: "compass", handlers }];
+  if (earlierContextHandler) extensions.unshift({ path: "earlier-extension", handlers: new Map([["context", [earlierContextHandler]]]) });
   if (laterHandler) extensions.push({ path: "later-extension", handlers: new Map([["turn_end", [laterHandler]]]) });
   const runner = new ExtensionRunner(extensions, {}, "/context-integration", manager, undefined);
   const errors = [];
@@ -55,7 +56,15 @@ async function setup(laterHandler) {
     if (apply) appendDrafts(manager, proposal.entries);
     return proposal;
   }
-  return { manager, runner, tools, turn, errors, aborted: () => aborted };
+  async function finish(outcome = "completed") {
+    const message = { role: "assistant", content: [{ type: "text", text: "Done with this turn." }], api: "test", provider: "test", model: "test", usage: {}, stopReason: outcome === "aborted" ? "aborted" : "stop", timestamp: Date.now() };
+    const messageEntryId = manager.appendMessage(message);
+    const proposal = await runner.emitBoundary({ type: "turn_end", turnIndex: 0, outcome, message, toolResults: [], messageEntryId, toolResultEntryIds: [] }, (drafts) => contextPreview(manager, drafts));
+    assert.equal(proposal.valid, true);
+    appendDrafts(manager, proposal.entries);
+    return proposal;
+  }
+  return { manager, runner, tools, turn, finish, errors, aborted: () => aborted };
 }
 
 test("installed runner chains frame entry and return; only committed metadata becomes active", async () => {
@@ -135,6 +144,7 @@ test("request-side pin overlay restores omitted text and image values after nati
   assert.equal(before.filter((message) => message.customType === "pi-compass-v2.value").length, 0, "visible pins need no overlay");
   host.manager.appendCompaction("Native summary omitted the pinned evidence.", null, 0, {}, true);
   const after = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  assert.deepEqual(host.errors, []);
   const overlays = after.filter((message) => message.customType === "pi-compass-v2.value");
   assert.equal(overlays.length, 1);
   assert.deepEqual(overlays[0].content.slice(-1), [{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" }]);
@@ -155,14 +165,100 @@ test("request-side pin overlay is deduplicated when an equivalent retained view 
   assert.equal(third.filter((message) => message.customType === "pi-compass-v2.value").length, 1, "the same request overlay is not duplicated by composition");
 });
 
-test("missing native projection aborts request-side pin restoration instead of silently omitting the pin", async () => {
+test("pin retention checks the outgoing request, not just native projection membership", async () => {
+  const host = await setup(undefined, (event) => ({ messages: event.messages.filter((message) => message.customType !== "test-pinned") }));
+  const id = host.manager.appendCustomMessageEntry("test-pinned", "COMPLETE PIN BODY", false);
+  await host.turn({ action: "pin", expectedRevision: 0, ids: [id] });
+  const messages = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  assert.match(JSON.stringify(messages), /COMPLETE PIN BODY/);
+  assert.deepEqual(host.errors, []);
+});
+
+test("a matching pin marker cannot hide altered content", async () => {
+  const host = await setup();
+  const id = user(host.manager, "IMMUTABLE PIN BODY");
+  await host.turn({ action: "pin", expectedRevision: 0, ids: [id] });
+  host.manager.appendCompaction("Summary", null, 0, {}, true);
+  const messages = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  const snapshot = messages.find((message) => message.customType === "pi-compass-v2.value");
+  snapshot.content.at(-1).text = "altered body";
+  await host.runner.emitContext(messages);
+  assert.equal(host.aborted(), true);
+  assert.ok(host.errors.some((error) => /altered|changed/.test(error.error)));
+});
+
+test("missing immutable source aborts pin restoration instead of sending unverifiable data", async () => {
   const host = await setup();
   const id = user(host.manager, "Pinned requirement");
   await host.turn({ action: "pin", expectedRevision: 0, ids: [id] });
-  host.manager.buildSessionProjection = undefined;
+  const branch = host.manager.getBranch();
+  host.manager.getBranch = () => branch.filter((entry) => entry.id !== id);
   await host.runner.emitContext([{ role: "user", content: "Continue", timestamp: Date.now() }]);
   assert.equal(host.aborted(), true);
-  assert.ok(host.errors.some((error) => /projection is unavailable/.test(error.error)));
+  assert.ok(host.errors.some((error) => /source.*not on|unavailable/.test(error.error)));
+});
+
+test("an existing boundary materializes retained snapshots once without forcing a request", async () => {
+  const host = await setup();
+  const id = user(host.manager, "MATERIALIZED PIN");
+  await host.turn({ action: "pin", expectedRevision: 0, ids: [id] });
+  host.manager.appendCompaction("Summary", null, 0, {}, true);
+  const before = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  assert.ok(before.some((message) => message.customType === "pi-compass-v2.value"));
+  const proposal = await host.finish("aborted");
+  assert.equal(proposal.continue, false);
+  assert.match(modelText(host.manager), /MATERIALIZED PIN/);
+  assert.equal(restoreContextState(host.manager.getBranch()).revision, 2);
+  const stable = await host.finish();
+  assert.equal(stable.entries.length, 0, "do not persist another copy on every turn");
+  const version = restoreContextState(host.manager.getBranch()).values[`root/${id}`].version;
+  await host.turn({ action: "unpin", expectedRevision: 2, ids: [id] });
+  await host.turn({ action: "drop", expectedRevision: 3, ids: [id], versions: [{ id, version }] });
+  assert.equal(restoreContextState(host.manager.getBranch()).revision, 3, "a custom snapshot must not bypass the original Human value's read-only policy");
+  assert.match(modelText(host.manager), /MATERIALIZED PIN/);
+  assertPaired(host.manager);
+  assert.deepEqual(host.errors, []);
+});
+
+test("root pins recover through a compacted frame entry and scoped duplicates retire on return", async () => {
+  const host = await setup();
+  const id = user(host.manager, "ROOT SCOPED PIN");
+  const revision = () => restoreContextState(host.manager.getBranch()).revision;
+  await host.turn({ action: "pin", expectedRevision: revision(), ids: [id] });
+  host.manager.appendCompaction("Parent summary", null, 0, {}, true);
+  await host.turn({ action: "call", expectedRevision: revision(), task: "child" });
+  await host.turn({ action: "pin", expectedRevision: revision(), ids: [id] });
+  host.manager.appendCompaction("Child summary", null, 0, {}, true);
+  const messages = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  assert.equal(messages.filter((message) => message.customType === "pi-compass-v2.value").length, 1);
+  await host.turn({ action: "return", expectedRevision: revision() });
+  assert.match(modelText(host.manager), /ROOT SCOPED PIN/);
+  assert.equal(restoreContextState(host.manager.getBranch()).pins.length, 1);
+  assertPaired(host.manager);
+  assert.deepEqual(host.errors, []);
+});
+
+test("a compacted pin can be retired without a forced load or resurrection", async () => {
+  const host = await setup();
+  const id = user(host.manager, "RETIRED PIN");
+  await host.turn({ action: "pin", expectedRevision: 0, ids: [id] });
+  host.manager.appendCompaction("Summary", null, 0, {}, true);
+  await host.turn({ action: "unpin", expectedRevision: 1, ids: [id] });
+  const messages = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  assert.doesNotMatch(JSON.stringify(messages), /RETIRED PIN/);
+  assert.deepEqual(restoreContextState(host.manager.getBranch()).pins, []);
+  assert.deepEqual(host.errors, []);
+});
+
+test("request snapshots cannot mutate immutable source image blocks", async () => {
+  const host = await setup();
+  const id = host.manager.appendCustomMessageEntry("test-value", [{ type: "image", mimeType: "image/png", data: "original" }], false);
+  await host.turn({ action: "pin", expectedRevision: 0, ids: [id] });
+  const original = structuredClone(host.manager.getEntry(id));
+  host.manager.appendCompaction("Summary", null, 0, {}, true);
+  const messages = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  messages.find((message) => message.customType === "pi-compass-v2.value").content.at(-1).data = "mutated downstream";
+  assert.deepEqual(host.manager.getEntry(id), original);
 });
 
 test("nested Code Mode mutation is blocked before returning an unexecutable queued operation", async () => {

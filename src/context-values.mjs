@@ -27,7 +27,7 @@ export function valueContent(index, head) {
   let content;
   if (head.field === "operation") {
     const operation = entry.message?.details?.contextOperation;
-    if (entry.message?.role !== "toolResult" || entry.message.toolName !== "compass_context" || !["replace", "put"].includes(operation?.action)) fail("Value has no matching persisted write operation.");
+    if (entry.message?.role !== "toolResult" || entry.message.toolName !== "compass_context" || operation?.action !== "replace") fail("Value has no matching persisted write operation.");
     content = operation.content;
   } else {
     const edit = head.editId ? index.byId.get(head.editId) : null;
@@ -133,8 +133,8 @@ export function renderValue(value, content = value.content, head = value.head) {
 }
 export function valueMessage(value, content = value.content, head = value.head) {
   return {
-    type: "custom_message", customType: VALUE_MESSAGE_TYPE, content: renderValue(value, content, head), display: false,
-    details: { key: value.key, sourceId: value.id, version: head.version, kind: head.kind, caveats: head.caveats, sources: head.sources },
+    type: "custom_message", customType: VALUE_MESSAGE_TYPE, content: structuredClone(renderValue(value, content, head)), display: false,
+    details: { key: value.key, sourceId: value.id, version: head.version, kind: head.kind, caveats: [...head.caveats], sources: [...head.sources] },
   };
 }
 export function isValueMessage(message, key, version) {

@@ -317,25 +317,27 @@ function planPins({ next, index, operation }) {
   if (!operation.ids.length) fail("Select sources to pin or unpin.");
   const scope = operation.scope ?? next.frames.at(-1)?.id ?? "root";
   if (!["root", ...next.frames.map((frame) => frame.id)].includes(scope)) fail(`Pin scope ${scope} is not active.`);
+  const entries = [];
   for (const id of operation.ids) {
     source(index, id);
-    const value = currentValue(next, index, id, { key: operation.binding });
+    const value = currentValue(next, index, id, { key: operation.binding, allowHidden: operation.action === "unpin" });
     if (operation.action === "pin") {
       const scopes = ["root", ...next.frames.map((frame) => frame.id)];
       if (scopes.indexOf(scope) < scopes.indexOf(value.key.split("/")[0])) fail("A local value cannot outlive its binding; explicitly export it before pinning it in a parent scope.");
       const head = adoptValue(next, value);
       if (operation.kind !== undefined) head.kind = operation.kind;
       if (operation.caveats !== undefined) head.caveats = operation.caveats;
-      // Pin annotations stay in Compass control state. Rewriting the native
-      // source would turn provenance metadata into a fake observation and make
-      // the persisted source version ambiguous; the request overlay renders it
-      // only when native projection no longer contains the source.
+      // Render a qualified view, retaining the immutable raw source/body version.
+      // This gives outgoing requests a complete source/version/caveat envelope;
+      // it does not claim a new observation or rewrite the original Pi record.
+      head.rendered = true;
       validateValue(head);
+      entries.push(...writeView(next, value, head, value.content));
       if (!next.pins.some((pin) => pin.key === value.key && pin.scope === scope)) next.pins.push({ id: value.id, key: value.key, scope });
-    } else next.pins = next.pins.filter((pin) => pin.id !== value.id || pin.scope !== scope);
+    } else next.pins = next.pins.filter((pin) => pin.key !== value.key || pin.scope !== scope);
   }
   if (next.pins.length > MAX_PINS) fail("At most 64 sources may be pinned.");
-  return [];
+  return entries;
 }
 function assertWritableValue(state, value) {
   const frame = state.frames.at(-1);
@@ -371,7 +373,7 @@ function planEdits({ next, index, operation, boundary }) {
   for (const nativeId of ids) {
     const id = logicalSource(index, nativeId);
     const value = currentValue(next, index, id);
-    if (value.head.readOnly && value.message.role === "user") fail("Human messages cannot be dropped.");
+    if (value.head.readOnly && messageOf(source(index, id)).role === "user") fail("Human messages cannot be dropped.");
     if (next.pins.some((pin) => pin.key === value.key)) fail(`Pinned source ${id} must be explicitly unpinned first.`);
     const borrowed = next.frames.at(-1)?.refs.some((ref) => ref.id === id);
     if (borrowed) fail(`Referenced outer slot ${id} cannot be dropped.`);
@@ -450,25 +452,39 @@ export function releaseWatchMessages(input, text) {
  * transcript. It is intentionally a custom/user-context message so text and image
  * blocks use Pi's normal provider conversion without granting source data system authority.
  */
-export function pinnedContextOverlay(branch, projection, state, messages = []) {
+export function pinnedContextOverlay(branch, state, messages = []) {
   const normalized = normalizeContextState(state);
-  const index = sourceIndex(branch, { context: { contextEntries: projection.entries } });
-  const visibleScopes = new Set(["root", ...normalized.frames.map((frame) => frame.id)]);
+  if (!normalized.pins.length) return [];
+  const index = { byId: new Map(branch.map((entry) => [entry.id, entry])) };
+  const present = new Set(messages.filter((message) => message.role !== "system" && message.content !== undefined).map((message) => contentVersion(message.content)));
+  const seen = new Set();
   const overlays = [];
   for (const pin of normalized.pins) {
-    if (!visibleScopes.has(pin.scope)) fail(`Pinned scope ${pin.scope} is not active.`);
+    if (seen.has(pin.key)) continue;
+    seen.add(pin.key);
     const head = normalized.values[pin.key];
-    if (!head) fail(`Pinned value ${pin.key} is unavailable.`);
-    const value = currentValue(normalized, index, pin.id, { allowHidden: true, key: pin.key });
-    if (messages.some((message) => isValueMessage(message, pin.key, head.version))) continue;
-    const expected = head.rendered ? renderValue({ id: value.id, key: pin.key, head }, value.content, head) : value.content;
-    const native = index.valueViews.get(pin.key) ?? index.active.get(value.nativeId ?? pin.id);
-    const nativeContent = native?.messages?.[0]?.content;
-    if (nativeContent !== undefined && contentVersion(nativeContent) === contentVersion(expected)) continue;
-    const draft = valueMessage({ id: value.id, key: pin.key, head }, value.content, head);
+    const value = { id: pin.id, key: pin.key, head, content: valueContent(index, head) };
+    const rendered = renderValue(value);
+    // Exact envelope equality only proves that the outgoing data is present.
+    // Never use content equality to attribute, edit or delete another message.
+    if (present.has(contentVersion(rendered))) continue;
+    if (messages.some((message) => isValueMessage(message, pin.key, head.version))) fail(`Retained pin ${pin.id} was altered in the outgoing context.`);
+    const draft = valueMessage(value);
     overlays.push({ role: "custom", customType: draft.customType, content: draft.content, display: draft.display, details: draft.details, timestamp: 0 });
   }
   return overlays;
+}
+
+/** Materialize the same qualified snapshots at an existing native boundary, without another request. */
+export function planRetentionBoundary({ state: input, branch, boundary }) {
+  const next = normalizeContextState(input);
+  const overlays = pinnedContextOverlay(branch, next, boundary.context.contextMessages);
+  if (!overlays.length) return null;
+  const entries = overlays.map(({ role: _role, timestamp: _timestamp, ...message }) => ({ type: "custom_message", ...message }));
+  next.revision += 1;
+  entries.push(nativeMessage(`Context retention applied; revision ${next.revision}. Sources: ${overlays.map((message) => message.details.sourceId).join(", ")}.`, { action: "retention", revision: next.revision }));
+  const operation = { id: `${branch.at(-1)?.id ?? "root"}:retention` };
+  return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: false };
 }
 
 /** Search remains lexical until M3 adds explicit historical loading and semantic ranking. */

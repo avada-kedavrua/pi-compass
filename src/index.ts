@@ -67,8 +67,10 @@ import {
   CONTEXT_MESSAGE_TYPE,
   CONTEXT_STATE_TYPE,
   emptyContextState,
+  normalizeContextState,
   pinnedContextOverlay,
   planContextBoundary,
+  planRetentionBoundary,
   planWatchBoundary,
   releaseWatchMessages,
   restoreContextState,
@@ -2119,6 +2121,7 @@ export default function (pi: any) {
   });
 
   pi.on("context_with_system", async (event: any, ctx: any) => {
+    await mutationQueue;
     if (!Array.isArray(event?.messages)) return;
     // Older Compass state messages are internal persistence, not instructions.
     // Preserve Pi's original system/tool patches instead of folding them into the head.
@@ -2131,9 +2134,7 @@ export default function (pi: any) {
         if (messages.length !== event.messages.length) return { messages };
         return;
       }
-      const projection = ctx?.sessionManager?.buildSessionProjection?.();
-      if (!projection?.entries) throw new Error("Native projection is unavailable; retained pins cannot be restored for this request.");
-      const overlays = pinnedContextOverlay(branch, projection, committed, messages);
+      const overlays = pinnedContextOverlay(branch, committed, messages);
       const output = [...messages, ...overlays];
       if (messages.length !== event.messages.length || overlays.length) return { messages: output };
     } catch (error) {
@@ -2175,6 +2176,21 @@ export default function (pi: any) {
         }],
         continue: false,
       };
+    }
+  }));
+
+  // Pi rebuilds this preview after the preceding boundary handler. Compose from
+  // its proposed state without activating it; persist only through Pi's commit.
+  pi.on("turn_end", async (event: any, ctx: any) => serialized(async () => {
+    try {
+      const branch = ctx?.sessionManager?.getBranch?.() ?? [];
+      const proposed = (event.entries ?? []).findLast((entry: any) => entry.type === "custom" && entry.customType === CONTEXT_STATE_TYPE);
+      const input = proposed ? normalizeContextState(proposed.data) : restoreContext(ctx);
+      const planned = planRetentionBoundary({ state: input, branch, boundary: event });
+      if (planned) return { entries: [...(event.entries ?? []), ...planned.entries] };
+    } catch (error) {
+      ctx?.abort?.();
+      throw error;
     }
   }));
 

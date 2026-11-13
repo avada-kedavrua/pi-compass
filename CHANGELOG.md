@@ -9,9 +9,9 @@
 - Track Agent-owned attention and frame feasibility in `docs/architecture-v0.10.0.md`.
 - Replace the frame prototype's premature completion checklist with a requirement-linked M0–M7 implementation plan; unimplemented retrieval, retention, approval, routes and integration remain explicit.
 - Repair canonical frame restoration: preserve parent summaries/omissions, release raw child process even after native compaction, retain ref writes across nested/aborted work, preserve complete tool exchanges, and make drop functional. Use persisted entry identities rather than session-global provider call IDs.
-- Introduce current-only context schema v2 and intent/commit receipts binding both native drafts and resulting control state. Activate only committed branch-local state; incomplete or altered persistence invokes the public abort path rather than silently resetting a frame. Prototype v1 context state is not migrated.
+- Use current-only context schema v3 and intent/commit receipts binding both native drafts and resulting control state. Activate only committed branch-local state; incomplete or altered persistence invokes the public abort path rather than silently resetting a frame. Prototype v1 context state is not migrated.
 - Fix review findings in steering/native-watch reconciliation and control-state receipt integrity. Installed projection/runner checks cover these boundaries with adapters; they do not prove live AgentSession/provider behavior. M2–M7 and Human acceptance remain pending.
-- Add a request-side retention slice for scoped pinned values after native compaction. It derives labeled text/image overlays from committed branch state, carries versions/provenance/caveats, preserves original observations, and deduplicates composed overlays. This does not restore Pi's durable projection and does not complete M2.
+- Retain scoped pinned values through qualified text/image views and missing-only request overlays. Match complete outgoing envelopes, not native membership or metadata markers alone; preserve immutable source blocks under later handlers. Materialize omitted snapshots at the next existing native boundary without forcing a request, using composed state and integrity receipts. Immediate post-compaction canonical restoration still requires a Pi API change; M2 remains incomplete.
 
 ## 0.9.1 (2026-10-31)
 
