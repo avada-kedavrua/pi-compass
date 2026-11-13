@@ -63,6 +63,16 @@ import {
   transitionTasks,
   triageIssue,
 } from "./goal-run-v0-9-0.mjs";
+import {
+  CONTEXT_MESSAGE_TYPE,
+  CONTEXT_STATE_TYPE,
+  emptyContextState,
+  planContextBoundary,
+  planWatchBoundary,
+  releaseWatchMessages,
+  restoreContextState,
+  searchContext,
+} from "./context-core.mjs";
 
 const STATE_ENTRY_TYPE = "pi-compass-v2.goalrun";
 const STATE_MESSAGE_TYPE = "pi-compass-v2.goalrun-state";
@@ -75,6 +85,7 @@ const PACKAGE_VERSION = (() => {
 const MAX_TRACE_ENTRIES = 24;
 
 let state: any = emptyGoalRunState();
+let contextState: any = emptyContextState();
 let needsRestore = true;
 let loaderSignature = "";
 let loaderName = "";
@@ -1085,6 +1096,78 @@ function registerStateSnapshotTool(pi: any) {
   });
 }
 
+function contextBoundaryPreview(ctx: any) {
+  const projection = ctx?.sessionManager?.buildSessionProjection?.();
+  if (!projection) return { contextEntries: [], contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: true };
+  return {
+    contextEntries: projection.entries,
+    contextMessages: projection.messages,
+    llmMessages: projection.messages,
+    pendingMessages: [],
+    canContinue: true,
+  };
+}
+function restoreContext(ctx: any) {
+  let branch: any[] = [];
+  try { branch = ctx?.sessionManager?.getBranch?.() ?? []; } catch { branch = []; }
+  contextState = restoreContextState(branch);
+  return contextState;
+}
+function contextOperationSchema() {
+  const sourceId = Type.String({ minLength: 1, maxLength: 64, description: "Stable source entry ID returned by compass_context search; never use a message index." });
+  const version = Type.String({ pattern: "^[a-f0-9]{24}$", maxLength: 24, description: "Source version returned by search; edits fail closed if it changed." });
+  return Type.Object({
+    action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "replace", "drop"] }),
+    expectedRevision: Type.Integer({ minimum: 0, description: "Context revision from the latest compass_context result." }),
+    task: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "Required for call: the local procedure and objective." })),
+    capture: Type.Optional(Type.Array(Type.Object({ id: sourceId, mode: Type.String({ enum: ["ref", "copy"] }), version }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true })),
+    exportIds: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Sources explicitly returned to the parent frame; default none." })),
+    ids: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Sources for pin/unpin/replace/drop." })),
+    version: Type.Optional(version),
+    versions: Type.Optional(Type.Array(Type.Object({ id: sourceId, version }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true, description: "Required for action=drop: the observed version of every selected source." })),
+    content: Type.Optional(Type.String({ minLength: 1, maxLength: 8000, description: "Replacement content for action=replace." })),
+    result: Type.Optional(Type.String({ maxLength: 8000, description: "Optional bounded return value for action=return." })),
+    query: Type.Optional(Type.String({ maxLength: 400, description: "Search terms for action=search; lookup is on demand, not mandatory." })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
+  }, { additionalProperties: false });
+}
+function registerContextTool(pi: any) {
+  return registerOnce(pi, "compass_context", {
+    label: "Context Frames",
+    description: "Manage same-session attention frames without starting another Pi session. call enters a local task with explicit ref/copy capture; return restores the parent view with explicit exports. search returns stable source IDs and versions. replace/drop use optimistic version checks and preserve Human messages/tool exchanges.",
+    promptSnippet: "Use same-session context frames only when isolating attention reduces total work; capture and export are explicit and default to none.",
+    promptGuidelines: [
+      "This changes the next native context projection, not Pi's append-only transcript or the filesystem.",
+      "Use search only when needed. Pass stable source IDs and versions; never infer them from message positions.",
+      "A ref is a shared logical slot and survives frame failure/interruption; a copy is local. Do not edit or drop Human messages.",
+      "A frame cannot return while it owns active pi-await watches; cancel or explicitly transfer them first.",
+    ],
+    parameters: contextOperationSchema(),
+    async execute(toolCallId: string, params: any, ...rest: any[]) {
+      return serialized(async () => {
+        const ctx = getContext(rest);
+        if (needsRestore) { state = restoreState(ctx); restoreContext(ctx); needsRestore = false; }
+        const action = String(params?.action ?? "");
+        if (!Number.isInteger(params?.expectedRevision) || params.expectedRevision !== contextState.revision) {
+          throw new Error(`Stale context revision ${params?.expectedRevision}; current revision is ${contextState.revision}. No context changed.`);
+        }
+        if (action === "search") {
+          const branch = ctx?.sessionManager?.getBranch?.() ?? [];
+          const result = searchContext(branch, { context: contextBoundaryPreview(ctx) }, contextState, params);
+          return readResult(JSON.stringify(result), { contextRevision: contextState.revision, hits: result.hits.length });
+        }
+        if (!["call", "return", "pin", "unpin", "replace", "drop"].includes(action)) {
+          throw new Error(`Unknown context action ${action}. No context changed.`);
+        }
+        const operation = { ...params, callId: toolCallId };
+        return {
+          content: [{ type: "text", text: `Context action ${action} queued for the native turn boundary; no new session or Agent Loop will be created.` }],
+          details: { contextOperation: operation, contextRevision: contextState.revision },
+        };
+      });
+    },
+  });
+}
 function contextCwd(ctx: any) {
   return typeof ctx?.cwd === "string" && ctx.cwd.trim() ? ctx.cwd : process.cwd();
 }
@@ -1728,7 +1811,7 @@ function ensureCurrentLoadout(pi: any, ctx: any) {
   const currentLoader = ensureLoader(pi);
   const tools = registerActiveCapabilityGroups(pi);
   const activeChanged = beforeActive.join("|") !== activeCapabilities().join("|");
-  const desiredCompassNames = [...new Set([currentLoader, ...(state.goal.current ? ["compass_state"] : []), ...tools].filter(Boolean))];
+  const desiredCompassNames = [...new Set([currentLoader, ...(state.goal.current ? ["compass_state", "compass_context"] : []), ...tools].filter(Boolean))];
   const desiredSignature = loadoutSignature(activeCapabilities());
   const visibleNames = activeNames(pi);
   const visibleCompassNames = visibleNames.filter((name) => isCompassName(name));
@@ -1736,7 +1819,8 @@ function ensureCurrentLoadout(pi: any, ctx: any) {
   const loadoutMismatch = desiredCompassNames.some((name) => !visibleNames.includes(name))
     || visibleCompassNames.some((name) => !desiredSet.has(name));
   const stateToolMissing = Boolean(state.goal.current) && !visibleNames.includes("compass_state");
-  if (desiredSignature !== lastLoadoutSignature || loadoutMismatch || (Boolean(currentLoader) && !visibleNames.includes(currentLoader)) || stateToolMissing || loadoutRefreshPending) {
+  const contextToolMissing = Boolean(state.goal.current) && !visibleNames.includes("compass_context");
+  if (desiredSignature !== lastLoadoutSignature || loadoutMismatch || (Boolean(currentLoader) && !visibleNames.includes(currentLoader)) || stateToolMissing || contextToolMissing || loadoutRefreshPending) {
     setCompassLoadout(pi, desiredCompassNames);
     lastLoadoutSignature = loadoutSignature(activeCapabilities());
     loadoutRefreshPending = false;
@@ -1902,6 +1986,7 @@ export default function (pi: any) {
 
   // State is a compact default read after Goal capture; detailed capability groups remain progressive.
   registerStateSnapshotTool(pi);
+  registerContextTool(pi);
   // Before a Goal exists no capability is applicable, so the capability loader stays hidden.
   ensureLoader(pi);
   try { setCompassLoadout(pi, [loaderName]); } catch { /* preflight reports unsupported runtime */ }
@@ -1920,11 +2005,12 @@ export default function (pi: any) {
         state = recordExecutionEvent(state, { status: "unknown", summary: "Recovered an unresolved Subagent batch as unknown.", text: state.plan.execution.error, ref: state.plan.execution.requestId });
       }
       state.projectRoot = contextCwd(ctx);
+      restoreContext(ctx);
       const currentLoader = ensureLoader(pi);
       const allowed = capabilitiesFor();
       setActiveCapabilities(activeCapabilities().filter((capability) => allowed.includes(capability)));
       const tools = registerActiveCapabilityGroups(pi);
-      setCompassLoadout(pi, [currentLoader, ...(state.goal.current ? ["compass_state"] : []), ...tools]);
+      setCompassLoadout(pi, [currentLoader, ...(state.goal.current ? ["compass_state", "compass_context"] : []), ...tools]);
       lastLoadoutSignature = loadoutSignature(activeCapabilities());
       loadoutRefreshPending = false;
       persistState(pi);
@@ -1949,7 +2035,7 @@ export default function (pi: any) {
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     const prompt = typeof event?.prompt === "string" ? event.prompt : "";
     const result = await serialized(async () => {
-      if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+      if (needsRestore) { state = restoreState(ctx); restoreContext(ctx); needsRestore = false; }
       const messageId = String(event?.messageId ?? event?.message?.id ?? event?.id ?? "");
       const captured = captureHumanPrompt(state, prompt, { source: "before_agent_start", messageId });
       state = captured.state;
@@ -1981,6 +2067,11 @@ export default function (pi: any) {
     if (!text) return;
     await serialized(async () => {
       if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+      const watchRelease = releaseWatchMessages(contextState, text);
+      if (watchRelease) {
+        contextState = watchRelease.state;
+        try { pi.appendEntry?.(CONTEXT_STATE_TYPE, watchRelease.entry.data); } catch { /* next boundary can recover the in-memory ownership */ }
+      }
       const captured = captureHumanPrompt(state, text, { source: "message_end", messageId: String(message?.id ?? event?.messageId ?? "") });
       if (!captured.captured) return;
       state = captured.state;
@@ -1999,6 +2090,7 @@ export default function (pi: any) {
     else {
       const branchState = restoreState(ctx);
       if (branchState.stateRevision > (state.stateRevision ?? 0) || (!state.goal.original && branchState.goal.original)) state = branchState;
+      restoreContext(ctx);
     }
     ensureCurrentLoadout(pi, ctx);
     // Do not rebuild request history or append a volatile full-state anchor.
@@ -2011,6 +2103,38 @@ export default function (pi: any) {
     const messages = event.messages.filter((message: any) => !(message?.role === "custom" && [STATE_MESSAGE_TYPE, ANCHOR_MESSAGE_TYPE, "pi-compass-v2.conventions"].includes(message?.customType)));
     if (messages.length !== event.messages.length) return { messages };
   });
+
+  // Native context edits are committed at turn_end, including an aborted turn.
+  // This is the only point where Compass changes the canonical projection; it
+  // never creates a second session, mutates the transcript in place, or filters
+  // cloned messages by position.
+  pi.on("turn_end", async (event: any, ctx: any) => serialized(async () => {
+    if (needsRestore) { state = restoreState(ctx); restoreContext(ctx); needsRestore = false; }
+    const branch = ctx?.sessionManager?.getBranch?.() ?? [];
+    try {
+      const planned = planContextBoundary({ state: contextState, branch, boundary: event });
+      if (planned) {
+        contextState = planned.state;
+        return { entries: [...(event.entries ?? []), ...planned.entries], continue: planned.continue };
+      }
+      const watchPlan = planWatchBoundary({ state: contextState, boundary: event });
+      if (!watchPlan) return;
+      contextState = watchPlan.state;
+      return { entries: [...(event.entries ?? []), ...watchPlan.entries], continue: false };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        entries: [...(event.entries ?? []), {
+          type: "custom_message",
+          customType: CONTEXT_MESSAGE_TYPE,
+          content: `Context operation rejected: ${message}`,
+          display: false,
+          details: { contextError: true },
+        }],
+        continue: false,
+      };
+    }
+  }));
 
   // Capture explicit writes, failed tools, and structured answers returned by ask-user-questions.
   // All updates are serialized so a trace event cannot overwrite a concurrent Goal update.

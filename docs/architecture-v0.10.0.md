@@ -50,15 +50,15 @@ Search is available on demand, not a mandatory step before each call. Select use
 
 Offload saves recoverable content before removing its active contribution. Pointers carry purpose, source/version and caveats. Missing, stale, wrong-branch or reserved targets fail visibly. Do not require separate lesson/ledger/memory records for every operation. Compaction remains a safety mechanism for finite windows.
 
-### Candidate native projection mechanism
+### Native projection mechanism
 
-Use documented actionable boundaries to append Pi context edits and frame metadata. Make the native canonical projection represent the active frame, so normal requests, token accounting and compaction observe the same selection. Do not rely on matching source IDs to cloned `context_with_system` messages by position/content/timestamp.
+Use Pi's documented actionable `turn_end` boundary to append native context edits, compaction checkpoints, hidden frame procedure messages and compact frame metadata. `compass_context` is a same-session tool: it queues an operation, but does not create an AgentSession, child process or scheduler. The boundary is the only commit point, including an aborted assistant turn; no private SessionManager mutation is needed.
 
-Source/version references preserve the suspended parent. A later native context checkpoint plus restoration edits can select that parent again after a child compaction, while excluding child work and unselected exports. All raw entries remain unchanged. Copy/ref bindings determine which value version is restored.
+`src/context-core.mjs` is a pure planner. It keeps source IDs, prior edit IDs, content versions, frame ownership, pins, reference writes and watch ownership only. Raw content remains in Pi's append-only transcript. `call` creates a new projection with explicit `ref`/`copy` capture; `return` restores the saved source versions, preserves user steering, and exports only requested sources. `replace` uses optimistic versions; Human messages cannot be replaced/dropped, complete tool exchanges are required for drops, and referenced outer slots cannot be dropped. Search is bounded and returns stable IDs/snippets/versions.
 
-A local probe using the installed SessionManager confirmed one parent omission -> child compaction -> parent restoration sequence: parent content restored, child work/summary absent, raw parent unchanged, no extra AgentSession/provider requests. This proves the primitive sequence only. Boundary composition, complete exchanges, pins, nested calls, interrupted persistence, branches and reload still require implementation and tests.
+A frame-owned `watch` is recorded from pi-await's existing tool-result metadata and released from its native cancellation or wake messages; Compass does not create a second watch mechanism. Parent-owned watches do not block a child. A return fails closed while an owned watch remains active. This is ownership bookkeeping, not a replacement for pi-await's authoritative watch state.
 
-Pi boundary proposals are validated before append, but persistence is not transactional. Activate operations only from committed branch-local records; do not equate returning a draft with a successful transition. Protect complete assistant/tool-result exchanges and preserve active branch identity.
+Native compaction, ordinary requests and reload all consume the same canonical projection. The raw session remains unchanged; a context custom entry is only bounded metadata. Boundary drafts are applied only by Pi after validation. If a boundary operation is rejected, Compass appends a compact rejection message and does not advance context state. The implementation still needs nested/reload/provider acceptance coverage and must not be described as a zero-cost or zero-compaction guarantee.
 
 ### Repeated results
 
@@ -81,10 +81,10 @@ Evaluate replacing an older read-only result body with a source pointer while pr
 - [x] Remove per-request full anchors and redundant native activation policy; cover prefix preservation and loader/executor diagnostics.
 - [x] Independently review the foundation and fix its material findings.
 - [x] Probe native parent restoration across child compaction without another AgentSession.
-- [ ] Define the unified task/context contracts and replace obsolete mechanisms rather than retain compatibility layers.
-- [ ] Implement native in-place frames: explicit capture/return, versioned ref/copy, branch-local recovery and complete exchanges.
-- [ ] Implement scoped retention, active Skills, Caveat preservation, bounded search/load and safe offload.
-- [ ] Integrate authoritative watch ownership and external input across frame transitions without duplicate observers/wakes.
+- [ ] Define the remaining unified task/context contracts and replace obsolete mechanisms rather than retain compatibility layers.
+- [x] Implement the native in-place frame core: explicit capture/return, versioned ref/copy, branch-local native edits, complete-exchange protection and aborted-turn ref persistence.
+- [ ] Add nested-frame, branch navigation, reload and native compaction recovery coverage; validate active Skills, material Human requirements and caveats under frame projection.
+- [x] Integrate bounded pi-await watch ownership and external input preservation without duplicate observers/wakes; verify lost-watch/reload behavior against the native package contract.
 - [ ] Bind DAG/acceptance approval to exact revisions; integrate explicit native delegation and acceptance-gated route stopping.
 - [ ] Evaluate optional repeated-result clearing and asynchronous execution against total completion cost.
 - [ ] Consolidate the Agent-facing Skill and current documentation; remove dead code, redundant state/tests and obsolete active contracts.
@@ -95,12 +95,12 @@ Evaluate replacing an older read-only result body with a source pointer while pr
 
 Current source requires Pi >=1.5.2. The foundation is not a v0.10.0 release; package/release-manifest promotion follows completed implementation.
 
-- `npm test`: 193/193 pass; `npm run test:core`: 89/89 pass.
+- `npm test`: 199/199 pass after the frame-core implementation; `npm run test:core`: 89/89 pass before the frame-only additions.
 - Static and non-static preflight pass; checking this repository itself produces the expected target/package-overlap warning.
 - `git diff --check` passes.
 - Independent foundation review found two P2 issues (loader/executor diagnostics and stale gate text), both fixed.
 - Prefix tests use the real installed Pi runner/Responses serializer with constructed messages and fake extension activation/persistence. They do not prove provider cache hits or live extension acceptance.
-- No live provider run, same-session frame cost comparison or zero-compaction guarantee is claimed.
+- Native SessionManager projection, frame-core tests and an extension boundary integration test pass; no live provider run, same-session frame cost comparison, nested/reload proof or zero-compaction guarantee is claimed.
 
 ## Sources
 

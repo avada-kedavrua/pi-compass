@@ -128,11 +128,12 @@ test("simple Goal exposes only compact Compass state and preserves native tool a
   extensionFactory(pi);
   await captureGoal(pi, "Goal: fix one typo in src/readme.ts");
   const compass = pi.activeNames().filter((name) => name.startsWith("compass_"));
-  assert.deepEqual(compass.sort(), ["compass_state"]);
+  assert.deepEqual(compass.sort(), ["compass_context", "compass_state"]);
   assert.ok(!pi.activeNames().includes("compass_open"), "no capability loader is exposed when no group is applicable");
   assert.ok(pi.activeNames().includes("subagent"), "pi-subagents owns semantic tool activation, not Compass");
   assert.ok(pi.activeNames().includes("watch"), "Compass preserves pi-await tools");
   assert.ok(pi.tools.has("compass_state"), "compact state tool is registered before Goal capture");
+  assert.ok(pi.tools.has("compass_context"), "same-session context tool is registered before Goal capture");
 });
 
 test("explicit multi-part Goal surfaces planning early without creating or requiring a DAG", async () => {
@@ -944,7 +945,7 @@ test("state survives tool-result fallback when custom-entry persistence is unava
   const second = fakePi();
   extensionFactory(second);
   await second.events.get("session_start")({}, { cwd: "/tmp/example-project", sessionManager: { getBranch: () => [{ type: "message", message: { role: "toolResult", toolName: "compass_decision", details: saved.details } }], getEntries: () => [] } });
-  assert.equal(second.activeNames().filter((name) => name.startsWith("compass_")).length, 4, "restored history loadout has compact state and decision/checkpoint/event tools; no redundant loader");
+  assert.equal(second.activeNames().filter((name) => name.startsWith("compass_")).length, 5, "restored history loadout has context, compact state, and decision/checkpoint/event tools; no redundant loader");
 });
 
 

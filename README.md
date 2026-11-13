@@ -1,6 +1,6 @@
 # Pi Compass V2 — 0.9.1
 
-> **Unreleased development:** this branch contains context-foundation changes requiring Pi >=1.5.2. See [the implementation TODO and current evidence](./docs/architecture-v0.10.0.md). The v0.9.1 release manifest and validation records describe the historical release, not acceptance of these changes. No v0.10.0 release is claimed.
+> **Unreleased development:** this branch contains context-foundation and native same-session frame changes requiring Pi >=1.5.2. `compass_context` uses Pi `turn_end` boundary drafts; it does not create another Session or Agent Loop. See [the implementation TODO and current evidence](./docs/architecture-v0.10.0.md). The v0.9.1 release manifest and validation records describe the historical release, not acceptance of these changes. No v0.10.0 release is claimed.
 
 Pi Compass is an agent-only Pi extension. Its objective is to reduce the total practical cost of completing arbitrary Goals without lowering correctness or delivery quality. It is not a human-facing workflow UI.
 
@@ -9,7 +9,7 @@ Pi Compass is an agent-only Pi extension. Its objective is to reduce the total p
 - **GoalRun schema/API v7.** Existing v2-v6 states migrate to v7. The active Goal, versioned Human constraints, decisions, plan, acceptance and bounded event history remain the single Compass continuity source.
 - **Structured Human decisions.** When `ask_user_question` returns structured `details`, Compass preserves question/answer semantics, selected multi-values, notes, unanswered indexes and global notes. Large option previews are not duplicated; only `hasPreview` is retained.
 - **Correct decline/error distinction.** A Human decline is a decision. UI load failures and validation errors are `human_questionnaire_error` events, not Human decisions. Older text-only result envelopes still use the prior capture path.
-- **Architecture boundary for the next step.** `docs/architecture-v0.9.0.md` defines RouteSet separately from DAG, Agent-owned attention, Pi-native append-only Context Edit, the Context Ledger and Caveat semantics. These are design decisions, not claims of completed runtime features.
+- **Architecture boundary for the next step.** `docs/architecture-v0.9.0.md` defines RouteSet separately from DAG, Agent-owned attention, Pi-native append-only Context Edit, the Context Ledger and Caveat semantics. The v0.10 development branch now has the first native frame core; nested/reload/provider acceptance and retention semantics remain unaccepted TODOs.
 - **No new runtime dependency.** TypeBox is host-provided by Pi and is declared only as `peerDependencies: { "typebox": "*" }`; it is not installed into the Compass package.
 
 ## Retained v0.8 execution model
@@ -25,7 +25,7 @@ A DAG is optional. Simple Goals remain on the light default loadout. The Agent c
 
 ## Released v0.9.1 compatibility target
 
-- Pi: `>=1.4.0`. v0.9.1 uses the 1.4.0 `tool_result` event contract to distinguish questionnaire UI errors from Human declines. Durable Context Edit hooks are not yet activated.
+- Pi: `>=1.4.0` for the historical v0.9.1 release. The current unreleased development branch requires Pi `>=1.5.2` for native `context_with_system` and actionable boundary behavior; do not treat the historical target as current runtime acceptance.
 - `pi-subagents`: pinned target `0.84.0`; its delegation declaration and runtime export are byte-identical to the supplied 0.83.1 baseline.
 - `@juicesharp/rpiv-ask-user-question`: tested against the supplied source `2.15.0`; text-only fallback remains supported.
 - GoalRun: schema/API v7.
