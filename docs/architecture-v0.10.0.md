@@ -83,7 +83,8 @@ Evaluate replacing an older read-only result body with a source pointer while pr
 - [x] Probe native parent restoration across child compaction without another AgentSession.
 - [ ] Define the remaining unified task/context contracts and replace obsolete mechanisms rather than retain compatibility layers.
 - [x] Implement the native in-place frame core: explicit capture/return, versioned ref/copy, branch-local native edits, complete-exchange protection and aborted-turn ref persistence.
-- [ ] Add nested-frame, branch navigation, reload and native compaction recovery coverage; validate active Skills, material Human requirements and caveats under frame projection.
+- [x] Add nested-frame, reload-from-active-branch, external native-compaction and system-message recovery coverage.
+- [ ] Validate branch navigation plus active Skills, material Human requirements and caveats under real frame projection; runtime keeps these semantic retention decisions with the Agent.
 - [x] Integrate bounded pi-await watch ownership and external input preservation without duplicate observers/wakes; verify lost-watch/reload behavior against the native package contract.
 - [ ] Bind DAG/acceptance approval to exact revisions; integrate explicit native delegation and acceptance-gated route stopping.
 - [ ] Evaluate optional repeated-result clearing and asynchronous execution against total completion cost.
@@ -95,12 +96,12 @@ Evaluate replacing an older read-only result body with a source pointer while pr
 
 Current source requires Pi >=1.5.2. The foundation is not a v0.10.0 release; package/release-manifest promotion follows completed implementation.
 
-- `npm test`: 199/199 pass after the frame-core implementation; `npm run test:core`: 89/89 pass before the frame-only additions.
+- `npm test`: 200/200 pass after the frame-core implementation; `npm run test:core`: 89/89 pass before the frame-only additions.
 - Static and non-static preflight pass; checking this repository itself produces the expected target/package-overlap warning.
 - `git diff --check` passes.
 - Independent foundation review found two P2 issues (loader/executor diagnostics and stale gate text), both fixed.
 - Prefix tests use the real installed Pi runner/Responses serializer with constructed messages and fake extension activation/persistence. They do not prove provider cache hits or live extension acceptance.
-- Native SessionManager projection, frame-core tests and an extension boundary integration test pass; no live provider run, same-session frame cost comparison, nested/reload proof or zero-compaction guarantee is claimed.
+- Native SessionManager projection, frame-core tests (including nested/reload/compaction) and an extension boundary integration test pass; no live provider run, same-session frame cost comparison, branch-navigation proof or zero-compaction guarantee is claimed.
 
 ## Sources
 

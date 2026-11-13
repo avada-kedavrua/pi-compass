@@ -7,7 +7,7 @@
 - Let Pi/pi-subagents own native tool activation, including its loader. Report executor, loader and pi-await availability separately; retain explicit read-only DAG dispatch and Human veto.
 - Add regression tests using the installed host transformation/Responses serializer. These prove request construction only, not provider cache hits or live runtime acceptance.
 - Track Agent-owned attention and frame feasibility in `docs/architecture-v0.10.0.md`.
-- Add the first native same-session frame core: `compass_context` uses Pi `turn_end` boundary drafts for explicit `call`/`return`, ref/copy capture, source-versioned edits, complete-exchange protection, bounded search, frame-owned pi-await watch bookkeeping, and aborted-turn ref persistence. This remains a development milestone: nested/reload/provider acceptance and active-Skill/caveat retention still require evidence.
+- Add the first native same-session frame core: `compass_context` uses Pi `turn_end` boundary drafts for explicit `call`/`return`, ref/copy capture, source-versioned edits, complete-exchange protection, bounded search, frame-owned pi-await watch bookkeeping, and aborted-turn ref persistence. Native tests now cover nested frames, active-branch reload, external compaction recovery, and reserved system messages; live provider/branch-navigation acceptance and active-Skill/caveat retention still require evidence.
 
 ## 0.9.1 (2026-10-31)
 

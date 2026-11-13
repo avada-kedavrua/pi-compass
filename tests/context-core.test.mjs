@@ -65,6 +65,8 @@ test("same-session call switches the native projection and stores metadata only"
   call.result.details.contextOperation.capture[0].version = selectedVersion(call, publicId);
   const planned = planContextBoundary({ state: emptyContextState(), branch: sm.getBranch(), boundary: call.boundary });
   appendDrafts(sm, planned.entries);
+  const reloaded = SessionManager.inMemory("/context-core", undefined, sm.getEntries());
+  assert.equal(restoreContextState(reloaded.getBranch()).frames.length, 1, "frame metadata reloads from the active branch");
   const projection = sm.buildSessionProjection();
   const text = JSON.stringify(projection.messages);
   assert.match(text, /RESERVED SYSTEM/);
@@ -90,6 +92,27 @@ test("ref replacement persists through an aborted turn", () => {
   appendDrafts(sm, written.entries);
   assert.match(JSON.stringify(sm.buildSessionProjection().messages), /updated slot/);
   assert.equal(restoreContextState(sm.getBranch()).frames.length, 1);
+});
+
+test("return restores the parent after an external native compaction", () => {
+  const sm = SessionManager.inMemory("/context-core");
+  const parentId = user(sm, "parent survives compaction");
+  const call = contextCall(sm, { action: "call", expectedRevision: 0, task: "compact child", capture: [] });
+  const entered = planContextBoundary({ state: emptyContextState(), branch: sm.getBranch(), boundary: call.boundary });
+  appendDrafts(sm, entered.entries);
+  const childNote = sm.getBranch().find((entry) => entry.type === "custom_message" && entry.customType === "pi-compass-v2.context-message");
+  assert.ok(childNote);
+  sm.appendCompaction("child work summarized", childNote.id, 0, { source: "native-test" }, true);
+  const state = restoreContextState(sm.getBranch());
+  const returned = contextCall(sm, { action: "return", expectedRevision: state.revision, exportIds: [], result: "restored" }, "compaction-return");
+  const planned = planContextBoundary({ state, branch: sm.getBranch(), boundary: returned.boundary });
+  appendDrafts(sm, planned.entries);
+  const text = JSON.stringify(sm.buildSessionProjection().messages);
+  assert.match(text, /parent survives compaction/);
+  assert.match(text, /restored/);
+  assert.doesNotMatch(text, /compact child/);
+  assert.equal(restoreContextState(sm.getBranch()).frames.length, 0);
+  assert.ok(sm.getEntry(parentId));
 });
 
 test("nested frames restore the immediate parent before the outer frame", () => {
