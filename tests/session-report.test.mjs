@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { analyzeSession, formatReport } from "../scripts/session-report.mjs";
-import { emptyGoalRunState, captureHumanPrompt } from "../src/goal-run-v0-9-0.mjs";
+import { emptyGoalRunState, captureHumanPrompt } from "../src/goal-run.mjs";
 
 test("session report distinguishes top-level calls, logged nested calls, errors, and usage", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compass-session-report-"));

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import extensionFactory from "../src/index.ts";
 import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
 
-import { bindDagApprovalQuestionnaire, captureHumanDecision, dagApprovalStatus, GOAL_RUN_RELEASE } from "../src/goal-run-v0-9-0.mjs";
+import { bindDagApprovalQuestionnaire, captureHumanDecision, dagApprovalStatus, GOAL_RUN_RELEASE } from "../src/goal-run.mjs";
 
 function fakePi(options = {}) {
   const events = new Map();
@@ -165,6 +165,49 @@ const tasks = [
   { id: "smoke", title: "Implement smoke path", acceptance: "A real UI-to-API path is exercised", dependsOn: ["api", "ui"], writeScope: "src/smoke" },
 ];
 
+test("failed native persistence leaves the previous Goal, plan and loaded capabilities intact", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  await captureGoal(pi);
+  const before = structuredClone(latestState(pi));
+  const append = pi.appendEntry;
+  pi.appendEntry = () => { throw new Error("disk full"); };
+  await assert.rejects(() => pi.tools.get("compass_open").execute("open", { capabilities: ["history"] }, undefined, undefined, ctx(pi)), /persistence failed/);
+  pi.appendEntry = append;
+  await pi.events.get("context")({ messages: [] }, ctx(pi));
+  assert.deepEqual(latestState(pi), before);
+  await openCapability(pi, "history");
+  const loaded = structuredClone(latestState(pi));
+  const create = currentTool(pi, "compass_plan_create");
+  pi.appendEntry = () => { throw new Error("disk full"); };
+  await assert.rejects(() => create.execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi)), /persistence failed/);
+  pi.appendEntry = append;
+  await pi.events.get("context")({ messages: [] }, ctx(pi));
+  assert.deepEqual(latestState(pi), loaded);
+  assert.equal((await currentTool(pi, "compass_plan_create").execute("retry", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi))).isError, undefined);
+});
+
+test("unconfirmed host append is reconciled from native history, never called rolled back", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  await captureGoal(pi);
+  const append = pi.appendEntry;
+  pi.appendEntry = (type, data) => { append(type, data); throw new Error("after append"); };
+  await assert.rejects(() => pi.tools.get("compass_open").execute("open", { capabilities: ["history"] }, undefined, undefined, ctx(pi)), /persistence failed.*not activated/);
+  pi.appendEntry = append;
+  await pi.events.get("context")({ messages: [] }, ctx(pi));
+  assert.ok(latestState(pi).activeCapabilities.includes("history"));
+});
+
+test("unsupported native GoalRun snapshot fails without overwriting raw history", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  pi.entries.push({ type: "custom", customType: "pi-compass-v2.goalrun", data: { schemaVersion: 6, goal: {}, plan: {} } });
+  const before = structuredClone(pi.entries);
+  await assert.rejects(() => pi.events.get("session_start")({}, ctx(pi)), /Unsupported.*schema/);
+  assert.deepEqual(pi.entries, before);
+});
+
 test("RouteSet capability exposes structured selection without creating a DAG", async () => {
   const pi = fakePi();
   extensionFactory(pi);
@@ -247,7 +290,7 @@ test("cross-file write attempts automatically surface planning tools without cre
 
   await pi.events.get("context")({ messages: [] }, ctx(pi));
   assert.ok(pi.activeNames().includes("compass_plan_create"), "planning is surfaced at the next model-request boundary after cross-file work starts");
-  assert.equal(pi.entries.at(-1).data.activeCapability, "planning");
+  assert.deepEqual(pi.entries.at(-1).data.activeCapabilities, ["planning"]);
   assert.equal(pi.entries.at(-1).data.plan.tasks.length, 0, "Runtime exposes planning but never invents a semantic DAG");
   assert.match(pi.entries.at(-1).data.autoActivation.reason, /3 distinct write targets/);
   const context = await pi.events.get("context")({ messages: [{ role: "user", content: "Continue" }] }, ctx(pi));
@@ -975,7 +1018,7 @@ test("goal change requires a recorded explicit scope update and preserves origin
   const result = await change.execute("change", { updateId: "U1", action: "apply", newGoal: "Implement online visual editing" }, undefined, undefined, ctx(pi));
   assert.equal(latestState(pi).goal.original, "Goal: read the workbook locally");
   assert.equal(latestState(pi).goal.current, "Implement online visual editing");
-  assert.equal(latestState(pi).activeCapability, "root");
+  assert.deepEqual(latestState(pi).activeCapabilities, []);
   assert.ok(!pi.activeNames().includes("compass_open"), "the loader is hidden again when the pending Goal-change capability is consumed and no other group applies");
 });
 
@@ -1038,20 +1081,6 @@ test("successful custom-entry persistence avoids duplicating full state in tool 
   assert.equal(latestState(second).decisions.at(-1).summary, "Keep schema stable");
   assert.ok(second.activeNames().includes("compass_state"));
 });
-
-test("state survives tool-result fallback when custom-entry persistence is unavailable", async () => {
-  const first = fakePi();
-  delete first.appendEntry; // exercise the documented tool-result fallback path
-  extensionFactory(first);
-  await captureGoal(first, "Goal: keep the original target and preserve material decision checkpoints.");
-  await openCapability(first, "history");
-  const saved = await currentTool(first, "compass_decision").execute("decision", { summary: "Use a disposable DB", rationale: "Avoid destructive reset", evidence: "Test config supports isolated DB" }, undefined, undefined, ctx(first));
-  const second = fakePi();
-  extensionFactory(second);
-  await second.events.get("session_start")({}, { cwd: "/tmp/example-project", sessionManager: { getBranch: () => [{ type: "message", message: { role: "toolResult", toolName: "compass_decision", details: saved.details } }], getEntries: () => [] } });
-  assert.equal(second.activeNames().filter((name) => name.startsWith("compass_")).length, 5, "restored history loadout has context, compact state, and decision/checkpoint/event tools; no redundant loader");
-});
-
 
 test("parallel state mutations serialize; one stale mutation fails without racing", async () => {
   const pi = fakePi();
@@ -1154,7 +1183,7 @@ test("message_end captures Human steering messages and applies explicit Goal rep
   assert.equal(state.goal.version, 2);
   assert.equal(state.plan.tasks.length, 0);
   assert.equal(state.goalChanges.at(-1).previousGoal, "Goal: finish mutation delivery");
-  assert.equal(state.activeCapability, "root");
+  assert.deepEqual(state.activeCapabilities, []);
   const projected = await pi.events.get("context")({ messages: [{ role: "user", content: "Continue" }] }, ctx(pi));
   assert.equal(projected, undefined);
   const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);

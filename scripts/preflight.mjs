@@ -82,7 +82,7 @@ if (manifest?.pi?.extensions?.includes("./src/index.ts") && fs.existsSync(path.j
 } else {
   add("FAIL", "Compass package", "package.json must declare pi.extensions=[\"./src/index.ts\"] and the entry file must exist");
 }
-const goalRunPath = path.join(packageRoot, "src", "goal-run-v0-9-0.mjs");
+const goalRunPath = path.join(packageRoot, "src", "goal-run.mjs");
 const requiredGoalRunExports = [
   "GOAL_RUN_API_VERSION", "GOAL_RUN_RELEASE", "applyGoalChange", "dismissGoalChangeCandidate", "availableCapabilities", "acceptanceStatus", "goalOutcomeStatus", "planningActivationSignal",
   "buildGoalAnchor", "buildGoalDetails", "buildIssueReview", "buildRecentEvents", "buildStateSnapshot", "stripConventionSections", "triageIssue",

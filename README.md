@@ -1,73 +1,62 @@
-# Pi Compass V2 — 0.9.1
+# Pi Compass V2 — 0.10.0
 
-> **Unreleased development:** this branch contains context-foundation and native same-session frame changes requiring Pi >=1.5.2. `compass_context` uses Pi `turn_end` boundary drafts; it does not create another Session or Agent Loop. See [the implementation TODO and current evidence](./docs/architecture-v0.10.0.md). The v0.9.1 release manifest and validation records describe the historical release, not acceptance of these changes. No v0.10.0 release is claimed.
+Pi Compass is an agent-only Pi extension for reducing the total cost of completing arbitrary Goals without lowering correctness. It stays inside one Pi session: Pi owns the raw transcript and native projection; Compass owns compact Goal/context control; Code Mode, pi-subagents and pi-await remain the execution authorities.
 
-Pi Compass is an agent-only Pi extension. Its objective is to reduce the total practical cost of completing arbitrary Goals without lowering correctness or delivery quality. It is not a human-facing workflow UI.
+## What 0.10.0 provides
 
-## 0.9.1 changes
+- Same-session attention frames with explicit `ref`/`copy` capture, scoped values, copy-on-write, versioned source IDs and protocol-safe return/drop/edit operations.
+- Qualified retention through native compaction boundaries. Pinned data is user-context data, not system authority; original Human messages and executed calls remain read-only.
+- On-demand active/parent/history lexical retrieval, exact version/range loads, whole-value moves, and verified project-relative artifact spill/reload.
+- Explicit Skill retention and `active|handled|retired` handling with Goal/session lifetimes. Failed or truncated reads cannot be activated as complete Skills.
+- Human-approved DAGs: exact structured questionnaire correlation, material-change invalidation, evidence-bearing assessments, dependency gating, unknown-run fail-closed behavior, and native structured delegation.
+- RouteSets separate from DAGs: explicit route selection, Human-authorized bounded exploration, shared acceptance/caveat comparison, and acceptance-gated competitor cancellation.
+- Native watch ownership by arm identity, repeating/lost/terminal lifecycle handling, branch reconciliation, and explicit frame-to-parent transfer.
 
-- **GoalRun schema/API v7.** Existing v2-v6 states migrate to v7. The active Goal, versioned Human constraints, decisions, plan, acceptance and bounded event history remain the single Compass continuity source.
-- **Structured Human decisions.** When `ask_user_question` returns structured `details`, Compass preserves question/answer semantics, selected multi-values, notes, unanswered indexes and global notes. Large option previews are not duplicated; only `hasPreview` is retained.
-- **Correct decline/error distinction.** A Human decline is a decision. UI load failures and validation errors are `human_questionnaire_error` events, not Human decisions. Older text-only result envelopes still use the prior capture path.
-- **Architecture boundary for the next step.** `docs/architecture-v0.9.0.md` defines RouteSet separately from DAG, Agent-owned attention, Pi-native append-only Context Edit, the Context Ledger and Caveat semantics. The v0.10 development branch now has the first native frame core; nested/reload/provider acceptance and retention semantics remain unaccepted TODOs.
-- **No new runtime dependency.** TypeBox is host-provided by Pi and is declared only as `peerDependencies: { "typebox": "*" }`; it is not installed into the Compass package.
+## Important boundaries
 
-## Retained v0.8 execution model
+- No second Pi session, transcript store, conventions registry, scheduler, polling observer, or automatic route fan-out.
+- Lexical retrieval is not semantic search. Similarity and repeated/subset-result automation are not silently claimed.
+- Filesystem effects are not rolled back by Compass. Artifact writes report possible orphans if a later native commit fails.
+- Stock Pi 1.5.2 has no general awaited post-compaction canonical-restoration boundary. Compass uses request-side qualified overlays and later existing native boundaries instead of modifying Pi.
+- Recursive Compass use inside pi-subagents children is fail-closed because the installed delegation contract does not inherit Compass extensions.
+- Local tests use installed Pi projection/runner adapters. Real AgentSession/provider behavior, provider cost/cache behavior, and semantic quality require the separate Human acceptance below.
 
-- Explicit executor ownership: `parent` for coupled reasoning/mutations/final integration, `code` for deterministic Code Mode batching, and `subagent` for isolated read-only semantic investigation.
-- Automatic dispatch only for explicitly declared, justified, dependency-ready read-only Subagent DAG tasks through the public `pi-subagents@0.84.0` Structured Delegation API.
-- Human veto and exact-identity cancellation; unknown child outcomes fail closed and are never automatically retried.
-- Narrow provider fallback only for recognized quota/rate-limit or availability errors.
-- Compact Goal state, composite revision/event cursors, bounded history with explicit gap reporting, and risk-proportionate acceptance.
-- Task completion, Agent-reported acceptance and independent verification remain distinct.
+## Requirements
 
-A DAG is optional. Simple Goals remain on the light default loadout. The Agent chooses the route and decomposition; code validates deterministic boundaries.
-
-## Released v0.9.1 compatibility target
-
-- Pi: `>=1.4.0` for the historical v0.9.1 release. The current unreleased development branch requires Pi `>=1.5.2` for native `context_with_system` and actionable boundary behavior; do not treat the historical target as current runtime acceptance.
-- `pi-subagents`: pinned target `0.84.0`; its delegation declaration and runtime export are byte-identical to the supplied 0.83.1 baseline.
-- `@juicesharp/rpiv-ask-user-question`: tested against the supplied source `2.15.0`; text-only fallback remains supported.
-- GoalRun: schema/API v7.
+- Pi: `>=1.5.2` for the current `context_with_system` integration.
 - Node.js: `>=22.16.0`.
+- TypeBox is supplied by Pi as a peer dependency; Compass must not install a package-local copy.
+- pi-subagents and ask-user-questions must be installed and enabled by the Human's Pi configuration when those capabilities are used.
 
-## Local checks
+## Local validation
 
 ```bash
 npm ci --ignore-scripts --omit=peer
 npm run test:core
 npm run test:non-extension
 npm test
-node scripts/preflight.mjs /path/to/separate-target-project --static-only
-node scripts/check-subagents-contract.mjs --report evidence/pi-subagents-0.84.0-contract.txt --expected 0.84.0
-bash -n scripts/run-live-acceptance.sh
+npm run preflight
+node scripts/measure-context.mjs
 ```
 
-`npm ci --omit=peer` is intentional: Pi supplies `typebox`; installing a package-local copy can bypass Pi's module mapping. Full `npm test` resolves TypeBox from the installed Pi package through `scripts/register-pi-host-typebox.mjs` and therefore requires Pi >=1.5.2 on PATH for the current development tests (or `PI_CODING_AGENT_PACKAGE_ROOT`).
+The current local milestone checks are recorded in the changelog and architecture document. `docs/measurements-v0.10.0.md` contains one bounded synthetic local measurement; it is not provider or token evidence.
 
-The 2026-10-31 user-side v0.9.0 evidence records 89/89 core and 187/187 full tests, with static preflight passing. Live Pi was not started because the installed pi-subagents 0.84.0 did not match the package's old 0.83.1 pin. v0.9.1 updates that compatibility baseline and the TypeBox host dependency contract; exact v0.9.1 live acceptance remains pending. See `docs/validation-v0.9.1.md`.
+## Human acceptance
 
-## Configuration proposal
+In a disposable Pi session rooted at this package (or an explicit safe fixture project):
 
-The existing v0.8.0 configuration merger/checker remains. It proposes Pi `settings.json` and the pi-subagents runtime config separately, never edits either original, and removes obsolete `fallbackModels`. Review both generated files before adopting them. The settings proposal may contain credentials; keep it local and never upload it.
+1. Run `/compass-preflight` and confirm the active registry and native dependencies.
+2. Capture a simple Goal and verify the light loadout remains light.
+3. Use `compass_context` for a small `call`/`return`, then search and pin one qualified value. Compact or navigate only through native Pi operations and verify the value remains qualified.
+4. Run `/compass-live-acceptance` only if provider cost is acceptable. It performs real read-only child work and writes a bounded report under `/tmp`.
+5. Inspect the report and session behavior. A local test pass is not a live provider acceptance result.
 
-## Live acceptance
+Do not use a production session for the live acceptance command. It refuses non-empty Goal state, but provider calls and filesystem fixtures still have real effects.
 
-The inherited RC6 evidence demonstrates a real Pi 1.4.0 / pi-subagents 0.83.1 structured-delegation cycle for the v0.8.0 predecessor. The supplied 0.84.0 contract report shows the public delegation declaration and runtime export are byte-identical to that baseline. Neither historical run is a live run of the v0.9.1 bytes. The original RC6 report remains preserved with its historical FAIL status and independent reconciliation in `evidence/live-rc6/`.
+## References
 
-For a new isolated runtime run, execute:
-
-```bash
-bash scripts/run-live-acceptance.sh
-```
-
-When the isolated Pi TUI opens, run `/compass-live-acceptance`, wait for the report, then exit Pi. The command uses the current project if it has `package.json` and `README.md`; otherwise it falls back to the Compass package. You can pass an explicit fixture root: `/compass-live-acceptance /path/to/project`. The test makes at least three read-only child calls and may incur provider cost. Original settings are not modified. A v0.9.1 live PASS is still required before claiming runtime compatibility for these exact bytes.
-
-## Architecture and handoff
-
-- [`docs/design.md`](./docs/design.md): current design contract.
-- [`docs/architecture-v0.9.0.md`](./docs/architecture-v0.9.0.md): RouteSet, Messages, Context Edit, Attention and Caveat design boundaries.
-- [`docs/validation-v0.9.1.md`](./docs/validation-v0.9.1.md): current validation results and remaining blockers. The prior `docs/validation-v0.9.0.md` is retained as historical evidence.
-- [`handoff.md`](./handoff.md): delivery state, exact next steps and user-side verification.
-
-Historical v0.5.0-v0.7.0 session analyses and field baselines are included. The raw JSONL exports are not bundled; see `handoff.md` for the evidence boundary.
+- [`docs/design.md`](./docs/design.md) — ownership and correctness contract.
+- [`docs/architecture-v0.10.0.md`](./docs/architecture-v0.10.0.md) — requirement-linked M0–M7 checklist and evidence boundaries.
+- [`docs/measurements-v0.10.0.md`](./docs/measurements-v0.10.0.md) — bounded local measurement.
+- [`handoff.md`](./handoff.md) — current delivery state and Human feedback path.
+- Historical v0.9.x validation and session evidence remain under `docs/validation-v0.9.1.md` and `evidence/`; they are not evidence for the current bytes.

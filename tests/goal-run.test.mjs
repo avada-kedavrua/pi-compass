@@ -41,7 +41,7 @@ import {
   selectRoute,
   updateCompetitorCancellation,
   routeSetStatus,
-} from "../src/goal-run-v0-9-0.mjs";
+} from "../src/goal-run.mjs";
 import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
 import { createOrRevisePlan, emptyDagState, readyTasks, updateTasks } from "../src/dag-core.mjs";
 
@@ -133,6 +133,29 @@ test("selected RouteSet route stays isolated from the DAG until the Agent create
   assert.equal(state.plan.tasks.length, 0);
   assert.equal(state.routeSet.selectedRouteId, "routeA");
   assert.equal(state.plan.routeId, undefined);
+});
+
+test("selecting a route rebinds an existing unscoped DAG and requires fresh approval", () => {
+  for (const structured of [false, true]) {
+    let state = withPlan(withGoal());
+    state = createRouteSet(state, { expectedStateVersion: 0, baselineRef: "git:baseline", acceptanceCriteria,
+      routes: [{ routeId: "routeA", summary: "Existing approach" }, { routeId: "routeB", summary: "Alternative" }] }).state;
+    assert.equal(dagApprovalStatus(state).approved, false);
+    const before = state.plan.revision;
+    if (structured) {
+      const request = state.routeSet.selectionRequest;
+      state = bindRouteSetQuestionnaire(state, { expectedStateVersion: 1, questionnaire: request.questionnaire }, "route-entry").state;
+      state = recordRouteSelection(state, { expectedStateVersion: 1, selectionRequestId: request.id, sourceEntryId: "route-entry",
+        questionnaire: { outcome: "answered", answers: [{ kind: "option", answer: "routeA", selected: ["routeA"] }] } }).state;
+    } else state = selectRoute(state, { expectedStateVersion: 1, routeId: "routeA" }).state;
+    assert.equal(state.plan.routeId, "routeA");
+    assert.ok(state.plan.revision > before);
+    assert.equal(state.plan.approval, null);
+    assert.throws(() => transitionTasks(state, "start", [{ id: "api" }], updateTasks), /approval/);
+    state = approvePlan(state);
+    assert.equal(dagApprovalStatus(state).approved, true);
+    assert.equal(transitionTasks(state, "start", [{ id: "api" }], updateTasks).state.plan.tasks[0].status, "in_progress");
+  }
 });
 
 test("first prompt is immutable Original Goal; later prompts are recorded updates", () => {
@@ -464,39 +487,6 @@ test("questionnaire UI and validation errors are events, not Human decisions", (
   assert.equal(mistakenDecision.kind, "questionnaire_error");
 });
 
-test("schema v6 Human decisions migrate into bounded v7 questionnaire records", () => {
-  const legacy = {
-    schemaVersion: 6,
-    goal: { original: "Goal: preserve the route choice", current: "Goal: preserve the route choice", version: 1 },
-    humanDecisions: [{
-      id: "H3",
-      at: "2026-10-29T10:00:00.000Z",
-      source: "ask_user_question",
-      sourceCallId: "legacy-q3",
-      goalVersion: 1,
-      text: "Answered: local frontend",
-      summary: "Local frontend",
-      questionnaire: {
-        outcome: "answered",
-        answers: [{
-          questionIndex: 0,
-          question: "Where?",
-          kind: "option",
-          answer: "Local",
-          preview: "x".repeat(5000),
-          notes: "n".repeat(500),
-        }],
-      },
-    }],
-  };
-  const migrated = normalizeGoalRunState(legacy);
-  assert.equal(migrated.schemaVersion, 7);
-  assert.equal(migrated.humanDecisions[0].questionnaire.outcome, "answered");
-  assert.equal(migrated.humanDecisions[0].questionnaire.answers[0].hasPreview, true);
-  assert.equal(migrated.humanDecisions[0].questionnaire.answers[0].notes.length, 300);
-  assert.equal("preview" in migrated.humanDecisions[0].questionnaire.answers[0], false);
-});
-
 test("explicit Human work instructions persist separately from ordinary updates", () => {
   let state = withGoal("Goal: ship the feature");
   state = captureHumanPrompt(state, "用 rg 不用 grep，用 fd 不用 find，不用 cd，你当前就在 cwd").state;
@@ -571,35 +561,8 @@ test("changing Goal archives old history by version without deleting evidence or
 });
 
 
-test("v0.2/v0.3 state migrates to v7 and keeps capability state compatible", () => {
-  const migrated = normalizeGoalRunState({
-    schemaVersion: 2,
-    stateRevision: 8,
-    goal: { original: "Old goal", current: "Old goal", version: 1, acceptanceCriteria: ["Tests pass"], updates: [], changes: [] },
-    plan: emptyDagState(),
-    activeCapability: "history",
-    sessionDirectives: [{ id: "S1", text: "Use rg", at: "2026-10-23T00:00:00.000Z" }],
-    decisions: [{ id: "D1", summary: "old decision" }],
-    checkpoints: [], trace: { failures: [], writes: [] },
-  });
-  assert.equal(migrated.schemaVersion, 7);
-  assert.deepEqual(migrated.activeCapabilities, ["history"]);
-  assert.equal(migrated.goal.criteria[0].status, "unverified");
-  assert.equal(migrated.sessionDirectives[0].goalVersion, 1);
-  assert.equal(migrated.decisions[0].goalVersion, 1);
-});
-
-test("v0.4 GoalRun state migrates to schema v7 without losing Goal, plan, or evidence", () => {
-  let state = withPlan(withGoal("Goal: migrate the v0.4 state"));
-  state.schemaVersion = 4;
-  state.stateRevision = 42;
-  state.sessionDirectives = [{ id: "S1", updateId: "U1", at: "2026-10-24T00:00:00.000Z", goalVersion: 1, text: "Do not change unrelated files", summary: "Scope restriction" }];
-  const migrated = normalizeGoalRunState(state);
-  assert.equal(migrated.schemaVersion, 7);
-  assert.equal(migrated.stateRevision, 42);
-  assert.equal(migrated.goal.current, "Goal: migrate the v0.4 state");
-  assert.equal(migrated.plan.tasks.length, 3);
-  assert.equal(migrated.sessionDirectives[0].text, "Do not change unrelated files");
+test("GoalRun rejects obsolete schema versions instead of migrating or silently reinterpreting them", () => {
+  assert.throws(() => normalizeGoalRunState({ schemaVersion: 6, goal: { original: "obsolete" }, plan: emptyDagState() }), /Unsupported.*schema/);
 });
 
 test("explicit Goal label updates current Goal and scopes old directives to the previous version", () => {
@@ -766,23 +729,6 @@ test("numbered Goal requirements pin explicit hard clauses but not ordinary work
   assert.ok(pinnedText.some((item) => /Never persist the token/.test(item)));
   assert.ok(!pinnedText.some((item) => /First inspect the current code/.test(item)));
   assert.ok(!pinnedText.some((item) => /Then implement the smallest/.test(item)));
-});
-
-test("legacy GoalRun v5 state infers pinned constraints from retained source text", () => {
-  const prompt = `Goal: preserve the production boundary
-
-Restrictions
-- Never push from the yellow zone.
-- Credentials must not enter task subprocesses.
-- Only the configured daemon endpoint may return results.`;
-  const state = captureHumanPrompt(emptyGoalRunState(), prompt).state;
-  state.sessionDirectives = state.sessionDirectives.map(({ hard, pinned, ...legacy }) => legacy);
-  const migrated = normalizeGoalRunState(state);
-  const pinned = migrated.sessionDirectives.filter((item) => item.pinned === true);
-  assert.equal(pinned.length, 3);
-  assert.ok(pinned.some((item) => /yellow zone/.test(item.text)));
-  assert.ok(pinned.some((item) => /task subprocesses/.test(item.text)));
-  assert.ok(pinned.some((item) => /configured daemon endpoint/.test(item.text)));
 });
 
 test("ready pending tasks can be completed directly, but dependency gates still apply", () => {
@@ -956,19 +902,6 @@ test("Goal criteria and DAG task completion remain separate states", () => {
 });
 
 
-test("same prompt after v0.2 migration is not re-recorded as update or directive", () => {
-  const prompt = "Goal: keep the current public API stable and test the package";
-  const migrated = normalizeGoalRunState({
-    schemaVersion: 2,
-    goal: { original: prompt, current: prompt, version: 1, updates: [], nextUpdateNumber: 1 },
-  });
-  const result = captureHumanPrompt(migrated, prompt, { source: "before_agent_start" });
-  assert.equal(result.captured, false);
-  assert.equal(result.kind, "duplicate_goal");
-  assert.equal(result.state.goal.updates.length, 0);
-  assert.equal(result.state.sessionDirectives.length, 0);
-});
-
 test("Goal details do not echo identical Goal text as update, directive, and event history", () => {
   const prompt = "Goal: preserve public API and produce a tested build";
   let state = withGoal(prompt);
@@ -993,7 +926,7 @@ test("initial Goal is not duplicated as a session directive", () => {
 });
 
 test("route review signal requires a repeated failure signature, not merely several unrelated errors", async () => {
-  const { shouldSurfaceIssueReview } = await import("../src/goal-run-v0-9-0.mjs");
+  const { shouldSurfaceIssueReview } = await import("../src/goal-run.mjs");
   let state = withGoal();
   state = recordFailure(state, { tool: "bash", error: "file not found: /tmp/a" });
   state = recordFailure(state, { tool: "read", error: "permission denied" });
@@ -1128,19 +1061,6 @@ test("acceptance range warning detects a mismatch even when unrelated criteria e
   assert.equal(buildStateSnapshot(state).acceptance.referenceMismatch.range, "AC1-AC10");
 });
 
-test("v4 state migration infers the current Goal source update when retained", () => {
-  const legacy = withGoal("Goal: original");
-  const updated = captureHumanPrompt(legacy, `# Task\nContinue work, Goal v2: repair the integration and preserve acceptance.\nAcceptance criteria\n- The integration test passes.`);
-  const candidate = explicitGoalChangeUpdates(updated.state)[0];
-  const applied = applyGoalChange(updated.state, { updateId: candidate.id });
-  const legacyState = structuredClone(applied.state);
-  legacyState.schemaVersion = 4;
-  delete legacyState.goal.sourceUpdateId;
-  const normalized = normalizeGoalRunState(legacyState);
-  assert.equal(normalized.goal.sourceUpdateId, candidate.id);
-  assert.match(buildGoalDetails(normalized), /Human message that established Current Goal/);
-});
-
 test("capture ledger stores fingerprints, while a long current-Goal source survives later updates", () => {
   let state = withGoal("Goal: initial target");
   const filler = `Context note ${"retain provenance without duplicating raw prompts ".repeat(42)}\n`;
@@ -1163,23 +1083,6 @@ test("capture ledger stores fingerprints, while a long current-Goal source survi
   assert.ok(state.goal.updates.some((item) => item.id === candidate.id), "the current Goal source update remains addressable beyond the recent-update window");
   assert.match(buildGoalDetails(state), /The adapter-free path has a focused integration test/);
   assert.ok(state.captureLedger.every((item) => item.preview.length <= 140));
-});
-
-test("legacy raw capture-ledger entries migrate to compact fingerprints without losing current Goal source", () => {
-  let state = withGoal("Goal: initial");
-  const source = "# Task\nContinue work, Goal v2: preserve the source after migration.\nAcceptance criteria\n- Source survives migration.";
-  const captured = captureHumanPrompt(state, source, { source: "message_end", messageId: "legacy-source" });
-  const candidate = explicitGoalChangeUpdates(captured.state)[0];
-  state = applyGoalChange(captured.state, { updateId: candidate.id }).state;
-  const legacy = structuredClone(state);
-  legacy.schemaVersion = 4;
-  delete legacy.goal.sourceUpdateText;
-  delete legacy.goal.sourceUpdateTruncated;
-  legacy.captureLedger = [{ messageId: "legacy-source", source: "message_end", text: source, at: new Date().toISOString() }];
-  const normalized = normalizeGoalRunState(legacy);
-  assert.equal(normalized.goal.sourceUpdateText, source);
-  assert.ok(!Object.hasOwn(normalized.captureLedger[0], "text"));
-  assert.match(buildGoalDetails(normalized), /Source survives migration/);
 });
 
 test("Goal anchor warns when Subagents are registered but not model-visible", () => {

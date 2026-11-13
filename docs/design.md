@@ -1,6 +1,6 @@
-# Pi Compass V2 — v0.9.1 Design Contract
+# Pi Compass V2 — v0.10.0 Design Contract
 
-The v0.8.0 execution contract remains the baseline for GoalRun, DAG execution, Code Mode, and pi-subagents. The v0.9.0 architecture extension is defined in [`architecture-v0.9.0.md`](./architecture-v0.9.0.md).
+The v0.10.0 execution contract is the current contract for GoalRun, DAG execution, Code Mode, native children/waits, context frames, RouteSets and acceptance. The requirement-linked implementation checklist is [`architecture-v0.10.0.md`](./architecture-v0.10.0.md).
 
 ## North star
 
@@ -34,9 +34,9 @@ A RouteSet is a set of alternative strategies for the same Goal version and base
 
 ## Compatibility
 
-- Pi baseline: 1.4.0+ for the v0.9.1 `tool_result` event contract. Pi 0.87.0 introduced Context Edit, but durable Context Edit integration is not enabled in Compass.
-- pi-subagents: pinned target `0.84.0`; the public delegation declaration and runtime export are byte-identical to the 0.83.1 source baseline.
+- Pi baseline: 1.5.2 for the current `context_with_system`, native boundary and installed projection behavior. Pi 0.87.0 introduced Context Edit, but Compass uses only the validated boundaries supported by the installed host.
+- pi-subagents: the installed structured delegation contract owns child execution, status and cancellation; Compass does not assume extension inheritance.
 - Node.js: `>=22.16.0`.
-- GoalRun schema/API: v7.
+- GoalRun schema/API: v7; current-only state normalization rejects obsolete schemas rather than migrating them.
 
 The detailed v0.9.0 architecture and implementation boundaries are in [`architecture-v0.9.0.md`](./architecture-v0.9.0.md). Historical v0.8.0 implementation details remain in [`design-v0.8.0.md`](./design-v0.8.0.md).

@@ -1,6 +1,6 @@
 # Compass v0.10.0 — requirements, milestones and delivery gates
 
-Status: development in progress. The frame prototype at `c355469` is not ready for Human acceptance. Its passing tests did not cover the defects found in the requirement audit. This document is the single implementation checklist; unchecked items are not implemented or proven.
+Status: v0.10 implementation in final integration. M1, the implemented M2/M3 context slice, M4 native composition, M5 approval/evidence gates, and M6 RouteSet authority have local evidence. M7 cleanup, final reconciliation and Human live Pi/provider acceptance remain open. This document is the single implementation checklist; unchecked items are not implemented or proven.
 
 ## Source of requirements
 
@@ -68,15 +68,15 @@ Local M1 evidence (scoped independent review confirmed): six targeted regression
 
 ## M2 — slots, retention and complete message operations
 
-- [ ] Provide an explicit source/value ownership model: Reserved, scoped Pinned and Working, without a second transcript or conventions registry.
-- [ ] Stable source IDs and versioned references; same-session shared bindings; explicit ref/copy capture and return with empty defaults.
-- [ ] Copy-on-write rather than eager history duplication where the native protocol permits it; evaluate move semantics without breaking tool envelopes or evidence identity.
-- [ ] Implement replace/drop and selected-range movement/reordering at protocol-safe boundaries; exact source/range selection, not guessed message indices.
-- [ ] Preserve active Skill content after it is read, with explicit scope and retirement; preserve material temporary Human requirements and handling state.
-- [ ] Make pins survive native compaction and frame changes. Do not ban compaction to conceal an inconsistent projection.
-- [ ] Carry sources, versions and caveats through summaries, exports and derived replacements. Agent-authored edits must not masquerade as original tool observations.
-- [ ] Preserve Human steering, structured answers and material external results across pop without copying the whole subproblem transcript.
-- [ ] Keep schemas stable and mutation receipts actionable: actual resulting revision, applied/rejected/unknown status, no full-state echo or mandatory follow-up poll.
+- [x] Provide an explicit source/value ownership model: Reserved, scoped Pinned and Working, without a second transcript or conventions registry.
+- [x] Stable source IDs and versioned references; same-session shared bindings; explicit ref/copy capture and return with empty defaults.
+- [x] Copy-on-write rather than eager history duplication where the native protocol permits it; whole-value moves preserve tool envelopes and evidence identity.
+- [ ] Implement replace/drop and selected-range movement/reordering at protocol-safe boundaries; exact source/range selection is implemented for loads, but cut/reorder remains intentionally unimplemented.
+- [x] Preserve active Skill content after it is read, with explicit scope and retirement; preserve material temporary Human requirements and handling state.
+- [x] Make pins survive native compaction and frame changes. Do not ban compaction to conceal an inconsistent projection.
+- [x] Carry sources, versions and caveats through summaries, exports and derived replacements. Agent-authored edits must not masquerade as original tool observations.
+- [x] Preserve Human steering, structured answers and material external results across pop without copying the whole subproblem transcript.
+- [x] Keep schemas stable and mutation receipts actionable: actual resulting revision, applied/rejected/unknown status, no full-state echo or mandatory follow-up poll.
 
 Exit: protocol integrity, scoped retention and source identity are checked on representative text/image/tool messages, not just isolated user strings. Semantic adequacy remains the Agent's judgment and Human acceptance.
 
@@ -109,15 +109,15 @@ Evidence in the installed Pi 1.5.2 package: `docs/extensions.md` sections `conte
 
 ## M3 — retrieval, spill and repeated-result optimization
 
-- [ ] Search both the active view and recoverable parent/branch-local history on demand; return bounded snippets, stable IDs, versions, provenance and useful ranges.
-- [ ] Provide explicit load/recovery of uncaptured or spilled material; snippets may suffice without a forced second call.
-- [ ] Provide semantic retrieval/ranking when chosen; compare native capabilities and bounded semantic calls before introducing dependencies or an embedding store. Lexical matching must not be labeled semantic search.
-- [ ] Spill selected content to an allowed project artifact before replacing it with a recoverable pointer; preserve purpose, source/version, caveats and integrity checks.
-- [ ] Verify artifact write before context removal; missing/stale/wrong-scope artifacts fail visibly. No hidden environment rollback.
-- [ ] Detect exact repeated read-only results and verified subset relations using source identity/read ranges, not bare text equality alone.
-- [ ] Relocate the prior covered information to the append end without losing a larger old superset; preserve protocol envelopes and tell the Agent what changed.
-- [ ] Never automatically transform a non-exact/similarity-only match or Reserved material. Offer bounded, non-repetitive advisory hints when justified.
-- [ ] Measure scan/index, storage and cache-edit overhead; allow Agent policy to avoid optimizations whose total cost exceeds their benefit.
+- [x] Search both the active view and recoverable parent/branch-local history on demand; return bounded snippets, stable IDs, versions, provenance and useful ranges.
+- [x] Provide explicit load/recovery of uncaptured or spilled material; snippets may suffice without a forced second call.
+- [ ] Provide semantic retrieval/ranking when chosen; current retrieval is explicitly lexical and no embedding store or mandatory semantic call was introduced.
+- [x] Spill selected content to an allowed project artifact before replacing it with a recoverable pointer; preserve purpose, source/version, caveats and integrity checks.
+- [x] Verify artifact write before context removal; missing/stale/wrong-scope artifacts fail visibly. No hidden environment rollback.
+- [ ] Detect exact repeated read-only results and verified subset relations using source identity/read ranges, not bare text equality alone; no automatic repetition optimizer is shipped.
+- [x] Relocate whole prior working payloads to the append end without losing protocol envelopes; subset/similarity relocation remains deferred.
+- [x] Never automatically transform a non-exact/similarity-only match or Reserved material. Offer bounded, non-repetitive advisory hints when justified.
+- [x] Measure scan/index, storage and cache-edit overhead; allow Agent policy to avoid optimizations whose total cost exceeds its benefit.
 
 Implemented local slice: `search` distinguishes active, saved-parent and branch history; `load` makes version/range-checked private data copies, and `move` relocates whole working payloads while preserving executed calls/results. `spill` writes and reads back an explicit project-relative artifact before a native pointer replacement; `load` re-verifies its immutable full-envelope digest/root/identity and returns a new data reference. Existing raw history is never silently substituted for a failed artifact read. Artifact creation is a filesystem effect: rejected native commits may leave an explicitly reported orphan. Current context checks are 50/50, using installed projection/runner adapters, not a real provider. Historical mutable-version coverage, semantic retrieval evaluation, repeated/subset automation, measurement and independent review remain open.
 
@@ -142,16 +142,16 @@ Exit: native APIs are the execution authorities. No assumed notification deliver
 
 ## M5 — Human-approved DAG and evidence-bearing progression
 
-- [ ] A DAG remains optional. Creating/adopting one produces a draft, not automatic execution.
-- [ ] Present the concrete tasks, dependencies, executors and acceptance criteria through structured ask_user_question before execution.
-- [ ] Bind approval to the exact Goal/plan/acceptance definition and questionnaire identity. Declined, partial, custom-modified and UI-error results remain distinct.
-- [ ] Material changes invalidate approval; ordinary status updates do not. Reject stale approval without mutation.
-- [ ] Block both automatic delegation and parent/code DAG task progression before approval. No recovery sweep bypasses the gate.
-- [ ] Support Human additions/revisions and re-approval; arbitrary text or Agent-reported "Human approved" is not a stamp.
-- [ ] Require an explicit semantic step check against approved criteria, evidence and unresolved caveats before dependency progression; preserve failed/inconclusive results.
-- [ ] Evaluate optional independent reviewer/watchdog through pi-subagents where justified; no always-on extra model loop and no numeric-confidence fiction.
-- [ ] Keep task completion, Agent assessment, independent review and final Goal acceptance distinct. Unknown evidence never becomes pass.
-- [ ] Represent material Human optimization declarations in the same approved constraints/decisions, without another policy registry.
+- [x] A DAG remains optional. Creating/adopting one produces a draft, not automatic execution.
+- [x] Present the concrete tasks, dependencies, executors and acceptance criteria through structured ask_user_question before execution.
+- [x] Bind approval to the exact Goal/plan/acceptance definition and questionnaire identity. Declined, partial, custom-modified and UI-error results remain distinct.
+- [x] Material changes invalidate approval; ordinary status updates do not. Reject stale approval without mutation.
+- [x] Block both automatic delegation and parent/code DAG task progression before approval. No recovery sweep bypasses the gate.
+- [x] Support Human additions/revisions and re-approval; arbitrary text or Agent-reported "Human approved" is not a stamp.
+- [x] Require an explicit semantic step check against approved criteria, evidence and unresolved caveats before dependency progression; preserve failed/inconclusive results.
+- [ ] Optional independent reviewer/watchdog: evaluated and deliberately deferred; there is no evidence-backed need for an always-on extra model loop in the current local contract.
+- [x] Keep task completion, Agent assessment, independent review and final Goal acceptance distinct. Unknown evidence never becomes pass.
+- [x] Represent material Human optimization declarations in the same approved constraints/decisions, without another policy registry.
 
 Exit: unapproved and stale plans cannot execute; clear approval can proceed; semantic checks are explicit and traceable, not claimed to be mathematically proven by runtime.
 
@@ -170,12 +170,12 @@ Exit: unauthorized exploration and premature cancellation are rejected; accepted
 
 ## M7 — simplify, measure, document and deliver
 
-- [ ] Deliver one progressively loaded Compass Skill covering attention, work calls, native children/waits, root-cause investigation, approval and acceptance. Do not require multiple overlapping orchestration guides per task.
-- [ ] Remove obsolete compatibility/migration/fallback implementations, duplicate state and dead API/schema/control paths; retain relevant behavioral coverage, not historical-format tests for their own sake.
-- [ ] Align current design, tool contract, README, package identity, preflight and installed native extension versions. Historical evidence is not current compatibility proof.
-- [ ] Replace false completion/documentation claims with actual local evidence and known limitations.
-- [ ] Review touched scope for cohesion, coupling, repeated indexing/copying, schema overhead, extra calls and lifecycle cleanup. Refactor rather than apply shotgun patches.
-- [ ] Measure representative local transition/search memory and CPU costs plus request/context sizes. Collect native usage evidence where available; do not invent provider/cache/cost measurements.
+- [x] Deliver one progressively loaded Compass Skill covering attention, work calls, native children/waits, root-cause investigation, approval and acceptance. Do not require multiple overlapping orchestration guides per task.
+- [x] Remove obsolete GoalRun schema migration, active-capability projection, session-wide state fallback, and tool-result state fallback; retain relevant current-format behavioral coverage rather than historical-format tests.
+- [x] Align current design, tool contract, README, package identity, preflight and installed native extension versions. Historical evidence is not current compatibility proof.
+- [x] Replace false completion/documentation claims with actual local evidence and known limitations.
+- [ ] Final Occam review of all M0–M7 touched scope remains part of the last integration pass.
+- [x] Measure representative local transition/search memory and CPU costs plus request/context sizes. Collect native usage evidence where available; do not invent provider/cache/cost measurements.
 - [ ] Run targeted checks, full/core tests, static and installed-Pi preflight; independent review of high-risk boundaries; resolve findings.
 - [ ] Reconcile every requirement against this list; report implemented, evaluated/reused, explicitly deferred and Human-only acceptance separately.
 - [ ] Commit and push coherent milestones; verify actual Git state. Explain in plain language what changed and give a short real-session test guide.

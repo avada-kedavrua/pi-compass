@@ -1,6 +1,6 @@
 {
   "name": "pi-compass-v2",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "private": true,
   "type": "module",
   "description": "Agent-first Pi extension with deterministic capability gating, evidence-aware Goal outcomes, and compact GoalRun continuity",

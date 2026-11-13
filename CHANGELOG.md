@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased — context foundation
+## 0.10.0 — local candidate (live Pi/provider acceptance pending)
 
+- Align the package, GoalRun release, README, current design contract and preflight identity at 0.10.0. Remove obsolete schema migration, active-capability projection, session-wide state fallback and tool-result state fallback. Unsupported native snapshots fail visibly without overwriting history. Centralize persistence failure handling, restore the last committed control state and reconcile the native branch before retrying; append-then-throw is unconfirmed, not claimed rolled back.
+- Bind DAG approval to the exact RouteSet/baseline/selected route and frame scopes. Selecting a route for an existing unscoped DAG invalidates approval and task evidence and requires a new exact questionnaire before execution.
+- Add one progressively loaded `.agents/skills/pi-compass/SKILL.md` covering attention, native children/waits, root-cause recovery, approval, routes and acceptance. Add `scripts/measure-context.mjs` and record bounded local transition/search/context-size measurements; these do not claim provider cost, cache, or semantic quality.
 - Implement the M6 RouteSet slice in GoalRun: structured route selection, explicit scoped/budgeted exploration authorization, correlated competitor evidence against shared acceptance criteria/caveats, exact-identity acceptance-gated cancellation with request/ack/terminal/unknown states, and selected-route DAG isolation. Route alternatives never auto-fan-out or become DAG siblings. Path-scope drift remains advisory; the redundant Compass global write lock was removed.
 
 - Stop injecting a full GoalRun anchor before every provider request; persist internal state without duplicating it as a model message when Pi custom-entry persistence succeeds.
@@ -12,7 +15,7 @@
 - Replace the frame prototype's premature completion checklist with a requirement-linked M0–M7 implementation plan; unimplemented retrieval, retention, approval, routes and integration remain explicit.
 - Repair canonical frame restoration: preserve parent summaries/omissions, release raw child process even after native compaction, retain ref writes across nested/aborted work, preserve complete tool exchanges, and make drop functional. Use persisted entry identities rather than session-global provider call IDs.
 - Use current-only context schema v4 and intent/commit receipts binding both native drafts and resulting control state. Activate only committed branch-local state; incomplete or altered persistence invokes the public abort path rather than silently resetting a frame. Prototype v1 context state is not migrated.
-- Fix review findings in steering/native-watch reconciliation and control-state receipt integrity. Installed projection/runner checks cover these boundaries with adapters; they do not prove live AgentSession/provider behavior. M2–M7 and Human acceptance remain pending.
+- Fix review findings in steering/native-watch reconciliation and control-state receipt integrity. Installed projection/runner checks cover these boundaries with adapters; they do not prove live AgentSession/provider behavior. The current requirement-level status is maintained in `docs/architecture-v0.10.0.md`.
 - Retain scoped pinned values through qualified text/image views and missing-only request overlays. Match complete outgoing envelopes, not native membership or metadata markers alone; preserve immutable source blocks under later handlers. Materialize omitted snapshots at the next existing native boundary without forcing a request, using composed state and integrity receipts. Immediate post-compaction canonical restoration still requires a Pi API change; M2 remains incomplete.
 
 - Add versioned active/parent/history retrieval, exact range loads and append-end working-value moves. Preserve raw records and tool envelopes; return new data references in native receipts. Lexical retrieval is not semantic search, and repeated-result automation is not implemented yet.

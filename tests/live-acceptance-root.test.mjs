@@ -31,7 +31,7 @@ test("live acceptance falls back to the Compass package root when the current pr
   fs.mkdirSync(cwd);
   fs.writeFileSync(path.join(cwd, "notes.txt"), "no package metadata");
   const compassRoot = path.join(dir, "compass");
-  makeProject(compassRoot, { name: "pi-compass-v2", version: "0.9.1", readme: "# Pi Compass V2\n" });
+  makeProject(compassRoot, { name: "pi-compass-v2", version: "0.10.0", readme: "# Pi Compass V2\n" });
   const result = resolveLiveAcceptanceFixture({ cwd, compassRoot });
   assert.equal(result.root, compassRoot);
   assert.equal(result.packageMeta.name, "pi-compass-v2");

@@ -18,9 +18,9 @@ import {
   selectReadySubagentTasks,
 } from "../src/execution-orchestrator.mjs";
 import { emptyDagState, createOrRevisePlan, taskAssessmentBinding, updateTasks } from "../src/dag-core.mjs";
-import { bindDagApprovalQuestionnaire, captureHumanDecision } from "../src/goal-run-v0-9-0.mjs";
+import { bindDagApprovalQuestionnaire, captureHumanDecision } from "../src/goal-run.mjs";
 import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
-import { emptyGoalRunState, captureHumanPrompt, normalizeGoalRunState, recordExecutionDrift, recordExecutionEvent, buildGoalAnchor, transitionTasks, revisePlanState } from "../src/goal-run-v0-9-0.mjs";
+import { emptyGoalRunState, captureHumanPrompt, normalizeGoalRunState, recordExecutionDrift, recordExecutionEvent, buildGoalAnchor, transitionTasks, revisePlanState } from "../src/goal-run.mjs";
 
 const task = (id, overrides = {}) => ({
   id,
@@ -240,17 +240,6 @@ test("child prompt preserves Goal and hard constraints while explicitly forbiddi
   assert.match(prompt, /Task ID: auth/);
   assert.match(prompt, /Why a separate Subagent context is justified/);
   assert.match(prompt, /structured result/);
-});
-
-test("v5 GoalRun migration never auto-delegates existing read-only tasks", () => {
-  const old = emptyGoalRunState();
-  old.schemaVersion = 5;
-  old.goal.original = "Inspect code";
-  old.goal.current = "Inspect code";
-  old.plan = { ...emptyDagState(), goal: "Inspect code", tasks: [task("a"), task("b")] };
-  const migrated = normalizeGoalRunState(old);
-  assert.equal(migrated.schemaVersion, 7);
-  assert.deepEqual(migrated.plan.tasks.map((item) => item.executor), ["parent", "parent"]);
 });
 
 test("material DAG revisions are refused while a Subagent batch is unresolved", () => {

@@ -4,7 +4,7 @@ import { approvalIsCurrent, clearDagApprovalAnswer, createDagApprovalRequest, da
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 
 export const GOAL_RUN_API_VERSION = 7;
-export const GOAL_RUN_RELEASE = "0.9.1";
+export const GOAL_RUN_RELEASE = "0.10.0";
 
 const MAX_UPDATES = 10;
 const MAX_DECISIONS = 8;
@@ -63,7 +63,6 @@ export function emptyGoalRunState() {
     goalChanges: [],
     trace: { failures: [], writes: [] },
     activeCapabilities: [],
-    activeCapability: "root", // Compatibility projection for v0.2.x readers.
     autoActivation: null,
     triageRuns: [],
     nextTriageNumber: 1,
@@ -85,7 +84,7 @@ function normalizeHumanDecisionRecord(value, index, fallbackVersion = 1) {
   return {
     id: typeof value.id === "string" && /^H\d+$/.test(value.id) ? value.id : `H${index + 1}`,
     at: typeof value.at === "string" ? value.at.slice(0, 64) : timestamp(),
-    source: clip(value.source || "migration", 80),
+    source: clip(value.source || "unknown", 80),
     sourceEntryId: typeof value.sourceEntryId === "string" ? value.sourceEntryId.slice(0, 128) : "",
     sourceCallId: typeof value.sourceCallId === "string" ? value.sourceCallId.slice(0, 128) : "",
     goalVersion: Number.isInteger(value.goalVersion) && value.goalVersion > 0
@@ -348,15 +347,14 @@ function retainGoalUpdates(items, sourceUpdateId = null) {
 }
 
 function compactCaptureLedgerItem(item) {
-  const legacyText = typeof item?.text === "string" ? item.text : "";
-  const preview = typeof item?.preview === "string" ? item.preview : legacyText;
+  if (!item || typeof item.fingerprint !== "string" || !item.fingerprint.trim() || !Number.isSafeInteger(item.textLength) || item.textLength < 0) return null;
   return {
-    ...(typeof item?.messageId === "string" && item.messageId ? { messageId: item.messageId } : {}),
-    source: clip(item?.source || "unknown", 48),
-    fingerprint: typeof item?.fingerprint === "string" ? item.fingerprint : textFingerprint(legacyText || preview),
-    textLength: Number.isSafeInteger(item?.textLength) && item.textLength >= 0 ? item.textLength : legacyText.length,
-    preview: clip(preview, 140),
-    at: typeof item?.at === "string" ? item.at : timestamp(),
+    ...(typeof item.messageId === "string" && item.messageId ? { messageId: item.messageId } : {}),
+    source: clip(item.source || "unknown", 48),
+    fingerprint: item.fingerprint.slice(0, 128),
+    textLength: item.textLength,
+    preview: clip(item.preview, 140),
+    at: typeof item.at === "string" ? item.at : timestamp(),
   };
 }
 
@@ -367,7 +365,8 @@ const nonEmpty = (value, name, max = 4000) => {
 
 export function normalizeGoalRunState(raw) {
   const empty = emptyGoalRunState();
-  if (!raw || typeof raw !== "object" || ![2, 3, 4, 5, 6, 7].includes(raw.schemaVersion)) return empty;
+  if (!raw) return empty;
+  if (typeof raw !== "object" || raw.schemaVersion !== 7) throw new Error("Unsupported Compass GoalRun schema. Open a new session or navigate to a supported branch; no state changed.");
   const state = {
     ...empty,
     ...raw,
@@ -403,6 +402,7 @@ export function normalizeGoalRunState(raw) {
   const maxTriageNumber = state.triageRuns.reduce((max, item) => Math.max(max, Number(String(item?.id ?? "").replace(/^T/, "")) || 0), 0) + 1;
   state.nextTriageNumber = Math.max(Number.isInteger(state.nextTriageNumber) ? state.nextTriageNumber : 1, maxTriageNumber);
   delete state.capabilityEpoch;
+  delete state.activeCapability;
   state.goal.changes = Array.isArray(state.goal.changes) ? state.goal.changes.slice(-MAX_GOAL_CHANGES) : [];
   state.goal.version = Number.isInteger(state.goal.version) && state.goal.version > 0 ? state.goal.version : 1;
   state.goal.sourceUpdateId = typeof state.goal.sourceUpdateId === "string" ? state.goal.sourceUpdateId : null;
@@ -473,9 +473,8 @@ export function normalizeGoalRunState(raw) {
     executionDrift: normalizeExecutionDrift(state.plan.executionDrift),
     tasks: Array.isArray(state.plan.tasks) ? state.plan.tasks.map((task) => ({
       ...task,
-      // Existing DAGs are never silently delegated during migration.
-      executor: raw.schemaVersion >= 6 && ["parent", "code", "subagent"].includes(task?.executor) ? task.executor : "parent",
-      agent: raw.schemaVersion >= 6 && task?.executor === "subagent" && ["scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"].includes(task?.agent) ? task.agent : "scout",
+      executor: ["parent", "code", "subagent"].includes(task?.executor) ? task.executor : "parent",
+      agent: task?.executor === "subagent" && ["scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"].includes(task?.agent) ? task.agent : "scout",
     })) : [],
   };
   if (!state.goal.current && state.goal.original) state.goal.current = state.goal.original;
@@ -490,72 +489,29 @@ export function normalizeGoalRunState(raw) {
   if (!state.trace || typeof state.trace !== "object") state.trace = { failures: [], writes: [] };
 
   const version = state.goal.version;
-  // Migrate v0.2.x single-capability state to additive capability state.
-  const legacyCapability = typeof raw.activeCapability === "string" ? raw.activeCapability : "root";
   state.activeCapabilities = Array.isArray(raw.activeCapabilities)
     ? [...new Set(raw.activeCapabilities.filter((item) => typeof item === "string" && item !== "root"))]
-    : legacyCapability !== "root" ? [legacyCapability] : [];
-  state.activeCapability = state.activeCapabilities.at(-1) ?? "root";
-
-  // Existing v0.2.x criteria were strings only. Migrate them to explicit evidence states.
-  if (!state.goal.criteria.length && state.goal.acceptanceCriteria.length) {
-    state.goal.criteria = state.goal.acceptanceCriteria.map((text, index) => ({
-      id: `AC${index + 1}`, text, required: true, status: "unverified", evidence: "",
-      goalVersion: version, updatedAt: null,
-    }));
-    state.goal.nextAcceptanceNumber = Math.max(state.goal.nextAcceptanceNumber, state.goal.criteria.length + 1);
-  }
+    : [];
   if (state.goal.criteria.length) state.goal.acceptanceCriteria = state.goal.criteria.filter((item) => item.goalVersion === version).map((item) => item.text);
-  const sortedGoalChanges = [...state.goalChanges].sort((a, b) => Date.parse(a.at || 0) - Date.parse(b.at || 0));
   for (const [index, item] of state.goal.updates.entries()) {
-    if (!Number.isInteger(item.goalVersion)) {
-      let inferredVersion = 1;
-      for (const change of sortedGoalChanges) {
-        if (Date.parse(item.at || 0) < Date.parse(change.at || 0)) break;
-        inferredVersion = (change.previousGoalVersion ?? inferredVersion) + 1;
-      }
-      item.goalVersion = Math.min(version, inferredVersion);
-    }
     if (!item.id) item.id = `U${index + 1}`;
     if (typeof item.sourceText === "string" && item.sourceText.length > MAX_TEXT) {
       item.sourceText = item.sourceText.slice(0, MAX_TEXT);
       item.sourceTextTruncated = true;
     }
   }
-  const legacyLedgerTextFor = (update) => {
-    if (!update) return "";
-    const exact = update.messageId
-      ? state.captureLedger.find((item) => item?.messageId === update.messageId && typeof item?.text === "string")
-      : null;
-    if (exact) return exact.text;
-    const prefix = String(update.text ?? "").slice(0, Math.min(160, String(update.text ?? "").length));
-    const fallback = prefix ? [...state.captureLedger].reverse().find((item) => typeof item?.text === "string" && item.text.startsWith(prefix)) : null;
-    return fallback?.text ?? "";
-  };
-  // Recover full source text from v5 snapshots created before the capture ledger
-  // was compacted. Pending candidates keep their bounded source until resolved.
-  for (const update of state.goal.updates) {
-    if (update?.goalChangeCandidate === true && update?.goalChangeResolution === "pending" && typeof update.sourceText !== "string") {
-      const sourceText = legacyLedgerTextFor(update);
-      if (sourceText) {
-        update.sourceText = sourceText.slice(0, MAX_TEXT);
-        update.sourceTextTruncated = sourceText.length > MAX_TEXT;
-      }
-    }
-  }
   if (!state.goal.sourceUpdateText && state.goal.sourceUpdateId) {
     const sourceUpdate = state.goal.updates.find((item) => item.id === state.goal.sourceUpdateId);
-    const sourceText = legacyLedgerTextFor(sourceUpdate) || sourceUpdate?.sourceText || sourceUpdate?.text || "";
+    const sourceText = sourceUpdate?.sourceText || sourceUpdate?.text || "";
     if (sourceText) {
       state.goal.sourceUpdateText = sourceText.slice(0, MAX_TEXT);
       state.goal.sourceUpdateTruncated = sourceText.length > MAX_TEXT || sourceUpdate?.sourceTextTruncated === true;
     }
   }
   state.goal.updates = retainGoalUpdates(state.goal.updates, state.goal.sourceUpdateId);
-  // The ledger exists only for duplicate detection. Full prompts belong in the
-  // Goal/source fields or unresolved candidate, never in every persisted state
-  // snapshot. This also migrates old raw-text ledger entries in place.
-  state.captureLedger = state.captureLedger.map(compactCaptureLedgerItem).slice(-MAX_CAPTURE_LEDGER);
+  // The ledger is only for bounded duplicate detection; full prompts remain in
+  // Goal/source fields, never in every persisted state snapshot.
+  state.captureLedger = state.captureLedger.map(compactCaptureLedgerItem).filter(Boolean).slice(-MAX_CAPTURE_LEDGER);
   const directiveSourceTexts = [state.goal.original, state.goal.current, state.goal.sourceUpdateText,
     ...state.goal.updates.map((item) => item.sourceText || item.text)]
     .filter((item) => typeof item === "string" && item);
@@ -579,18 +535,6 @@ export function normalizeGoalRunState(raw) {
   for (const item of state.trace.failures) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
   for (const item of state.trace.writes) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
   state.events = state.events.filter((item) => item && typeof item === "object" && typeof item.kind === "string");
-  if ([2, 3].includes(raw.schemaVersion) && state.events.length === 0) {
-    if (state.goal.original) appendEvent(state, "goal_created", { at: state.goal.createdAt || timestamp(), source: "migration", summary: "Original Goal migrated from v0.2 state.", goalVersion: 1 });
-    for (const update of state.goal.updates) appendEvent(state, "human_update", { at: update.at, source: "migration", summary: update.summary || update.text, text: update.text, ref: update.id, goalVersion: update.goalVersion });
-    for (const item of state.humanDecisions) appendEvent(state, "human_decision", { at: item.at, source: item.source || "migration", summary: item.summary || item.text, text: item.text, ref: item.id, status: item.questionnaire?.outcome, goalVersion: item.goalVersion });
-    for (const item of state.decisions) appendEvent(state, "decision_recorded", { at: item.at, summary: item.summary, text: [item.rationale, item.evidence].filter(Boolean).join("; "), ref: item.id, goalVersion: item.goalVersion });
-    for (const item of state.checkpoints) appendEvent(state, "checkpoint_recorded", { at: item.at, summary: item.summary, text: [item.ref, item.evidence].filter(Boolean).join("; "), ref: item.id, goalVersion: item.goalVersion });
-    for (const item of state.trace.failures) appendEvent(state, "tool_failure", { at: item.at, source: item.tool, summary: item.error, goalVersion: item.goalVersion });
-    for (const item of state.trace.writes) appendEvent(state, "write_attempt", { at: item.at, source: item.tool, summary: item.target, goalVersion: item.goalVersion });
-    state.events.sort((a, b) => Date.parse(a.at || 0) - Date.parse(b.at || 0));
-    state.events.forEach((item, index) => { item.id = `E${index + 1}`; });
-    state.eventSeq = state.events.length + 1;
-  }
   return state;
 }
 
@@ -781,9 +725,7 @@ export function captureHumanPrompt(stateValue, prompt, meta = {}) {
   const messageId = typeof meta?.messageId === "string" ? meta.messageId : "";
   const receivedAt = timestamp();
   const canonical = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
-  // A restored v0.2 Goal is often followed by the same initial prompt when the
-  // extension is upgraded in-place. Treat that as the same Goal, not a new
-  // Human update/directive. Exact repeats do not change scope.
+  // Exact repeats do not change scope.
   if (state.goal.original && [state.goal.original, state.goal.current].some((known) =>
     known && canonical(known) === canonical(text))) {
     return { state, captured: false, kind: "duplicate_goal" };
@@ -1064,7 +1006,6 @@ export function applyGoalChange(stateValue, input) {
   // next turn. The next request boundary filters this set against current availability;
   // only Goal-specific review/change capabilities are dropped.
   state.activeCapabilities = (state.activeCapabilities ?? []).filter((capability) => !["goal_change", "issue_review"].includes(capability));
-  state.activeCapability = state.activeCapabilities.at(-1) ?? "root";
   state.autoActivation = null;
   appendEvent(state, "goal_changed", {
     summary: `Goal v${previousVersion} replaced by Goal v${state.goal.version}.`,
@@ -1638,8 +1579,7 @@ function sourceTextForUpdate(state, update) {
     ? state.captureLedger.find((item) => item.messageId === update.messageId)
     : null;
   const prefix = String(update.text ?? "").slice(0, Math.min(160, String(update.text ?? "").length));
-  const fallback = prefix ? [...state.captureLedger].reverse().find((item) => typeof item.text === "string" && item.text.startsWith(prefix)) : null;
-  return exact?.text ?? fallback?.text ?? update.text ?? "";
+  return exact?.text ?? update.sourceText ?? update.text ?? "";
 }
 
 function unresolvedAcceptanceRange(state) {
@@ -2364,8 +2304,7 @@ export function recordRouteSelection(stateValue, input = {}) {
     return { state, selected: null, exploration: state.routeSet.exploration };
   }
   if (!route) throw new Error(`Unknown or stale route identity "${selected}". No state changed.`);
-  state.routeSet.selectedRouteId = route.routeId;
-  route.status = "selected";
+  bindSelectedRoute(state, route);
   request.status = "answered";
   state.routeSet.stateVersion += 1;
   appendEvent(state, "route_selected", { summary: `Human selected route ${route.routeId}.`, ref: route.routeId });
@@ -2448,13 +2387,35 @@ function routeSetComparison(state) {
   };
 }
 
+function bindSelectedRoute(state, route) {
+  const plan = state.plan;
+  if (plan.tasks.length && plan.routeId && plan.routeId !== route.routeId) {
+    throw new Error(`The current DAG belongs to route ${plan.routeId}; revise the DAG before switching routes. No state changed.`);
+  }
+  if (plan.tasks.length && plan.routeId !== route.routeId
+    && plan.execution && ["dispatching", "running", "unknown"].includes(plan.execution.status)) {
+    throw new Error("Reconcile the unresolved DAG execution before binding a route. No state changed.");
+  }
+  state.routeSet.selectedRouteId = route.routeId;
+  route.status = "selected";
+  if (plan.tasks.length && plan.routeId !== route.routeId) {
+    plan.routeId = route.routeId;
+    plan.revision += 1;
+    plan.stateVersion += 1;
+    plan.tasks = plan.tasks.map((task) => ({ ...task, status: "pending", evidence: "", reason: "", assessment: null }));
+    plan.execution = null;
+    plan.executionDrift = null;
+    plan.approval = null;
+    plan.approvalRequest = null;
+    plan.approvalRequest = createDagApprovalRequest(state);
+  }
+}
+
 export function selectRoute(stateValue, input = {}) {
   const state = routeInput(stateValue, input);
   const route = state.routeSet.routes.find((item) => item.routeId === input.routeId);
   if (!route) throw new Error(`Unknown or stale route identity "${input.routeId}". No state changed.`);
-  if (state.plan.tasks.length && state.plan.routeId && state.plan.routeId !== route.routeId) throw new Error(`The current DAG belongs to route ${state.plan.routeId}; select that exact route or revise the DAG. No state changed.`);
-  state.routeSet.selectedRouteId = route.routeId;
-  route.status = "selected";
+  bindSelectedRoute(state, route);
   if (route.acceptanceGate === "passed") {
     state.routeSet.winningRouteId = route.routeId;
     state.routeSet.comparison.status = "accepted";

@@ -75,7 +75,7 @@ import {
   summarizePlanStatus,
   transitionTasks,
   triageIssue,
-} from "./goal-run-v0-9-0.mjs";
+} from "./goal-run.mjs";
 import {
   CONTEXT_MESSAGE_TYPE,
   CONTEXT_STATE_TYPE,
@@ -93,7 +93,6 @@ import {
 } from "./context-core.mjs";
 
 const STATE_ENTRY_TYPE = "pi-compass-v2.goalrun";
-const STATE_MESSAGE_TYPE = "pi-compass-v2.goalrun-state";
 const ANCHOR_MESSAGE_TYPE = "pi-compass-v2.goalrun-anchor";
 const TOOL_PREFIX = "compass_";
 const PACKAGE_VERSION = (() => {
@@ -110,8 +109,8 @@ let loaderName = "";
 let lastLoadoutSignature = "";
 let mutationQueue: Promise<any> = Promise.resolve();
 let loadoutRefreshPending = true;
-let statePersistedViaEntry = false;
 let activePi: any = null;
+let lastCommittedState: any = emptyGoalRunState();
 const stableToolsByPi = new WeakMap<object, Set<string>>();
 const dynamicToolSignaturesByPi = new WeakMap<object, Map<string, string>>();
 const delegationRuntimes = new WeakMap<object, any>();
@@ -191,28 +190,14 @@ function setCompassLoadout(pi: any, compassNames: string[]) {
 function getContext(rest: any[]): any {
   return rest.find((item) => item && typeof item === "object" && (item.sessionManager || typeof item.cwd === "string" || item.hasUI !== undefined)) ?? {};
 }
-function parseState(value: any): any | null {
-  if (!value) return null;
-  if (typeof value === "string") {
-    try { value = JSON.parse(value); } catch { return null; }
+function parseState(value: any): any {
+  if (!value || typeof value !== "object" || !value.goal || !value.plan) {
+    throw new Error("Invalid Compass GoalRun snapshot; no state changed. Recover a supported native branch.");
   }
-  if (value && typeof value === "object" && [2, 3, 4, 5, 6, 7].includes(value.schemaVersion) && value.goal && value.plan) {
-    return normalizeGoalRunState(value);
-  }
-  return null;
+  return normalizeGoalRunState(value);
 }
 function stateFromEntry(entry: any): any | null {
   if (!entry || typeof entry !== "object") return null;
-  if (entry.type === "message") {
-    const message = entry.message;
-    if (message?.role === "toolResult") {
-      const fromResult = parseState(message?.details?.state);
-      if (fromResult) return fromResult;
-    }
-    if (message?.role === "custom" && message?.customType === STATE_MESSAGE_TYPE) {
-      return parseState(message.content);
-    }
-  }
   if (entry.type === "custom" && entry.customType === STATE_ENTRY_TYPE) return parseState(entry.data);
   return null;
 }
@@ -240,49 +225,45 @@ function persistedAssistantEntryId(ctx: any, toolCallId: string): string {
 function restoreState(ctx: any): any {
   let restored: any = null;
   let branch: any[] = [];
-  let allEntries: any[] = [];
   try { branch = ctx?.sessionManager?.getBranch?.() ?? []; } catch { branch = []; }
-  try { allEntries = ctx?.sessionManager?.getEntries?.() ?? branch; } catch { allEntries = branch; }
-  for (const entry of branch) {
-    const candidate = stateFromEntry(entry);
-    if (candidate && (!restored || (candidate.stateRevision ?? 0) >= (restored.stateRevision ?? 0))) restored = candidate;
-  }
-  // Prefer the active branch. Session-wide fallback is only for runtimes whose
-  // branch API does not expose custom extension entries.
-  if (!restored) {
-    for (const entry of allEntries) {
-      const candidate = stateFromEntry(entry);
-      if (candidate && (!restored || (candidate.stateRevision ?? 0) >= (restored.stateRevision ?? 0))) restored = candidate;
-    }
-  }
+  const latest = branch.findLast((entry: any) => entry?.type === "custom" && entry.customType === STATE_ENTRY_TYPE);
+  if (latest) restored = stateFromEntry(latest);
   if (!restored) restored = emptyGoalRunState();
-  const branchTrace = traceFromEntries(branch);
-  restored = mergeTrace(restored, branchTrace.length ? branchTrace : traceFromEntries(allEntries));
+  restored = mergeTrace(restored, traceFromEntries(branch));
   return normalizeGoalRunState(restored);
 }
+function adoptBranchState(ctx: any) {
+  const restored = restoreState(ctx);
+  lastCommittedState = clone(restored);
+  return restored;
+}
 function persistState(pi: any, value = state) {
-  value.stateRevision = (Number.isInteger(value.stateRevision) ? value.stateRevision : 0) + 1;
-  if (value === state) state.stateRevision = value.stateRevision;
-  statePersistedViaEntry = false;
+  if (pi !== activePi) throw new Error("Stale Compass session cannot persist GoalRun state.");
+  const next = clone(value);
+  next.stateRevision = (Number.isInteger(next.stateRevision) ? next.stateRevision : 0) + 1;
   try {
-    if (typeof pi.appendEntry === "function") {
-      pi.appendEntry(STATE_ENTRY_TYPE, clone(value));
-      statePersistedViaEntry = true;
-    }
-  } catch { /* tool-result details remain the fallback */ }
+    if (typeof pi.appendEntry !== "function") throw new Error("Pi custom-entry persistence is required.");
+    pi.appendEntry(STATE_ENTRY_TYPE, next);
+  } catch (error) {
+    // Every writer, not just model-facing mutations, shares this commit boundary.
+    // A host may append and then throw: re-read its branch before retrying rather
+    // than assert that native persistence was rolled back.
+    state = clone(lastCommittedState);
+    needsRestore = true;
+    loadoutRefreshPending = true;
+    throw new Error("GoalRun persistence failed; candidate not activated. Reconcile the native branch before retrying.", { cause: error });
+  }
+  value.stateRevision = next.stateRevision;
+  lastCommittedState = clone(value);
 }
 function persistTrace(pi: any, item: any) {
   try { pi.appendEntry?.(`${STATE_ENTRY_TYPE}.trace`, clone(item)); } catch { /* trace is best-effort */ }
 }
 function stateResult(text: string, details: Record<string, unknown> = {}) {
-  // Do not duplicate the full GoalRun snapshot into every tool-result JSONL entry
-  // when Pi's custom-entry persistence succeeded. Keep it only as a compatibility
-  // fallback for runtimes that cannot persist extension entries.
-  const fallback = statePersistedViaEntry ? {} : { state: clone(state) };
   const cursor = `R${Number.isInteger(state.stateRevision) ? state.stateRevision : 0}-E${Math.max(0, (state.eventSeq ?? 1) - 1)}`;
   return {
     content: [{ type: "text", text: `${text}\nstateCursor: ${cursor}` }],
-    details: { ...fallback, ...details, cursor, stateRevision: state.stateRevision ?? 0 },
+    details: { ...details, cursor, stateRevision: state.stateRevision ?? 0 },
   };
 }
 function readResult(text: string, details: Record<string, unknown> = {}) {
@@ -1051,13 +1032,10 @@ async function handleCompassToolResult(pi: any, event: any, ctx: any) {
 }
 
 function activeCapabilities(): string[] {
-  const values = Array.isArray(state.activeCapabilities) ? state.activeCapabilities : [];
-  if (!values.length && state.activeCapability && state.activeCapability !== "root") return [state.activeCapability];
-  return [...new Set(values)];
+  return [...new Set(Array.isArray(state.activeCapabilities) ? state.activeCapabilities : [])];
 }
 function setActiveCapabilities(values: string[]) {
   state.activeCapabilities = [...new Set(values.filter((value) => value && value !== "root"))];
-  state.activeCapability = state.activeCapabilities.at(-1) ?? "root";
 }
 function assertCapability(expected: string) {
   const active = activeCapabilities();
@@ -1152,7 +1130,7 @@ function registerStateSnapshotTool(pi: any) {
     }, { additionalProperties: false }),
     async execute(_id: string, params: any, ...rest: any[]) {
       const ctx = getContext(rest);
-      if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+      if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
       if (params?.maxEvents !== undefined && (!Number.isInteger(params.maxEvents) || params.maxEvents < 1 || params.maxEvents > 8)) throw new Error("maxEvents must be an integer from 1 to 8. No state changed.");
       const snapshot = buildStateSnapshot(state, params?.cursor ?? null, {
         ...toolInventory(pi),
@@ -1244,7 +1222,7 @@ function registerContextTool(pi: any) {
     async execute(toolCallId: string, params: any, ...rest: any[]) {
       return serialized(async () => {
         const ctx = getContext(rest);
-        if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         restoreContext(ctx);
         const action = String(params?.action ?? "");
         if (!Number.isInteger(params?.expectedRevision) || params.expectedRevision !== contextState.revision) {
@@ -1314,7 +1292,7 @@ function ensureLoader(pi: any): string {
         if (invalidAtLoad.length) throw new Error(`Unavailable capability: ${invalidAtLoad.join(", ")}. Available: ${caps.join(", ")}. No state changed.`);
         const ctx = getContext(rest);
         if (needsRestore) {
-          state = restoreState(ctx);
+          state = adoptBranchState(ctx);
           needsRestore = false;
           state.projectRoot = contextCwd(ctx);
           ensureLoader(pi);
@@ -1438,7 +1416,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       async execute(_id: string, params: any, ...rest: any[]) {
         return serialized(async () => {
           const ctx = getContext(rest);
-          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
           activeCheck("routes");
           const action = params.action;
           let result: any;
@@ -1477,7 +1455,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         async execute(_id: string, params: any, ...rest: any[]) {
           return serialized(async () => {
             const ctx = getContext(rest);
-            if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+            if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
             activeCheck("planning");
             if (state.plan.goal && state.plan.tasks.length) throw new Error("A DAG already exists. Use compass_plan_revise; no state changed.");
             if (!state.goal.current) throw new Error("No Goal has been captured from the Human's initial prompt.");
@@ -1503,7 +1481,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       async execute(_id: string, _params: any, ...rest: any[]) {
         return serialized(async () => {
           const ctx = getContext(rest);
-          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
           activeCheck("planning");
           const result = noMutation(() => renewDagApprovalRequest(state));
           state = result.state;
@@ -1523,7 +1501,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       parameters: Type.Object({}, { additionalProperties: false }),
       async execute(_id: string, _params: any, ...rest: any[]) {
         const ctx = getContext(rest);
-        if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         activeCheck("planning");
         const plan = state.plan;
         const acceptance = acceptanceStatus(state);
@@ -1558,7 +1536,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       async execute(_id: string, params: any, ...rest: any[]) {
         return serialized(async () => {
           const ctx = getContext(rest);
-          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
           activeCheck("planning");
           if (!state.plan.goal || !state.plan.tasks.length) throw new Error("No DAG exists. Create one only if real dependencies or independent tracks justify it.");
           if (params.expectedStateVersion !== (state.plan.stateVersion ?? 0)) throw new Error(`Stale plan state version ${params.expectedStateVersion}; current version is ${state.plan.stateVersion ?? 0} (DAG revision ${state.plan.revision}). Read current status and revise from the latest state; no changes were made.`);
@@ -1615,7 +1593,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       async execute(_id: string, params: any, ...rest: any[]) {
         return serialized(async () => {
           const ctx = getContext(rest);
-          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
           activeCheck("planning");
           const action = String(params?.action ?? "");
           const hasTaskIds = Object.prototype.hasOwnProperty.call(params ?? {}, "taskIds");
@@ -1687,7 +1665,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         async execute(_id: string, params: any, ...rest: any[]) {
           return serialized(async () => {
             const ctx = getContext(rest);
-            if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+            if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
             activeCheck("planning");
             const execution = state.plan.execution;
             if (params.action === "status") {
@@ -1798,7 +1776,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       parameters: Type.Object({}, { additionalProperties: false }),
       async execute(_id: string, _params: any, ...rest: any[]) {
         const ctx = getContext(rest);
-        if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         activeCheck("acceptance");
         const current = (state.goal.criteria ?? []).filter((item: any) => item.goalVersion === state.goal.version);
         if (!current.length) return readResult("No acceptance criteria are defined for the current Goal. Define a small observable set only if useful.", { status: "criteria_not_defined", total: 0, goalOutcome: goalOutcomeStatus(state) });
@@ -1813,7 +1791,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       async execute(_id: string, params: any, ...rest: any[]) {
         return serialized(async () => {
           const ctx = getContext(rest);
-          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
           activeCheck("acceptance");
           const result = noMutation(() => defineAcceptanceCriteria(state, params.criteria));
           state = result.state;
@@ -1834,7 +1812,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       async execute(_id: string, params: any, ...rest: any[]) {
         return serialized(async () => {
           const ctx = getContext(rest);
-          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
           activeCheck("acceptance");
           const result = noMutation(() => recordAcceptanceResult(state, { ...params, source: "agent_reported" }));
           state = result.state;
@@ -1861,7 +1839,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       async execute(_id: string, params: any, ...rest: any[]) {
         return serialized(async () => {
           const ctx = getContext(rest);
-          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
           assertCapability("issue_review");
           const result = noMutation(() => triageIssue(state, params));
           if (result.duplicate) {
@@ -1895,7 +1873,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       async execute(_id: string, params: any, ...rest: any[]) {
         return serialized(async () => {
           const ctx = getContext(rest);
-          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
           activeCheck("history");
           const result = noMutation(() => recordDecision(state, params));
           state = result.state;
@@ -1918,7 +1896,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       async execute(_id: string, params: any, ...rest: any[]) {
         return serialized(async () => {
           const ctx = getContext(rest);
-          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
           activeCheck("history");
           const result = noMutation(() => recordCheckpoint(state, params));
           state = result.state;
@@ -1934,7 +1912,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })) }, { additionalProperties: false }),
       async execute(_id: string, params: any, ...rest: any[]) {
         const ctx = getContext(rest);
-        if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         activeCheck("history");
         const events = buildRecentEvents(state, params.limit ?? 12);
         return readResult(events.length ? events.map((item: any) => `- ${item.id} ${item.at} [${item.kind}] goal v${item.goalVersion}: ${clip(item.summary, 200)}${item.ref ? ` (ref ${item.ref})` : ""}`).join("\n") : "No structured events have been recorded.", { events });
@@ -1951,7 +1929,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       parameters: Type.Object({}, { additionalProperties: false }),
       async execute(_id: string, _params: any, ...rest: any[]) {
         const ctx = getContext(rest);
-        if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         assertCapability("goal_details");
         return readResult(buildGoalDetails(state));
       },
@@ -1975,7 +1953,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
       async execute(_id: string, params: any, ...rest: any[]) {
         return serialized(async () => {
           const ctx = getContext(rest);
-          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
           activeCheck("goal_change");
           if (params.action === "dismiss") {
             const result = noMutation(() => dismissGoalChangeCandidate(state, params));
@@ -2000,10 +1978,9 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
 function afterMutation(pi: any, cwd?: string) {
   const root = cwd || state.projectRoot || process.cwd();
   state.projectRoot = root;
-  // Do not replace schemas or change active tools inside a model tool-call batch.
-  // The next context/model-request boundary performs a single state-derived refresh.
-  loadoutRefreshPending = true;
   persistState(pi);
+  // Registry changes wait until the next model-request boundary.
+  loadoutRefreshPending = true;
 }
 
 function ensureCurrentLoadout(pi: any, ctx: any) {
@@ -2188,6 +2165,7 @@ function errorSummary(event: any): string {
 
 export default function (pi: any) {
   activePi = pi;
+  lastCommittedState = emptyGoalRunState();
   state = emptyGoalRunState();
   contextState = emptyContextState();
   needsRestore = true;
@@ -2196,7 +2174,6 @@ export default function (pi: any) {
   lastLoadoutSignature = "";
   mutationQueue = Promise.resolve();
   loadoutRefreshPending = true;
-  statePersistedViaEntry = false;
   stableToolsByPi.delete(pi);
   dynamicToolSignaturesByPi.delete(pi);
   ensureDelegationRuntime(pi);
@@ -2210,7 +2187,7 @@ export default function (pi: any) {
 
   pi.on("session_start", async (_event: any, ctx: any) => {
     await serialized(async () => {
-      state = restoreState(ctx);
+      state = adoptBranchState(ctx);
       needsRestore = false;
       if (state.plan?.execution && ["dispatching", "running"].includes(state.plan.execution.status)) {
         state.plan.execution.status = "unknown";
@@ -2261,13 +2238,12 @@ export default function (pi: any) {
   pi.on("before_agent_start", async (event: any, ctx: any) => {
     const prompt = typeof event?.prompt === "string" ? event.prompt : "";
     const result = await serialized(async () => {
-      if (needsRestore) { state = restoreState(ctx); restoreContext(ctx); needsRestore = false; }
+      if (needsRestore) { state = adoptBranchState(ctx); restoreContext(ctx); needsRestore = false; }
       const messageId = String(event?.messageId ?? event?.message?.id ?? event?.id ?? "");
       const captured = captureHumanPrompt(state, prompt, { source: "before_agent_start", messageId });
       state = captured.state;
       if (captured.captured) {
         refreshAfterHumanInput(pi, ctx);
-        if (!statePersistedViaEntry) return { message: { customType: STATE_MESSAGE_TYPE, content: JSON.stringify(state), display: false } };
         return;
       }
       ensureCurrentLoadout(pi, ctx);
@@ -2282,7 +2258,6 @@ export default function (pi: any) {
     // its tool_result scheduler ran, resume only tasks still ready for this exact
     // Current Goal. The latest Human instruction is checked before dispatch.
     scheduleReadySubagentWaves(pi, ctx ?? {}, prompt);
-    if (result?.message?.customType === STATE_MESSAGE_TYPE) result.message.content = JSON.stringify(state);
     return result;
   });
 
@@ -2294,7 +2269,7 @@ export default function (pi: any) {
     const text = messageText(message);
     if (!text) return;
     await serialized(async () => {
-      if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+      if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
       restoreContext(ctx);
       if (nativeWatch) {
         const watchRelease = releaseWatchMessages(contextState, text);
@@ -2318,10 +2293,13 @@ export default function (pi: any) {
   // branch snapshot happens to be returned during context assembly.
   pi.on("context", async (event: any, ctx: any) => {
     await mutationQueue;
-    if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+    if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
     else {
       const branchState = restoreState(ctx);
-      if (branchState.stateRevision > (state.stateRevision ?? 0) || (!state.goal.original && branchState.goal.original)) state = branchState;
+      if (branchState.stateRevision > (state.stateRevision ?? 0) || (!state.goal.original && branchState.goal.original)) {
+        state = branchState;
+        lastCommittedState = clone(branchState);
+      }
     }
     restoreContext(ctx);
     ensureCurrentLoadout(pi, ctx);
@@ -2333,7 +2311,7 @@ export default function (pi: any) {
     if (!Array.isArray(event?.messages)) return;
     // Older Compass state messages are internal persistence, not instructions.
     // Preserve Pi's original system/tool patches instead of folding them into the head.
-    const messages = event.messages.filter((message: any) => !(message?.role === "custom" && [STATE_MESSAGE_TYPE, ANCHOR_MESSAGE_TYPE, "pi-compass-v2.conventions"].includes(message?.customType)));
+    const messages = event.messages.filter((message: any) => !(message?.role === "custom" && ["pi-compass-v2.goalrun-state", ANCHOR_MESSAGE_TYPE, "pi-compass-v2.conventions"].includes(message?.customType)));
     try {
       const branch = ctx?.sessionManager?.getBranch?.();
       if (!Array.isArray(branch)) throw new Error("Native branch is unavailable; retained pins cannot be restored for this request.");
@@ -2359,7 +2337,7 @@ export default function (pi: any) {
   // never creates a second session, mutates the transcript in place, or filters
   // cloned messages by position.
   pi.on("turn_end", async (event: any, ctx: any) => serialized(async () => {
-    if (needsRestore) { state = restoreState(ctx); restoreContext(ctx); needsRestore = false; }
+    if (needsRestore) { state = adoptBranchState(ctx); restoreContext(ctx); needsRestore = false; }
     const branch = ctx?.sessionManager?.getBranch?.() ?? [];
     restoreContext(ctx);
     try {
@@ -2576,7 +2554,7 @@ export default function (pi: any) {
 
       let priorGoal = false;
       await serialized(async () => {
-        if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         priorGoal = Boolean(state.goal.current || state.goal.original || state.plan?.tasks?.length || executionUnresolved(state.plan?.execution));
         if (priorGoal) return;
         state = captureHumanPrompt(emptyGoalRunState(), "Goal: Validate the live pi-subagents structured-delegation and DAG scheduler in this disposable session. Do not modify files.", { source: "compass_live_acceptance" }).state;

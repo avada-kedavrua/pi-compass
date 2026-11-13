@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import * as goalRun from "../src/goal-run-v0-9-0.mjs";
+import * as goalRun from "../src/goal-run.mjs";
 
 test("GoalRun v7 module exports the complete runtime contract", () => {
   assert.equal(goalRun.GOAL_RUN_API_VERSION, 7);
