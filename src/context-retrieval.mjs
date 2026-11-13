@@ -10,21 +10,23 @@ function readable(entry) {
 function projected(entry, content) {
   return typeof content === "string" && ["assistant", "toolResult"].includes(rawMessage(entry)?.role) ? [{ type: "text", text: content }] : content;
 }
-function record(index, id, binding, origin, content, head = null, visibility = "omitted") {
+function record(index, id, binding, origin, content, head = null, visibility = "omitted", projectionEditId = null) {
   const entry = index.byId.get(id);
   if (!readable(entry)) return null;
   const message = rawMessage(entry);
   const group = index.groups?.get(id);
   const exchangeComplete = Boolean(group && !group.duplicate && group.calls.size === group.results.size);
   const qualification = sourceQualifications(entry, index.readRequests?.get(id), exchangeComplete);
-  const derived = head?.field === "operation";
-  const authorship = derived ? "agent-derived" : head?.field === "snapshot" ? "retained-source-data" : message.role === "toolResult" ? "tool-observation" : message.role === "user" ? "human-original" : "agent-message";
+  const editId = head?.editId ?? projectionEditId;
+  const authored = head?.field === "operation";
+  const derived = authored || editId !== null || head?.field === "snapshot";
+  const authorship = authored ? "agent-derived" : editId !== null ? "projection-derived" : head?.field === "snapshot" ? "retained-source-data" : message.role === "toolResult" ? "tool-observation" : message.role === "user" ? "human-original" : "agent-message";
   const caveats = [...new Set([...(qualification.caveats ?? []), ...(head?.caveats ?? [])])];
   return {
     id, binding, origin, content, head, visibility,
     version: head?.version ?? contentVersion(content),
-    role: message.role, authorship, derived,
-    qualification: derived ? "Agent-authored derived value; not a new tool observation or Human instruction." : head?.field === "snapshot" ? "Selected source data; not a new tool execution or Human message." : "Original source content.",
+    role: message.role, authorship, derived, editId,
+    qualification: authored ? "Agent-authored derived value; not a new tool observation or Human instruction." : editId !== null ? "Native projection replacement; not original source content or evidence of a new execution or Human instruction." : head?.field === "snapshot" ? "Selected source data; not a new tool execution or Human message." : "Original source content.",
     ...(head?.readStatus ?? qualification.readStatus ? { readStatus: structuredClone(head?.readStatus ?? qualification.readStatus) } : {}),
     caveats,
     provenance: [...(head?.sources ?? [id])],
@@ -41,7 +43,7 @@ function savedRecord(index, state, saved) {
   if (!readable(entry)) return null;
   const edit = saved.editId === null ? null : index.byId.get(saved.editId);
   if (saved.editId !== null && (edit?.type !== "context_edit" || edit.targetId !== saved.id || !edit.replacement)) fail(`Parent edit ${saved.editId} is unavailable.`);
-  return record(index, id, binding, "parent", projected(entry, edit ? edit.replacement.content : rawMessage(entry).content));
+  return record(index, id, binding, "parent", projected(entry, edit ? edit.replacement.content : rawMessage(entry).content), null, "omitted", edit?.id ?? null);
 }
 function* candidates(index, state, scope) {
   if (scope === "active" || scope === "all") {
@@ -80,7 +82,7 @@ function* candidates(index, state, scope) {
         const source = index.byId.get(entry.targetId);
         if (readable(source)) {
           const id = logicalSource(index, entry.targetId);
-          yield record(index, id, bindingKey(state, index, id), "history", projected(source, entry.replacement.content));
+          yield record(index, id, bindingKey(state, index, id), "history", projected(source, entry.replacement.content), null, "omitted", entry.id);
         }
       } else if (entry.customType === "pi-compass-v2.value" && entry.details?.derived) {
         const id = logicalSource(index, entry.id);
@@ -144,7 +146,7 @@ export function searchSources(index, state, { query = "", ids = [], scope = "act
     const startLine = text.slice(0, Math.max(0, at)).split("\n").length;
     const endLine = Math.min(text.split("\n").length, startLine + 8);
     hits.push({
-      id: candidate.id, binding: candidate.binding, version: candidate.version, role: candidate.role, authorship: candidate.authorship, derived: candidate.derived, qualification: candidate.qualification, readStatus: candidate.readStatus, kind: candidate.head?.kind,
+      id: candidate.id, binding: candidate.binding, version: candidate.version, role: candidate.role, authorship: candidate.authorship, derived: candidate.derived, editId: candidate.editId, qualification: candidate.qualification, readStatus: candidate.readStatus, kind: candidate.head?.kind,
       visibility: candidate.visibility, origin: candidate.origin,
       range: part < 0 ? null : { part, startLine, endLine },
       snippet: text.slice(from, to), excerpt: text.slice(from, to), chars: text.length,
@@ -159,25 +161,33 @@ function textOf(content) {
 }
 function canonicalPath(value) {
   if (typeof value !== "string" || !value.trim()) return null;
-  const input = value.trim().replaceAll("\\", "/");
+  const input = value.trim();
+  // A lexical a/../b collapse is not a filesystem identity proof when a is a
+  // symlink. Ambiguous paths remain recoverable, but never trigger relocation.
+  if (input.includes("\\") || input.split("/").includes("..")) return null;
   const absolute = input.startsWith("/");
-  const segments = [];
-  for (const segment of input.split("/")) {
-    if (!segment || segment === ".") continue;
-    if (segment === ".." && segments.length && segments.at(-1) !== "..") segments.pop();
-    else if (segment !== ".." || !absolute) segments.push(segment);
-  }
+  const segments = input.split("/").filter((segment) => segment && segment !== ".");
   return `${absolute ? "/" : ""}${segments.join("/")}` || (absolute ? "/" : ".");
+}
+/** Identity/revision contradictions remain evidence even when the payload is not movable. */
+export function readObservationIdentity(index, id) {
+  const message = rawMessage(index.byId.get(id));
+  const call = index.readRequests?.get(id);
+  if (message?.role !== "toolResult" || message.toolName !== "read" || call?.name !== "read") return null;
+  const path = canonicalPath(call.arguments?.path);
+  if (!path || /(^|\/)SKILL\.md$/i.test(path) || /(^|\/)skills\//i.test(path)) return null;
+  const revision = message.details?.fileRevision;
+  return { path, revision: typeof revision === "string" && revision ? revision : null };
 }
 function readRequest(index, id) {
   const entry = index.byId.get(id);
   const message = rawMessage(entry);
   const call = index.readRequests?.get(id);
   const exchange = index.groups?.get(id);
-  if (message?.role !== "toolResult" || message.toolName !== "read" || !call || call.name !== "read" || !exchange || exchange.duplicate || exchange.calls.size !== exchange.results.size || message.isError !== false || message.details?.error || (message.details?.truncation && message.details.truncation.truncated !== false)) return null;
+  const identity = readObservationIdentity(index, id);
+  if (!identity || !exchange || exchange.duplicate || exchange.calls.size !== exchange.results.size || message.isError !== false || message.details?.error || (message.details?.truncation && message.details.truncation.truncated !== false)) return null;
   const args = call.arguments ?? {};
-  const path = canonicalPath(args.path);
-  if (!path || /(^|\/)SKILL\.md$/i.test(path) || /(^|\/)skills\//i.test(path)) return null;
+  const { path, revision } = identity;
   const range = args.range && typeof args.range === "object" ? args.range : {};
   const startLine = range.startLine ?? args.startLine ?? args.offset ?? 1;
   const requestedEnd = range.endLine ?? args.endLine;
@@ -190,8 +200,6 @@ function readRequest(index, id) {
   const lines = text.split("\n");
   const actualEnd = startLine + lines.length - 1;
   const endLine = requestedEnd ?? (limit === undefined ? actualEnd : Math.min(actualEnd, startLine + limit - 1));
-  const explicitRevision = message.details?.fileRevision;
-  const revision = typeof explicitRevision === "string" && explicitRevision ? explicitRevision : null;
   return {
     id, callId: message.toolCallId, path, startLine, endLine, lines,
     rangeKey: JSON.stringify({ startLine, requestedEnd: requestedEnd ?? null, limit: limit ?? null }),
@@ -230,12 +238,14 @@ function observedAt(index, state, selection, inputIndex, scope) {
   if (!selection || typeof selection !== "object") fail("Comparison selections require source IDs and versions.");
   const item = resolveSource(index, state, { ...selection, range: undefined }, scope);
   if (item.role !== "toolResult" || item.head?.kind === "skill") return null;
+  const identity = readObservationIdentity(index, item.id);
+  if (!identity) return null;
   const observation = readRequest(index, item.id);
-  if (!observation || observation.payloadVersion !== contentVersion(item.content)) return null;
+  if (!observation || observation.payloadVersion !== contentVersion(item.content)) return { id: item.id, version: item.version, inputIndex, identity, observation: null, content: item.content };
   const selected = selection.range ? selectSourceRange(item.content, selection.range) : { content: item.content, range: null };
   const window = selectedReadWindow(observation, selected.range);
   if (!window) return null;
-  return { id: item.id, version: item.version, inputIndex, observation, window, content: selected.content };
+  return { id: item.id, version: item.version, inputIndex, identity, observation, window, content: selected.content };
 }
 
 /** Cross-call findings require persisted successful read calls and source/range identity. */
@@ -250,8 +260,9 @@ export function analyzeRepeatedSelections(index, state, selections, scope = "all
   const similarities = [];
   for (let left = 0; left < resolved.length; left++) for (let right = left + 1; right < resolved.length; right++) {
     const a = resolved[left], b = resolved[right];
-    if (a.id === b.id || a.observation.callId === b.observation.callId) continue;
-    if (a.observation.path !== b.observation.path) {
+    if (a.id === b.id || (a.observation && b.observation && a.observation.callId === b.observation.callId)) continue;
+    if (a.identity.path !== b.identity.path) {
+      if (!a.observation || !b.observation) continue;
       const termsA = new Set(textOf(a.content).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
       const termsB = new Set(textOf(b.content).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
       let intersection = 0;
@@ -260,11 +271,19 @@ export function analyzeRepeatedSelections(index, state, selections, scope = "all
       if (score >= 0.35) similarities.push({ first: a.inputIndex, second: b.inputIndex, score: Number(score.toFixed(3)), advisory: "Different read source; lexical similarity is not source identity. No automatic edit or relocation." });
       continue;
     }
+    const revisionChanged = a.identity.revision && b.identity.revision && a.identity.revision !== b.identity.revision;
+    if (revisionChanged) {
+      changed.push({ first: a.inputIndex, second: b.inputIndex, firstId: a.id, secondId: b.id, path: a.identity.path, reason: "Native file revision changed, including a non-relocatable read result." });
+      continue;
+    }
+    if (!a.observation || !b.observation) {
+      unknown.push({ first: a.inputIndex, second: b.inputIndex, firstId: a.id, secondId: b.id, path: a.identity.path, reason: "Read payload is failed, incomplete or projection-derived; it cannot establish a verified repeat." });
+      continue;
+    }
     const sameRange = a.window.startLine === b.window.startLine && a.window.endLine === b.window.endLine;
-    const revisionChanged = a.observation.revision && b.observation.revision && a.observation.revision !== b.observation.revision;
     const intersection = matchingIntersection(a.window, b.window);
-    if (revisionChanged || (sameRange && !intersection?.matches)) {
-      changed.push({ first: a.inputIndex, second: b.inputIndex, firstId: a.id, secondId: b.id, path: a.observation.path, reason: revisionChanged ? "Native file revision changed." : "The same read range returned different payload lines." });
+    if (sameRange && !intersection?.matches) {
+      changed.push({ first: a.inputIndex, second: b.inputIndex, firstId: a.id, secondId: b.id, path: a.observation.path, reason: "The same read range returned different payload lines." });
       continue;
     }
     const payloadsMatch = a.observation.payloadVersion === b.observation.payloadVersion;
@@ -313,7 +332,7 @@ export function rankVerifiedSources(index, state, selections, scope = "all") {
     const text = blocks.filter((part) => part.type === "text").map((part) => part.text).join("\n");
     return {
       rank, id: item.id, binding: item.binding, version: item.version, range: item.range,
-      selectedVersion: contentVersion(item.content), role: item.role, authorship: item.authorship, derived: item.derived, qualification: item.qualification, readStatus: item.readStatus, origin: item.origin,
+      selectedVersion: contentVersion(item.content), role: item.role, authorship: item.authorship, derived: item.derived, editId: item.editId, qualification: item.qualification, readStatus: item.readStatus, origin: item.origin,
       snippet: text.slice(0, 600), truncated: text.length > 600,
       selectedParts: blocks.map((part, partIndex) => ({ part: partIndex, type: part.type, ...(part.type === "image" ? { mimeType: part.mimeType } : {}) })),
       caveats: item.caveats, provenance: item.provenance,

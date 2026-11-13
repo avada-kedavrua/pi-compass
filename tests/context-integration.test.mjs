@@ -113,6 +113,27 @@ test("tool schema and installed boundary carry verified range moves and Agent-ra
   assert.deepEqual(host.errors, []);
 });
 
+test("verified repeat relocation crosses the native tool schema and keeps both read exchanges", async () => {
+  const host = await setup();
+  const read = (callId) => {
+    host.manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: "notes.txt" } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
+    return host.manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text: "one\ntwo\nthree" }], isError: false, timestamp: Date.now() });
+  };
+  const first = read("first-read");
+  const second = read("second-read");
+  const prior = structuredClone(host.manager.getEntry(first));
+  const version = sourceVersion(host.manager, first);
+  assert.ok(host.tools.get("compass_context").parameters.properties.verifiedAgainst);
+  const search = await host.tools.get("compass_context").execute("compare", { action: "search", expectedRevision: 0, compare: [{ id: first, version }, { id: second, version }] }, undefined, undefined, host.runner.createContext());
+  assert.equal(JSON.parse(search.content[0].text).repetition.exact[0].relocateId, first);
+  await host.turn({ action: "move", expectedRevision: 0, ids: [first], version, verifiedAgainst: { id: second, version } });
+  assert.deepEqual(host.manager.getEntry(first), prior);
+  assert.match(modelText(host.manager), /Verified exact repeat/);
+  assert.match(modelText(host.manager), /one/);
+  assertPaired(host.manager);
+  assert.deepEqual(host.errors, []);
+});
+
 test("native nested watch arm and cancellation own the frame before a top-level turn ends", async () => {
   const host = await setup();
   await host.turn({ action: "call", expectedRevision: 0, task: "wait within frame" });

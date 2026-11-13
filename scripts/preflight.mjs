@@ -82,6 +82,12 @@ if (manifest?.pi?.extensions?.includes("./src/index.ts") && fs.existsSync(path.j
 } else {
   add("FAIL", "Compass package", "package.json must declare pi.extensions=[\"./src/index.ts\"] and the entry file must exist");
 }
+let release = null;
+try { release = JSON.parse(fs.readFileSync(path.join(packageRoot, "RELEASE-MANIFEST.json"), "utf8")); } catch { /* reported below */ }
+const minimumPi = parseVersion(release?.minimumPiVersion);
+if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 7 && minimumPi) {
+  add("PASS", "Release identity", `Package/manifest ${release.version}; GoalRun v${release.goalRunSchemaVersion}; Pi minimum ${release.minimumPiVersion}`);
+} else add("FAIL", "Release identity", "RELEASE-MANIFEST.json must match the package and current GoalRun schema and declare a valid Pi minimum");
 const goalRunPath = path.join(packageRoot, "src", "goal-run.mjs");
 const requiredGoalRunExports = [
   "GOAL_RUN_API_VERSION", "GOAL_RUN_RELEASE", "applyGoalChange", "dismissGoalChangeCandidate", "availableCapabilities", "acceptanceStatus", "goalOutcomeStatus", "planningActivationSignal",
@@ -154,10 +160,10 @@ if (staticOnly) {
     add("FAIL", "Pi CLI", `Could not run pi --version. ${piVersionResult.text || "Is Pi on PATH?"}`);
   } else if (!piVersion) {
     add("WARN", "Pi version", `Could not parse version output: ${piVersionResult.text}`);
-  } else if (atLeast(piVersion, [1, 5, 2])) {
-    add("PASS", "Pi version", `${piVersion.join(".")} (minimum supported by the current context_with_system integration: 1.5.2)`);
+  } else if (minimumPi && atLeast(piVersion, minimumPi)) {
+    add("PASS", "Pi version", `${piVersion.join(".")} (current context_with_system minimum: ${release.minimumPiVersion})`);
   } else {
-    add("FAIL", "Pi version", `${piVersion.join(".")} is older than the current 1.5.2 integration baseline`);
+    add("FAIL", "Pi version", `${piVersion.join(".")} does not meet the declared integration baseline`);
   }
 }
 

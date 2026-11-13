@@ -140,6 +140,9 @@ test("cross-read repeat checks use persisted call identity, exact payloads, and 
   assert.equal(repeated.exact.length, 1);
   assert.deepEqual([repeated.exact[0].first, repeated.exact[0].second], [1, 2], "filtered Human selections do not shift returned indexes");
   assert.equal(repeated.exact[0].relocateId, first);
+  const ambiguous = addRead("symlink-parent", { path: "link/../same.txt" }, "same bytes");
+  const ordinary = addRead("literal-file", { path: "same.txt" }, "same bytes");
+  assert.equal(compare([ambiguous, ordinary].map((id) => ({ id, version: sourceVersion(manager, id) }))).exact.length, 0, "lexical parent collapse is not source identity through symlinks");
 
   const changed = addRead("changed", { path: "src/file.txt", offset: 1, limit: 4 }, "alpha\nBETA\ngamma\ndelta");
   const changedReport = compare([{ id: duplicate, version: sourceVersion(manager, duplicate) }, { id: changed, version: sourceVersion(manager, changed) }]);
@@ -177,6 +180,17 @@ test("cross-read repeat checks use persisted call identity, exact payloads, and 
   const truncated = addRead("truncated-read", { path: "src/file.txt", offset: 1, limit: 4 }, "alpha\nbeta", { truncated: true });
   assert.equal(compare([{ id: duplicate, version: sourceVersion(manager, duplicate) }, { id: failed, version: sourceVersion(manager, failed) }]).exact.length, 0);
   assert.equal(compare([{ id: duplicate, version: sourceVersion(manager, duplicate) }, { id: truncated, version: sourceVersion(manager, truncated) }]).exact.length, 0);
+  const oldA = addRead("later-a", { path: "src/later.txt", revision: "v1" }, "same source");
+  const oldB = addRead("later-b", { path: "src/later.txt", revision: "v1" }, "same source");
+  const laterPartial = addRead("later-partial", { path: "src/later.txt", revision: "v2" }, "partial", { truncated: true });
+  const newerEvidence = compare([oldA, oldB, laterPartial].map((id) => ({ id, version: sourceVersion(manager, id) })));
+  assert.equal(newerEvidence.exact.length, 0, "non-movable later evidence still invalidates an old repeat");
+  assert.ok(newerEvidence.changed.some((item) => /revision changed/.test(item.reason)));
+  const staleMove = queueOperation(manager, { action: "move", ids: [oldA], version: sourceVersion(manager, oldA), verifiedAgainst: { id: oldB, version: sourceVersion(manager, oldB) } });
+  const beforeRejected = manager.getEntries().length;
+  assert.throws(() => planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: staleMove }), /Later same-path read.*revision v2.*unknown/);
+  assert.equal(manager.getEntries().length, beforeRejected);
+  assertPaired(manager);
 });
 
 test("read range relocation rejects shell results and retained Skill content", async () => {
@@ -228,6 +242,27 @@ test("Goal-scoped retention expires without retiring explicit session data", () 
   appendDrafts(manager, planned.entries);
   assert.equal(planned.state.values[`root/${goal}`].handling, "retired");
   assert.deepEqual(planned.state.pins.map((pin) => pin.id), [session]);
+});
+
+test("native projection edit lineage stays qualified in active, parent and historical recovery", () => {
+  const manager = host();
+  const id = toolExchange(manager, ["read"]).results[0];
+  const editId = manager.appendContextEdit(id, { content: [{ type: "text", text: "Agent hypothesis, not observed output" }] });
+  const version = sourceVersion(manager, id);
+  const check = (scope) => {
+    const found = searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { sourceScope: scope, query: "Agent hypothesis", ids: [id], rankedSources: [{ id, version }] });
+    for (const item of [found.hits[0], found.ranked.sources[0]]) {
+      assert.equal(item.authorship, "projection-derived");
+      assert.equal(item.derived, true);
+      assert.equal(item.editId, editId);
+      assert.match(item.qualification, /not original source content/);
+    }
+  };
+  check("active");
+  check("history");
+  applyOperation(manager, { action: "call", task: "recover edited observations" });
+  check("parent");
+  check("history");
 });
 
 test("parent/history retrieval and loaded copies preserve failed and truncated read qualifications", () => {

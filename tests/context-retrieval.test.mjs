@@ -40,6 +40,9 @@ test("parent retrieval uses the saved edit rather than the raw original", () => 
   assert.equal(found.hits.length, 1);
   assert.equal(found.hits[0].id, "parent");
   assert.equal(found.hits[0].origin, "parent");
+  assert.equal(found.hits[0].authorship, "projection-derived");
+  assert.equal(found.hits[0].derived, true);
+  assert.match(found.hits[0].qualification, /not original source content/);
   assert.equal(searchSources(index, state, { query: "raw original", scope: "parent" }).hits.length, 0);
   assert.equal(searchSources(index, state, { query: "edited answer", scope: "history" }).hits.some((hit) => hit.id === "parent"), true);
   assert.equal(searchSources(index, state, { query: "raw original", scope: "history" }).hits.some((hit) => hit.id === "parent"), true, "raw immutable versions remain separately recoverable");

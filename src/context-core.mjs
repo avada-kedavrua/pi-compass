@@ -2,7 +2,7 @@ import {
   VALUE_MESSAGE_TYPE, adoptValue, bindingKey, contentVersion, copyValue, currentValue, dataBlocks, isValueMessage, logicalSource, questionnaireContent,
   nativeValueViews, rawMessage as messageOf, releaseFrameValues, renderValue, validateValue, valueContent, valueMessage, writeValue,
 } from "./context-values.mjs";
-import { analyzeRepeatedSelections, rankVerifiedSources, readOnlyObservation, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
+import { analyzeRepeatedSelections, rankVerifiedSources, readObservationIdentity, readOnlyObservation, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
 import { loadContextArtifact, writeContextArtifact } from "./context-artifacts.mjs";
 export { contentVersion } from "./context-values.mjs";
 
@@ -138,7 +138,8 @@ function sourceIndex(branch, boundary) {
       groups.set(entry.id, group);
       for (const call of toolCalls) {
         calls.set(call.id, group);
-        callDetails.set(call.id, { name: call.name, arguments: structuredClone(call.arguments ?? {}) });
+        if (call.name === "read") callDetails.set(call.id, call);
+        else callDetails.delete(call.id);
       }
     }
     if (message?.role === "toolResult") {
@@ -555,8 +556,11 @@ function verifyMoveComparison(index, state, operation) {
     if (!afterSource || index.readRequests.get(id)?.name !== "read") continue;
     if (++scannedAfterSource > 256) fail("Too many later read results to verify relocation within the bounded safety scan; no context changed.");
     if (candidates.has(id)) continue;
+    const identity = readObservationIdentity(index, id);
+    if (identity?.path !== sourceObservation.path) continue;
     const observation = readOnlyObservation(index, id);
-    if (observation?.path === sourceObservation.path) candidates.set(id, { id, version: observation.payloadVersion });
+    if (!observation) fail(`Later same-path read ${id} is not complete and successful${identity.revision ? ` (native revision ${identity.revision})` : ""}; relocation freshness is unknown.`);
+    candidates.set(id, { id, version: observation.payloadVersion });
   }
   if (candidates.size > 16) fail("Too many read observations exist for this path to verify one relocation safely; no context changed.");
   const samePath = [...candidates.values()];

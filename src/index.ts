@@ -1241,7 +1241,8 @@ function contextOperationSchema() {
     lifetime: Type.Optional(Type.String({ enum: ["goal", "session"], description: "Retention lifetime, default current Goal. Frame ownership still ends on return." })),
     purpose: Type.Optional(Type.String({ minLength: 1, maxLength: 1000, description: "Why this spill artifact is needed." })),
     range: Type.Optional(range),
-    compare: Type.Optional(Type.Array(selection, { maxItems: 16, description: "For search: compare exact read-only sources/ranges; similarity is advisory, never an edit." })),
+    verifiedAgainst: Type.Optional(selection),
+    compare: Type.Optional(Type.Array(selection, { maxItems: 16, description: "For search: compare persisted successful read calls/ranges; changed or unknown file revision stays qualified. Similarity is advisory, never an edit." })),
     rankedSources: Type.Optional(Type.Array(selection, { maxItems: 16, description: "For search: Agent-selected source ordering; runtime verifies IDs, versions and ranges, not semantic scores." })),
     scope: Type.Optional(Type.String({ maxLength: 64, description: "Pin ownership, or transfer destination: root or an active frame ID; defaults to the current frame for pins." })),
 
@@ -1262,7 +1263,8 @@ function registerContextTool(pi: any) {
     promptSnippet: "Use same-session context frames only when isolating attention reduces total work; capture and export are explicit and default to none.",
     promptGuidelines: [
       "Frames/edits change attention, not Pi's append-only transcript or environment. Spill writes an explicit artifact; no filesystem rollback occurs.",
-      "Use search only when needed. Pass stable source IDs and versions; never infer them from message positions.",
+      "Use search only when needed. Pass stable source IDs and versions; never infer them from message positions. rankedSources preserves your semantic selection order; runtime verifies identity/ranges, not meaning.",
+      "For repeat-based move, select the prior complete read payload and pass verifiedAgainst with the later read ID/version. Exact repeats need the same read source/range and payload; subset relocation additionally needs a shared native file revision. Unknown or changed observations fail closed. The larger prior superset is retained; lines outside the refreshed subset remain qualified.",
       "A ref is shared and survives interruption; a copy is private and forks on write. Human originals and executed calls are read-only; explicit private copies are data.",
       "A frame cannot return while it owns live pi-await watches; use native unwatch, or action=transfer to move an owned watch to an active parent/root scope first. Repeating wakes remain live and do not complete ownership.",
     ],
