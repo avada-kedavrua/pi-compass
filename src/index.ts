@@ -102,6 +102,7 @@ let lastLoadoutSignature = "";
 let mutationQueue: Promise<any> = Promise.resolve();
 let loadoutRefreshPending = true;
 let statePersistedViaEntry = false;
+let activePi: any = null;
 const stableToolsByPi = new WeakMap<object, Set<string>>();
 const dynamicToolSignaturesByPi = new WeakMap<object, Map<string, string>>();
 const delegationRuntimes = new WeakMap<object, any>();
@@ -310,6 +311,7 @@ function ensureDelegationRuntime(pi: any) {
     }
   };
   const recordProgress = (payload: any) => {
+    if (activePi !== pi) return;
     const pending = matchingPending(runtime, payload);
     if (!pending) return;
     pending.started = true;
@@ -592,6 +594,7 @@ async function applyDelegationOutcome(pi: any, waveId: string, task: any, parsed
   });
 }
 async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") {
+  if (activePi !== pi) return;
   if (!state.goal.current || !state.plan?.tasks?.length) return;
   if (!dagApprovalStatus(state).approved) return;
   if (state.plan.goal && state.plan.goal !== state.goal.current) return;
@@ -624,6 +627,7 @@ async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") 
       return;
     }
     const availability = await executionAvailability(pi, contextCwd(ctx) || state.projectRoot || process.cwd(), latestInstruction);
+    if (activePi !== pi) return;
     if (!availability.ok) {
       const existing = state.plan.execution;
       const ids = ready.map((task: any) => task.id);
@@ -709,6 +713,7 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
     }
 
     const primaryResponses = await Promise.all(requests.map((request: any) => dispatchOneDelegation(pi, availability.runtime, request)));
+    if (activePi !== pi) return;
     const fallbackJobs: any[] = [];
     let unknown = false;
     for (let index = 0; index < requests.length; index += 1) {
@@ -768,6 +773,7 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
 
     if (fallbackJobs.length && dagApprovalStatus(state).approved) {
       const fallbackResponses = await Promise.all(fallbackJobs.map((job: any) => dispatchOneDelegation(pi, availability.runtime, job.request)));
+      if (activePi !== pi) return;
       for (let index = 0; index < fallbackJobs.length; index += 1) {
         const job = fallbackJobs[index];
         const response = fallbackResponses[index];
@@ -892,10 +898,11 @@ async function recordAutoDispatchFailure(pi: any, error: any) {
   });
 }
 async function runReadySubagentWavesSafely(pi: any, ctx: any, latestInstruction = "") {
+  if (activePi !== pi) return;
   try {
     await runReadySubagentWaves(pi, ctx, latestInstruction);
   } catch (error) {
-    await recordAutoDispatchFailure(pi, error);
+    if (activePi === pi) await recordAutoDispatchFailure(pi, error);
   }
 }
 function hasAutoDispatchWork() {
@@ -918,17 +925,17 @@ function scheduleReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") {
     autoSchedulers.set(pi, scheduler);
   }
   if (scheduler.promise) {
-    scheduler.rerunRequested = true;
+    // The active runner owns the current plan and already advances through
+    // dependency-ready waves. A second trigger must not queue a duplicate
+    // bridge probe or redispatch after a fail-closed result.
     return { started: false, coalesced: true };
   }
   if (!hasAutoDispatchWork()) return { started: false, coalesced: false };
   scheduler.rerunRequested = false;
   const running = Promise.resolve().then(() => runReadySubagentWavesSafely(pi, ctx, latestInstruction));
   scheduler.promise = running.finally(() => {
-    const rerun = scheduler!.rerunRequested && !executionUnresolved(state.plan?.execution);
     scheduler!.promise = null;
     scheduler!.rerunRequested = false;
-    if (rerun) scheduleReadySubagentWaves(pi, ctx, latestInstruction);
   });
   return { started: true, coalesced: false };
 }
@@ -2087,6 +2094,7 @@ function errorSummary(event: any): string {
 }
 
 export default function (pi: any) {
+  activePi = pi;
   state = emptyGoalRunState();
   contextState = emptyContextState();
   needsRestore = true;
