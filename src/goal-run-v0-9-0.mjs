@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { emptyDagState, readyTasks, createOrRevisePlan, taskAssessmentBinding, taskAssessmentIsCurrent } from "./dag-core.mjs";
 import { approvalIsCurrent, clearDagApprovalAnswer, createDagApprovalRequest, dagApprovalBinding, matchesDagApprovalQuestion } from "./dag-approval.mjs";
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
@@ -50,6 +51,7 @@ export function emptyGoalRunState() {
       version: 1,
     },
     plan: emptyDagState(),
+    routeSet: null,
     humanDecisions: [],
     nextHumanDecisionNumber: 1,
     sessionDirectives: [],
@@ -213,6 +215,109 @@ function normalizeExecutionDrift(value) {
     resolved: value.resolved === true,
   };
 }
+
+const ROUTE_STATUSES = new Set(["candidate", "selected", "rejected", "blocked", "evaluated"]);
+const ROUTE_RUN_STATUSES = new Set(["registered", "running", "completed", "failed", "unknown", "cancel_requested", "cancel_acknowledged", "cancelled"]);
+const ROUTE_CANCELLATION_PHASES = new Set(["requested", "acknowledged", "terminal", "unknown"]);
+const ROUTE_RESULT_STATUSES = new Set(["pass", "fail", "inconclusive"]);
+const ROUTE_ID = /^[A-Za-z][A-Za-z0-9_-]{0,39}$/;
+
+function normalizeRouteCriteria(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, MAX_ACCEPTANCE_CRITERIA).filter((item) => item && typeof item === "object" && typeof item.id === "string" && typeof item.text === "string" && item.text.trim()).map((item) => ({
+    id: item.id.slice(0, 32),
+    text: clip(item.text, 300),
+  }));
+}
+
+function normalizeRouteSet(value, fallbackGoalVersion = 1) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const goalVersion = Number.isInteger(value.goalVersion) && value.goalVersion > 0 ? value.goalVersion : fallbackGoalVersion;
+  const routes = Array.isArray(value.routes) ? value.routes.slice(0, 12).filter((route) => route && typeof route === "object" && typeof route.routeId === "string" && ROUTE_ID.test(route.routeId)).map((route) => ({
+    routeId: route.routeId,
+    summary: clip(route.summary, 500),
+    rationale: clip(route.rationale, 500),
+    assumptions: Array.isArray(route.assumptions) ? route.assumptions.filter((item) => typeof item === "string" && item.trim()).slice(0, 8).map((item) => clip(item, 300)) : [],
+    dependencies: Array.isArray(route.dependencies) ? route.dependencies.filter((item) => typeof item === "string" && item.trim()).slice(0, 8).map((item) => clip(item, 300)) : [],
+    expectedCost: clip(route.expectedCost || "unknown", 120),
+    expectedLatency: clip(route.expectedLatency || "unknown", 120),
+    risks: Array.isArray(route.risks) ? route.risks.filter((item) => typeof item === "string" && item.trim()).slice(0, 8).map((item) => clip(item, 300)) : [],
+    status: ROUTE_STATUSES.has(route.status) ? route.status : "candidate",
+    evidenceRefs: Array.isArray(route.evidenceRefs) ? route.evidenceRefs.filter((item) => typeof item === "string" && item.trim()).slice(0, 8).map((item) => clip(item, 160)) : [],
+    caveats: Array.isArray(route.caveats) ? route.caveats.filter((item) => typeof item === "string" && item.trim()).slice(0, 8).map((item) => clip(item, 400)) : [],
+    acceptanceGate: route.acceptanceGate === "passed" ? "passed" : route.acceptanceGate === "failed" ? "failed" : "unverified",
+  })) : [];
+  const routeIds = new Set(routes.map((route) => route.routeId));
+  const competitorRuns = Array.isArray(value.competitorRuns) ? value.competitorRuns.slice(-24).filter((run) => run && typeof run === "object" && typeof run.runId === "string" && typeof run.routeId === "string" && routeIds.has(run.routeId)).map((run) => ({
+    runId: run.runId.slice(0, 128),
+    routeId: run.routeId,
+    goalVersion: Number.isInteger(run.goalVersion) && run.goalVersion > 0 ? run.goalVersion : goalVersion,
+    baselineRef: clip(run.baselineRef, 300),
+    correlationId: clip(run.correlationId, 128),
+    status: ROUTE_RUN_STATUSES.has(run.status) ? run.status : "unknown",
+    registeredAt: typeof run.registeredAt === "string" ? run.registeredAt.slice(0, 64) : timestamp(),
+    result: run.result && typeof run.result === "object" ? {
+      criteria: normalizeRouteCriteriaResults(run.result.criteria),
+      caveats: Array.isArray(run.result.caveats) ? run.result.caveats.slice(0, 8).map((item) => clip(item, 400)) : [],
+      unresolvedCaveats: Array.isArray(run.result.unresolvedCaveats) ? run.result.unresolvedCaveats.slice(0, 8).map((item) => clip(item, 400)) : [],
+      evidenceRefs: Array.isArray(run.result.evidenceRefs) ? run.result.evidenceRefs.slice(0, 8).map((item) => clip(item, 160)) : [],
+      summary: clip(run.result.summary, 800),
+      acceptanceGate: run.result.acceptanceGate === "passed" ? "passed" : run.result.acceptanceGate === "failed" ? "failed" : "unverified",
+    } : null,
+    cancellation: run.cancellation && typeof run.cancellation === "object" ? {
+      requestId: clip(run.cancellation.requestId, 128),
+      phase: ROUTE_CANCELLATION_PHASES.has(run.cancellation.phase) ? run.cancellation.phase : "requested",
+      requestedAt: typeof run.cancellation.requestedAt === "string" ? run.cancellation.requestedAt.slice(0, 64) : timestamp(),
+      acknowledgedAt: typeof run.cancellation.acknowledgedAt === "string" ? run.cancellation.acknowledgedAt.slice(0, 64) : null,
+      terminalAt: typeof run.cancellation.terminalAt === "string" ? run.cancellation.terminalAt.slice(0, 64) : null,
+      terminalStatus: typeof run.cancellation.terminalStatus === "string" ? run.cancellation.terminalStatus.slice(0, 32) : null,
+    } : null,
+  })) : [];
+  return {
+    id: clip(value.id, 128),
+    goalVersion,
+    baselineRef: clip(value.baselineRef, 300),
+    acceptanceCriteria: normalizeRouteCriteria(value.acceptanceCriteria),
+    routes,
+    selectedRouteId: routeIds.has(value.selectedRouteId) ? value.selectedRouteId : null,
+    winningRouteId: routeIds.has(value.winningRouteId) ? value.winningRouteId : null,
+    stateVersion: Number.isInteger(value.stateVersion) && value.stateVersion >= 0 ? value.stateVersion : 0,
+    selectionRequest: value.selectionRequest && typeof value.selectionRequest === "object" ? value.selectionRequest : null,
+    exploration: value.exploration && typeof value.exploration === "object" ? {
+      authorized: value.exploration.authorized === true,
+      scope: clip(value.exploration.scope, 500),
+      budget: Number.isInteger(value.exploration.budget) && value.exploration.budget > 0 ? value.exploration.budget : 0,
+      routeIds: Array.isArray(value.exploration.routeIds) ? value.exploration.routeIds.filter((id) => routeIds.has(id)).slice(0, 12) : [],
+      sourceEntryId: clip(value.exploration.sourceEntryId, 128),
+      authorizedAt: typeof value.exploration.authorizedAt === "string" ? value.exploration.authorizedAt.slice(0, 64) : null,
+    } : { authorized: false, scope: "", budget: 0, routeIds: [], sourceEntryId: "", authorizedAt: null },
+    competitorRuns,
+    comparison: value.comparison && typeof value.comparison === "object" ? {
+      status: ["unverified", "inconclusive", "accepted"].includes(value.comparison.status) ? value.comparison.status : "unverified",
+      summary: clip(value.comparison.summary, 800),
+      caveats: Array.isArray(value.comparison.caveats) ? value.comparison.caveats.slice(0, 8).map((item) => clip(item, 400)) : [],
+    } : { status: "unverified", summary: "", caveats: [] },
+  };
+}
+
+function normalizeRouteCriteriaResults(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, MAX_ACCEPTANCE_CRITERIA).filter((item) => item && typeof item === "object" && typeof item.id === "string").map((item) => ({
+    id: item.id.slice(0, 32),
+    status: ROUTE_RESULT_STATUSES.has(item.status) ? item.status : "inconclusive",
+    evidence: clip(item.evidence, 1600),
+  }));
+}
+
+function routeSetBinding(routeSet) {
+  return createHash("sha256").update(JSON.stringify({
+    id: routeSet.id,
+    goalVersion: routeSet.goalVersion,
+    baselineRef: routeSet.baselineRef,
+    acceptanceCriteria: routeSet.acceptanceCriteria,
+    routes: routeSet.routes.map((route) => ({ routeId: route.routeId, summary: route.summary, status: route.status })),
+  })).digest("hex");
+}
 function canonicalDirective(value) {
   return String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -276,6 +381,7 @@ export function normalizeGoalRunState(raw) {
     nextTriageNumber: Number.isInteger(raw.nextTriageNumber) ? raw.nextTriageNumber : 1,
     goal: { ...empty.goal, ...(raw.goal ?? {}) },
     plan: raw.plan && typeof raw.plan === "object" ? raw.plan : emptyDagState(),
+    routeSet: normalizeRouteSet(raw.routeSet, raw.goal?.version),
     humanDecisions: Array.isArray(raw.humanDecisions)
       ? raw.humanDecisions.slice(-MAX_HUMAN_DECISIONS).map((item, index) => normalizeHumanDecisionRecord(item, index, raw.goal?.version)).filter(Boolean)
       : [],
@@ -378,6 +484,7 @@ export function normalizeGoalRunState(raw) {
     state.goal.acceptanceCriteria = [];
     state.goal.criteria = [];
     state.plan = emptyDagState();
+    state.routeSet = null;
   }
   if (!Array.isArray(state.plan.tasks)) state.plan.tasks = [];
   if (!state.trace || typeof state.trace !== "object") state.trace = { failures: [], writes: [] };
@@ -948,6 +1055,7 @@ export function applyGoalChange(stateValue, input) {
   state.goal.acceptanceCriteria = [];
   state.goal.criteria = [];
   state.plan = emptyDagState();
+  state.routeSet = null;
   state.plan.goal = newGoal;
   if (nextCriteria.length) syncAcceptanceCriteria(state, nextCriteria, "goal_change");
   state.plan.acceptanceCriteria = [...state.goal.acceptanceCriteria];
@@ -1668,6 +1776,12 @@ export function buildGoalAnchor(stateValue, maxChars = 2200, runtime = null) {
       lines.push(`Planning tools were surfaced because of ${clip(state.autoActivation.reason || "an explicit multi-part Goal", 80)}; no DAG was created. Use them only if they reduce coordination cost.`);
     }
   }
+  if (state.routeSet) {
+    const routeStatus = routeSetStatus(state);
+    lines.push(`RouteSet ${routeStatus.id} v${routeStatus.goalVersion}: alternatives=${routeStatus.routes.map((item) => `${item.routeId}:${item.status}/${item.acceptanceGate}`).join(", ")}; selected=${routeStatus.selectedRouteId || "-"}; accepted=${routeStatus.winningRouteId || "-"}.`);
+    if (routeStatus.exploration.authorized) lines.push(`Parallel exploration authorized: scope=${clip(routeStatus.exploration.scope, 120)}; budget=${routeStatus.exploration.budget}; competitors=${routeStatus.competitorRuns.length}.`);
+    if (routeStatus.comparison.status !== "unverified") lines.push(`Route comparison: ${routeStatus.comparison.status}; ${clip(routeStatus.comparison.summary, 180)}${routeStatus.comparison.caveats.length ? ` Caveats: ${routeStatus.comparison.caveats.slice(0, 2).join("; ")}` : ""}`);
+  }
 
   const optional = [];
   const subagentsUnavailable = runtime?.subagents && runtime.subagents.active === false && [true, false].includes(runtime.subagents.registered);
@@ -1935,6 +2049,7 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
     goalOutcome: outcome,
     goal: { version, current: clip(state.goal.current, 240), currentTruncated: state.goal.current.length > 240, originalTruncated: state.goal.originalTruncated === true, differsFromOriginal: state.goal.current !== state.goal.original },
     plan,
+    ...(state.routeSet ? { routeSet: routeSetStatus(state) } : {}),
     acceptance: {
       status: acceptance.status,
       total: acceptance.total,
@@ -2048,6 +2163,7 @@ export function availableCapabilities(stateValue) {
   const hasPlan = Boolean(state.plan?.goal && state.plan.tasks.length);
   const planningSignal = planningActivationSignal(goalText);
   const acceptanceSignal = /(?:acceptance criteria|acceptance test|definition of done|goal-level verification|验收标准|验收条件|完成标准|验收要求)/i.test(goalText);
+  const routeSignal = Boolean(state.routeSet) || /(?:alternative routes?|route set|parallel exploration|competing routes?|compare strategies|路线|方案对比|并行探索|备选方案)/i.test(goalText);
   const detailsSignal = Boolean(state.goal.originalTruncated || state.goal.sourceUpdateTruncated
     || String(state.goal.current ?? "").length > 1600
     || state.goal.updates.some((item) => item.goalVersion === version)
@@ -2062,6 +2178,7 @@ export function availableCapabilities(stateValue) {
   const currentFailures = state.trace.failures.some((item) => item.goalVersion === version);
   const caps = [];
   if (planningSignal || hasPlan || active.includes("planning") || state.autoActivation?.capability === "planning") caps.push("planning");
+  if (routeSignal || active.includes("routes")) caps.push("routes");
   if (currentCriteria || hasPlan || acceptanceSignal || active.includes("acceptance")) caps.push("acceptance");
   if (historySignal || active.includes("history")) caps.push("history");
   if (detailsSignal || active.includes("goal_details")) caps.push("goal_details");
@@ -2112,6 +2229,297 @@ export function summarizePlanStatus(stateValue) {
   return lines.join("\n");
 }
 
+function routeStateVersion(state, input) {
+  const expected = input?.expectedStateVersion;
+  if (!Number.isInteger(expected) || expected < 0) throw new Error("expectedStateVersion is required for RouteSet mutations. No state changed.");
+  const actual = state.routeSet?.stateVersion ?? 0;
+  if (expected !== actual) throw new Error(`Stale RouteSet state version ${expected}; current version is ${actual}. No state changed.`);
+}
+
+function routeInput(stateValue, input) {
+  const state = normalizeGoalRunState(stateValue);
+  if (!state.goal.current) throw new Error("No Goal has been captured in this session. No state changed.");
+  if (!state.routeSet) throw new Error("No RouteSet exists for the current Goal. No state changed.");
+  if (state.routeSet.goalVersion !== state.goal.version || state.routeSet.baselineRef === "") throw new Error("RouteSet is stale for the current Goal or has no baseline. No state changed.");
+  routeStateVersion(state, input);
+  return state;
+}
+
+function routeOptionQuestion(routeSet) {
+  return {
+    question: "Which route should Compass use for this Goal, or should explicitly authorized parallel exploration compare alternatives?",
+    header: "Route selection",
+    multiSelect: false,
+    options: [
+      ...routeSet.routes.map((route) => ({ label: route.routeId, description: route.summary })),
+      { label: "parallel_exploration", description: "Authorize parallel route exploration only after you provide an explicit scope and competitor budget." },
+    ],
+  };
+}
+
+export function createRouteSet(stateValue, input = {}) {
+  const state = normalizeGoalRunState(stateValue);
+  if (!state.goal.current) throw new Error("No Goal has been captured in this session. No state changed.");
+  if (state.routeSet) {
+    routeStateVersion(state, input);
+    if (state.routeSet.competitorRuns.some((run) => ["registered", "running", "unknown", "cancel_requested", "cancel_acknowledged"].includes(run.status))) {
+      throw new Error("Cannot replace a RouteSet while a competitor run is unresolved. No state changed.");
+    }
+  } else if (input.expectedStateVersion !== undefined && input.expectedStateVersion !== 0) {
+    throw new Error("The initial RouteSet expectedStateVersion must be 0. No state changed.");
+  }
+  const baselineRef = nonEmpty(input.baselineRef, "baselineRef", 300);
+  if (!Array.isArray(input.acceptanceCriteria) || input.acceptanceCriteria.length < 1) throw new Error("acceptanceCriteria must contain the shared criteria for every route. No state changed.");
+  const acceptanceCriteria = input.acceptanceCriteria.map((item, index) => {
+    if (typeof item === "string") return { id: `C${index + 1}`, text: nonEmpty(item, `acceptanceCriteria[${index}]`, 300) };
+    if (!item || typeof item !== "object") throw new Error(`acceptanceCriteria[${index}] must be a string or object. No state changed.`);
+    return { id: nonEmpty(item.id, `acceptanceCriteria[${index}].id`, 32), text: nonEmpty(item.text, `acceptanceCriteria[${index}].text`, 300) };
+  });
+  if (!Array.isArray(input.routes) || input.routes.length < 2 || input.routes.length > 12) throw new Error("routes must contain 2..12 alternatives. No state changed.");
+  const ids = new Set();
+  const routes = input.routes.map((route, index) => {
+    if (!route || typeof route !== "object") throw new Error(`routes[${index}] must be an object. No state changed.`);
+    const routeId = nonEmpty(route.routeId, `routes[${index}].routeId`, 40);
+    if (!ROUTE_ID.test(routeId)) throw new Error(`Route ID "${routeId}" is invalid. No state changed.`);
+    if (ids.has(routeId)) throw new Error(`Duplicate route ID "${routeId}". No state changed.`);
+    ids.add(routeId);
+    return {
+      routeId,
+      summary: nonEmpty(route.summary, `routes[${index}].summary`, 500),
+      rationale: clip(route.rationale, 500),
+      assumptions: Array.isArray(route.assumptions) ? route.assumptions.map((item, itemIndex) => nonEmpty(item, `routes[${index}].assumptions[${itemIndex}]`, 300)).slice(0, 8) : [],
+      dependencies: Array.isArray(route.dependencies) ? route.dependencies.map((item, itemIndex) => nonEmpty(item, `routes[${index}].dependencies[${itemIndex}]`, 300)).slice(0, 8) : [],
+      expectedCost: clip(route.expectedCost || "unknown", 120),
+      expectedLatency: clip(route.expectedLatency || "unknown", 120),
+      risks: Array.isArray(route.risks) ? route.risks.map((item, itemIndex) => nonEmpty(item, `routes[${index}].risks[${itemIndex}]`, 300)).slice(0, 8) : [],
+      status: "candidate",
+      evidenceRefs: [],
+      caveats: [],
+      acceptanceGate: "unverified",
+    };
+  });
+  const id = `RS${state.goal.version}-${state.eventSeq}`;
+  const routeSet = {
+    id,
+    goalVersion: state.goal.version,
+    baselineRef,
+    acceptanceCriteria,
+    routes,
+    selectedRouteId: null,
+    winningRouteId: null,
+    stateVersion: 1,
+    selectionRequest: {
+      id: `${id}-select`,
+      binding: "",
+      goalVersion: state.goal.version,
+      status: "awaiting_questionnaire",
+      sourceEntryId: "",
+      toolCallId: "",
+      questionnaire: null,
+      createdAt: timestamp(),
+    },
+    exploration: { authorized: false, scope: "", budget: 0, routeIds: [], sourceEntryId: "", authorizedAt: null },
+    competitorRuns: [],
+    comparison: { status: "unverified", summary: "", caveats: [] },
+  };
+  routeSet.selectionRequest.questionnaire = routeOptionQuestion(routeSet);
+  routeSet.selectionRequest.binding = routeSetBinding(routeSet);
+  state.routeSet = routeSet;
+  appendEvent(state, "route_set_created", { summary: `RouteSet ${id} created with ${routes.length} alternatives.`, ref: id });
+  return { state, routeSet };
+}
+
+export function bindRouteSetQuestionnaire(stateValue, input, sourceEntryId, toolCallId = "") {
+  const state = routeInput(stateValue, input);
+  const request = state.routeSet.selectionRequest;
+  if (!request || !["awaiting_questionnaire", "presented"].includes(request.status)) return { state, bound: false };
+  if (typeof sourceEntryId !== "string" || !sourceEntryId.trim()) return { state, bound: false };
+  const provided = input?.questionnaire ?? input;
+  if (JSON.stringify(provided) !== JSON.stringify(request.questionnaire)) return { state, bound: false };
+  request.sourceEntryId = sourceEntryId.slice(0, 128);
+  request.toolCallId = typeof toolCallId === "string" ? toolCallId.slice(0, 128) : "";
+  request.status = "presented";
+  return { state, bound: true, requestId: request.id };
+}
+
+export function recordRouteSelection(stateValue, input = {}) {
+  const state = routeInput(stateValue, input);
+  const request = state.routeSet.selectionRequest;
+  if (!request || request.status !== "presented" || request.id !== input.selectionRequestId || request.sourceEntryId !== input.sourceEntryId) throw new Error("Route selection questionnaire identity is stale or was not presented. No state changed.");
+  const questionnaire = input.questionnaire;
+  const answer = questionnaire?.answers?.length === 1 ? questionnaire.answers[0] : null;
+  if (!answer || questionnaire.outcome !== "answered" || questionnaire.unanswered?.length || answer.kind !== "option" || answer.answer !== answer.selected?.[0]) throw new Error("Route selection requires one clear structured Human answer. No state changed.");
+  const selected = answer.answer;
+  const route = state.routeSet.routes.find((item) => item.routeId === selected);
+  if (selected === "parallel_exploration") {
+    const scope = nonEmpty(input.exploration?.scope, "exploration.scope", 500);
+    const budget = input.exploration?.budget;
+    if (!Number.isInteger(budget) || budget < 2 || budget > 24) throw new Error("exploration.budget must be an integer from 2 to 24. No state changed.");
+    const routeIds = input.exploration?.routeIds ?? state.routeSet.routes.map((item) => item.routeId);
+    if (!Array.isArray(routeIds) || routeIds.length < 2 || routeIds.some((id) => !state.routeSet.routes.some((item) => item.routeId === id))) throw new Error("exploration.routeIds must name at least two exact RouteSet routes. No state changed.");
+    state.routeSet.exploration = { authorized: true, scope, budget, routeIds: [...new Set(routeIds)], sourceEntryId: input.sourceEntryId.slice(0, 128), authorizedAt: timestamp() };
+    request.status = "answered";
+    state.routeSet.stateVersion += 1;
+    appendEvent(state, "route_exploration_authorized", { summary: `Human authorized parallel exploration for ${state.routeSet.id}.`, ref: state.routeSet.id });
+    return { state, selected: null, exploration: state.routeSet.exploration };
+  }
+  if (!route) throw new Error(`Unknown or stale route identity "${selected}". No state changed.`);
+  state.routeSet.selectedRouteId = route.routeId;
+  route.status = "selected";
+  request.status = "answered";
+  state.routeSet.stateVersion += 1;
+  appendEvent(state, "route_selected", { summary: `Human selected route ${route.routeId}.`, ref: route.routeId });
+  return { state, selected: route.routeId, exploration: state.routeSet.exploration };
+}
+
+export function authorizeRouteExploration(stateValue, input = {}) {
+  const state = routeInput(stateValue, input);
+  const sourceDecisionId = nonEmpty(input.sourceDecisionId, "sourceDecisionId", 32);
+  const decision = state.humanDecisions.find((item) => item.id === sourceDecisionId && item.goalVersion === state.goal.version);
+  if (!decision) throw new Error("Parallel exploration requires an exact current-Goal Human decision identity. No state changed.");
+  const scope = nonEmpty(input.scope, "scope", 500);
+  const budget = input.budget;
+  if (!Number.isInteger(budget) || budget < 2 || budget > 24) throw new Error("budget must be an integer from 2 to 24. No state changed.");
+  const routeIds = input.routeIds ?? state.routeSet.routes.map((item) => item.routeId);
+  if (!Array.isArray(routeIds) || routeIds.length < 2 || routeIds.some((id) => !state.routeSet.routes.some((item) => item.routeId === id))) throw new Error("routeIds must name at least two exact RouteSet routes. No state changed.");
+  state.routeSet.exploration = { authorized: true, scope, budget, routeIds: [...new Set(routeIds)], sourceEntryId: decision.sourceEntryId, authorizedAt: timestamp() };
+  state.routeSet.stateVersion += 1;
+  appendEvent(state, "route_exploration_authorized", { summary: `Human decision ${sourceDecisionId} authorized parallel exploration.`, ref: state.routeSet.id });
+  return { state, exploration: state.routeSet.exploration };
+}
+
+export function registerCompetitorRun(stateValue, input = {}) {
+  const state = routeInput(stateValue, input);
+  const routeSet = state.routeSet;
+  if (!routeSet.exploration.authorized) throw new Error("Parallel exploration is not explicitly Human-authorized. No state changed.");
+  const runId = nonEmpty(input.runId, "runId", 128);
+  const routeId = nonEmpty(input.routeId, "routeId", 40);
+  if (!routeSet.exploration.routeIds.includes(routeId)) throw new Error(`Route ${routeId} is outside the authorized exploration set. No state changed.`);
+  if (routeSet.competitorRuns.some((run) => run.runId === runId)) throw new Error(`Competitor run identity ${runId} already exists. No state changed.`);
+  if (routeSet.competitorRuns.length >= routeSet.exploration.budget) throw new Error("The authorized competitor budget is exhausted. No state changed.");
+  const baselineRef = nonEmpty(input.baselineRef, "baselineRef", 300);
+  if (baselineRef !== routeSet.baselineRef) throw new Error("Competitor baseline does not match the RouteSet baseline. No state changed.");
+  const correlationId = nonEmpty(input.correlationId, "correlationId", 128);
+  const run = { runId, routeId, goalVersion: state.goal.version, baselineRef, correlationId, status: "registered", registeredAt: timestamp(), result: null, cancellation: null };
+  routeSet.competitorRuns.push(run);
+  routeSet.stateVersion += 1;
+  appendEvent(state, "route_competitor_registered", { summary: `Registered competitor ${runId} for route ${routeId}.`, ref: runId });
+  return { state, run };
+}
+
+export function recordCompetitorResult(stateValue, input = {}) {
+  const state = routeInput(stateValue, input);
+  const run = state.routeSet.competitorRuns.find((item) => item.runId === input.runId && item.routeId === input.routeId);
+  if (!run || run.goalVersion !== state.goal.version || run.baselineRef !== state.routeSet.baselineRef || run.correlationId !== input.correlationId) throw new Error("Competitor identity, Goal version, baseline, or correlation is stale. No state changed.");
+  if (["cancelled", "failed"].includes(run.status)) throw new Error(`Competitor ${run.runId} is already terminal. No state changed.`);
+  const criteria = input.criteria;
+  if (!Array.isArray(criteria) || criteria.length !== state.routeSet.acceptanceCriteria.length) throw new Error("Competitor result must report every shared acceptance criterion. No state changed.");
+  const expected = new Set(state.routeSet.acceptanceCriteria.map((item) => item.id));
+  const seen = new Set();
+  const normalizedCriteria = criteria.map((item, index) => {
+    if (!item || !expected.has(item.id) || seen.has(item.id) || !ROUTE_RESULT_STATUSES.has(item.status)) throw new Error(`Invalid or duplicate result criterion at index ${index}. No state changed.`);
+    seen.add(item.id);
+    return { id: item.id, status: item.status, evidence: nonEmpty(item.evidence, `criteria[${index}].evidence`, 1600) };
+  });
+  if (seen.size !== expected.size) throw new Error("Competitor result omitted a shared acceptance criterion. No state changed.");
+  const caveats = (input.caveats ?? []).map((item, index) => nonEmpty(item, `caveats[${index}]`, 400));
+  const unresolvedCaveats = (input.unresolvedCaveats ?? []).map((item, index) => nonEmpty(item, `unresolvedCaveats[${index}]`, 400));
+  const acceptanceGate = normalizedCriteria.every((item) => item.status === "pass") && unresolvedCaveats.length === 0 ? "passed" : "failed";
+  run.status = input.status === "failed" ? "failed" : "completed";
+  run.result = { criteria: normalizedCriteria, caveats: [...new Set(caveats)], unresolvedCaveats: [...new Set(unresolvedCaveats)], evidenceRefs: Array.isArray(input.evidenceRefs) ? input.evidenceRefs.slice(0, 8).map((item) => clip(item, 160)) : [], summary: clip(input.summary, 800), acceptanceGate };
+  const route = state.routeSet.routes.find((item) => item.routeId === run.routeId);
+  route.acceptanceGate = acceptanceGate;
+  route.caveats = run.result.caveats.concat(run.result.unresolvedCaveats);
+  route.evidenceRefs = run.result.evidenceRefs;
+  route.status = "evaluated";
+  routeSetComparison(state);
+  state.routeSet.stateVersion += 1;
+  appendEvent(state, "route_competitor_result", { summary: `Recorded ${run.runId} result for route ${run.routeId}; acceptance gate ${acceptanceGate}.`, ref: run.runId, status: acceptanceGate });
+  return { state, run, acceptanceGate };
+}
+
+function routeSetComparison(state) {
+  const results = state.routeSet.routes.filter((route) => route.acceptanceGate !== "unverified");
+  const winner = results.find((route) => route.acceptanceGate === "passed");
+  state.routeSet.comparison = {
+    status: winner ? "accepted" : results.length ? "inconclusive" : "unverified",
+    summary: winner ? `Route ${winner.routeId} satisfies all shared acceptance criteria without unresolved caveats.` : results.length ? "No evaluated route has passed the shared acceptance gate." : "No route result has been recorded.",
+    caveats: results.flatMap((route) => route.caveats).slice(0, 8),
+  };
+}
+
+export function selectRoute(stateValue, input = {}) {
+  const state = routeInput(stateValue, input);
+  const route = state.routeSet.routes.find((item) => item.routeId === input.routeId);
+  if (!route) throw new Error(`Unknown or stale route identity "${input.routeId}". No state changed.`);
+  if (state.plan.tasks.length && state.plan.routeId && state.plan.routeId !== route.routeId) throw new Error(`The current DAG belongs to route ${state.plan.routeId}; select that exact route or revise the DAG. No state changed.`);
+  state.routeSet.selectedRouteId = route.routeId;
+  route.status = "selected";
+  if (route.acceptanceGate === "passed") {
+    state.routeSet.winningRouteId = route.routeId;
+    state.routeSet.comparison.status = "accepted";
+  }
+  state.routeSet.stateVersion += 1;
+  appendEvent(state, "route_selected", { summary: `Selected route ${route.routeId}; acceptance gate ${route.acceptanceGate}.`, ref: route.routeId });
+  return { state, route, acceptanceGated: route.acceptanceGate === "passed" };
+}
+
+export function updateCompetitorCancellation(stateValue, input = {}) {
+  const state = routeInput(stateValue, input);
+  const run = state.routeSet.competitorRuns.find((item) => item.runId === input.runId && item.routeId === input.routeId);
+  if (!run || run.goalVersion !== state.goal.version || run.baselineRef !== state.routeSet.baselineRef || run.correlationId !== input.correlationId) throw new Error("Competitor identity, Goal version, baseline, or correlation is stale. No state changed.");
+  if (input.action === "request") {
+    if (state.routeSet.winningRouteId === null || state.routeSet.comparison.status !== "accepted") throw new Error("Competitor cancellation is acceptance-gated; no accepted route exists. No state changed.");
+    if (run.routeId === state.routeSet.winningRouteId) throw new Error("The accepted route cannot be cancelled as a competitor. No state changed.");
+    if (!["registered", "running", "unknown"].includes(run.status)) throw new Error(`Competitor ${run.runId} is not cancellable from status ${run.status}. No state changed.`);
+    const requestId = nonEmpty(input.requestId, "requestId", 128);
+    run.cancellation = { requestId, phase: "requested", requestedAt: timestamp(), acknowledgedAt: null, terminalAt: null, terminalStatus: null };
+    run.status = "cancel_requested";
+  } else {
+    const cancellation = run.cancellation;
+    if (!cancellation || cancellation.requestId !== input.requestId) throw new Error("Cancellation request identity is stale or unknown. No state changed.");
+    if (input.action === "ack") {
+      if (cancellation.phase !== "requested") throw new Error("Cancellation acknowledgement is out of order. No state changed.");
+      cancellation.phase = "acknowledged";
+      cancellation.acknowledgedAt = timestamp();
+      run.status = "cancel_acknowledged";
+    } else if (input.action === "terminal") {
+      if (!["requested", "acknowledged"].includes(cancellation.phase)) throw new Error("Cancellation terminal acknowledgement is out of order. No state changed.");
+      cancellation.phase = "terminal";
+      cancellation.terminalAt = timestamp();
+      cancellation.terminalStatus = nonEmpty(input.terminalStatus, "terminalStatus", 32);
+      run.status = "cancelled";
+    } else if (input.action === "unknown") {
+      cancellation.phase = "unknown";
+      cancellation.terminalAt = timestamp();
+      cancellation.terminalStatus = "unknown";
+      run.status = "unknown";
+    } else throw new Error(`Unknown cancellation action ${input.action}. No state changed.`);
+  }
+  state.routeSet.stateVersion += 1;
+  appendEvent(state, "route_cancellation", { summary: `Competitor ${run.runId} cancellation ${run.cancellation.phase}.`, ref: run.runId, status: run.cancellation.phase });
+  return { state, run, cancellation: run.cancellation };
+}
+
+export function routeSetStatus(stateValue) {
+  const state = normalizeGoalRunState(stateValue);
+  if (!state.routeSet) return { exists: false, stateVersion: 0 };
+  return {
+    exists: true,
+    id: state.routeSet.id,
+    goalVersion: state.routeSet.goalVersion,
+    baselineRef: state.routeSet.baselineRef,
+    stateVersion: state.routeSet.stateVersion,
+    selectedRouteId: state.routeSet.selectedRouteId,
+    winningRouteId: state.routeSet.winningRouteId,
+    exploration: { ...state.routeSet.exploration },
+    comparison: { ...state.routeSet.comparison },
+    routes: state.routeSet.routes.map((route) => ({ routeId: route.routeId, status: route.status, acceptanceGate: route.acceptanceGate, caveats: route.caveats, evidenceRefs: route.evidenceRefs })),
+    competitorRuns: state.routeSet.competitorRuns.map((run) => ({ runId: run.runId, routeId: run.routeId, goalVersion: run.goalVersion, baselineRef: run.baselineRef, correlationId: run.correlationId, status: run.status, cancellation: run.cancellation, result: run.result })),
+    selectionRequest: state.routeSet.selectionRequest ? { id: state.routeSet.selectionRequest.id, status: state.routeSet.selectionRequest.status, sourceEntryId: state.routeSet.selectionRequest.sourceEntryId, questionnaire: state.routeSet.selectionRequest.questionnaire } : null,
+  };
+}
+
 export function revisePlanState(stateValue, input) {
   const state = normalizeGoalRunState(stateValue);
   if (!state.goal.current) throw new Error("No Goal has been captured in this session.");
@@ -2131,6 +2539,7 @@ export function revisePlanState(stateValue, input) {
     throw new Error(`Cannot materially revise the DAG while Subagent batch ${state.plan.execution.requestId} is ${state.plan.execution.status}; reconcile the batch first.`);
   }
   state.plan = nextPlan;
+  if (state.routeSet?.selectedRouteId) state.plan.routeId = state.routeSet.selectedRouteId;
   if (changed) {
     state.plan.execution = null;
     state.plan.executionDrift = null;

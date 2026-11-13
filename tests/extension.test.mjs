@@ -165,6 +165,25 @@ const tasks = [
   { id: "smoke", title: "Implement smoke path", acceptance: "A real UI-to-API path is exercised", dependsOn: ["api", "ui"], writeScope: "src/smoke" },
 ];
 
+test("RouteSet capability exposes structured selection without creating a DAG", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  await captureGoal(pi, "Goal: compare strategies before implementation");
+  await openCapability(pi, "routes");
+  const routeTool = currentTool(pi, "compass_route");
+  assert.ok(routeTool, "RouteSet action tool is registered");
+  const created = await routeTool.execute("create-route-set", {
+    action: "create",
+    expectedStateVersion: 0,
+    baselineRef: "git:baseline",
+    acceptanceCriteria: ["Shared criterion passes"],
+    routes: [{ routeId: "routeA", summary: "Use the existing path" }, { routeId: "routeB", summary: "Use a replacement path" }],
+  }, undefined, undefined, ctx(pi));
+  assert.equal(latestState(pi).plan.tasks.length, 0);
+  assert.equal(created.details.routeSet.routes.length, 2);
+  assert.match(created.content[0].text, /structured selection questionnaire/);
+});
+
 test("simple Goal exposes only compact Compass state and preserves native tool activation", async () => {
   const pi = fakePi();
   extensionFactory(pi);
@@ -666,7 +685,7 @@ test("an explicit Human prohibition blocks automatic Subagent dispatch", async (
   assert.match(patch.content.at(-1).text, /Before any DAG task starts, present the exact structured Human question/);
 });
 
-test("active DAG blocks explicit out-of-scope writes before tool execution, but allows in-scope writes", async () => {
+test("active DAG records explicit out-of-scope writes as advisory drift, but does not global-lock the Agent", async () => {
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi, "Goal: implement multiple independent workstreams and keep edits within declared task scope");
@@ -684,15 +703,14 @@ test("active DAG blocks explicit out-of-scope writes before tool execution, but 
   const allowed = await pi.events.get("tool_call")({ toolName: "write", input: { path: "src/a.ts", content: "ok" } }, ctx(pi));
   assert.equal(allowed, undefined, "in-scope path write is allowed");
   const blocked = await pi.events.get("tool_call")({ toolName: "write", input: { path: "README.md", content: "out of scope" } }, ctx(pi));
-  assert.equal(blocked.block, true);
-  assert.match(blocked.reason, /outside every declared scope/);
+  assert.equal(blocked, undefined, "path-scope drift is advisory and does not block native writes");
   assert.match(latestState(pi).plan.executionDrift.reason, /outside every declared scope/);
 
   const mixedPatch = await pi.events.get("tool_call")({ toolName: "apply_patch", input: { patch: "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** Update File: README.md\n@@\n-old\n+new\n*** End Patch" } }, ctx(pi));
-  assert.equal(mixedPatch.block, true, "a patch containing any out-of-scope file is blocked before application");
+  assert.equal(mixedPatch, undefined, "a patch containing an out-of-scope file remains Agent/native coordination");
 });
 
-test("active DAG blocks writes without a writable in-progress task, while simple Goals remain unrestricted", async () => {
+test("active DAG records writes without a writable task as advisory drift, while simple Goals remain unrestricted", async () => {
   const simple = fakePi();
   extensionFactory(simple);
   await captureGoal(simple, "Goal: change one file");
@@ -710,8 +728,8 @@ test("active DAG blocks writes without a writable in-progress task, while simple
     ],
   }, undefined, undefined, ctx(pi));
   const blocked = await pi.events.get("tool_call")({ toolName: "write", input: { path: "src/a.ts", content: "not yet" } }, ctx(pi));
-  assert.equal(blocked.block, true);
-  assert.match(blocked.reason, /no writable DAG task is in progress/);
+  assert.equal(blocked, undefined);
+  assert.match(latestState(pi).plan.executionDrift.reason, /no writable DAG task was in progress/);
 });
 
 test("loader contains only missing capability groups after a partial open", async () => {
@@ -1264,10 +1282,9 @@ test("path-based writes report scope drift immediately without injecting a Goal 
   await pi.events.get("tool_call")({ toolName: "edit", input: { path: "src/a.ts" } }, ctx(pi));
   assert.equal(latestState(pi).plan.executionDrift, null, "a write within the declared scope does not create drift");
   const blocked = await pi.events.get("tool_call")({ toolName: "edit", input: { path: "src/outside.ts" } }, ctx(pi));
-  assert.equal(blocked.block, true, "an explicit out-of-scope write is blocked before the edit tool runs");
+  assert.equal(blocked, undefined, "an explicit out-of-scope write remains Agent/native coordination");
   assert.match(latestState(pi).plan.executionDrift.reason, /outside every declared scope/i);
   const context = await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.match(blocked.reason, /outside every declared scope/i, "the actual blocked tool result already carries the actionable warning");
   assert.equal(context, undefined, "do not repeat the failure in every later provider request");
 });
 

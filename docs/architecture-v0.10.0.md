@@ -157,16 +157,16 @@ Exit: unapproved and stale plans cannot execute; clear approval can proceed; sem
 
 ## M6 — route choice, exploration and acceptance-gated stopping
 
-- [ ] Distinguish alternative routes from a chosen route's DAG; no automatic route fan-out from merely mentioning alternatives.
-- [ ] Use structured questions to align default/recommended versus Human-selected routes when the decision matters.
-- [ ] Represent explicit authorization for parallel exploration, its scope/budget and result correlation; do not infer authorization from task size.
-- [ ] Compare results against shared acceptance criteria and caveats, not first-finished-wins.
-- [ ] Allow exact-identity cancellation of competitors only after the explicit acceptance gate passes.
-- [ ] Track cancellation request/acknowledgement/terminal status separately; unknown termination remains unknown.
-- [ ] Leave filesystem/worktree/environment coordination to the Agent and native execution capabilities; remove redundant Compass global write-lock policy.
-- [ ] Instruct the Agent to stop and revisit root cause when new evidence invalidates the route; provide nested context operations without pretending code can recognize every semantic failure.
+- [x] Distinguish alternative routes from a chosen route's DAG; no automatic route fan-out from merely mentioning alternatives.
+- [x] Use a structured RouteSet questionnaire to align Human-selected routes when the decision matters.
+- [x] Represent explicit authorization for parallel exploration, its scope/budget and correlated competitor identities; do not infer authorization from task size.
+- [x] Compare results against shared acceptance criteria and caveats, not first-finished-wins.
+- [x] Allow exact-identity cancellation of competitors only after the explicit acceptance gate passes.
+- [x] Track cancellation request/acknowledgement/terminal status separately; unknown termination remains unknown.
+- [x] Leave filesystem/worktree/environment coordination to the Agent and native execution capabilities; Compass retains advisory path-scope evidence but no global write lock.
+- [x] Instruct the Agent to stop and revisit root cause when new evidence invalidates the route; existing triage/context operations remain advisory and do not pretend code can recognize every semantic failure.
 
-Exit: unauthorized exploration and premature cancellation are rejected; accepted-route evidence is retained; no new Router or scheduler.
+Exit: unauthorized exploration and premature cancellation are rejected; accepted-route evidence is retained; no new Router or scheduler. The implemented RouteSet is persisted in GoalRun, uses stable Goal/version/baseline bindings and fixed actions with stale-input rejection. It does not create branches or DAG siblings.
 
 ## M7 — simplify, measure, document and deliver
 

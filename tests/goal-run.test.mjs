@@ -32,6 +32,15 @@ import {
   renewDagApprovalRequest,
   dagApprovalStatus,
   recordTaskAssessment,
+  createRouteSet,
+  bindRouteSetQuestionnaire,
+  recordRouteSelection,
+  authorizeRouteExploration,
+  registerCompetitorRun,
+  recordCompetitorResult,
+  selectRoute,
+  updateCompetitorCancellation,
+  routeSetStatus,
 } from "../src/goal-run-v0-9-0.mjs";
 import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
 import { createOrRevisePlan, emptyDagState, readyTasks, updateTasks } from "../src/dag-core.mjs";
@@ -67,6 +76,64 @@ function completeAndAssess(state, taskId, evidence) {
   state = transitionTasks(state, "done", [{ id: taskId, evidence }], updateTasks).state;
   return recordTaskAssessment(state, { taskId, status: "pass", evidence: `Assessment against approved criterion: ${evidence}`, caveats: [], unresolvedCaveats: [] }).state;
 }
+function routeState() {
+  const state = withGoal("Goal: compare two implementation strategies");
+  return createRouteSet(state, {
+    expectedStateVersion: 0,
+    baselineRef: "git:baseline",
+    acceptanceCriteria: ["Shared smoke test passes"],
+    routes: [{ routeId: "routeA", summary: "Use the existing adapter" }, { routeId: "routeB", summary: "Replace the adapter" }],
+  }).state;
+}
+function authorizeRoutes(state) {
+  const request = state.routeSet.selectionRequest;
+  state = bindRouteSetQuestionnaire(state, { expectedStateVersion: 1, questionnaire: request.questionnaire }, "route-entry", "route-call").state;
+  return recordRouteSelection(state, {
+    expectedStateVersion: 1,
+    selectionRequestId: request.id,
+    sourceEntryId: "route-entry",
+    questionnaire: { outcome: "answered", answers: [{ answer: "parallel_exploration", selected: ["parallel_exploration"], kind: "option" }] },
+    exploration: { scope: "read-only evidence only", budget: 4, routeIds: ["routeA", "routeB"] },
+  }).state;
+}
+
+test("RouteSet rejects unauthorized parallel exploration", () => {
+  const state = routeState();
+  assert.throws(() => registerCompetitorRun(state, {
+    expectedStateVersion: 1, runId: "run-a", routeId: "routeA", baselineRef: "git:baseline", correlationId: "corr-a",
+  }), /not explicitly Human-authorized/);
+  assert.equal(routeSetStatus(state).exploration.authorized, false);
+});
+
+test("RouteSet preserves exact competitor identity and shared acceptance evidence", () => {
+  let state = authorizeRoutes(routeState());
+  state = registerCompetitorRun(state, { expectedStateVersion: 2, runId: "run-a", routeId: "routeA", baselineRef: "git:baseline", correlationId: "corr-a" }).state;
+  assert.throws(() => recordCompetitorResult(state, { expectedStateVersion: 3, runId: "run-a", routeId: "routeB", correlationId: "corr-a", criteria: [{ id: "C1", status: "pass", evidence: "ok" }] }), /identity.*stale/);
+  const result = recordCompetitorResult(state, { expectedStateVersion: 3, runId: "run-a", routeId: "routeA", correlationId: "corr-a", criteria: [{ id: "C1", status: "pass", evidence: "shared smoke test passed" }] });
+  assert.equal(result.acceptanceGate, "passed");
+  assert.equal(result.state.routeSet.competitorRuns[0].result.criteria[0].id, "C1");
+});
+
+test("RouteSet cancellation is acceptance-gated and tracks unknown termination", () => {
+  let state = authorizeRoutes(routeState());
+  state = registerCompetitorRun(state, { expectedStateVersion: 2, runId: "run-a", routeId: "routeA", baselineRef: "git:baseline", correlationId: "corr-a" }).state;
+  state = registerCompetitorRun(state, { expectedStateVersion: 3, runId: "run-b", routeId: "routeB", baselineRef: "git:baseline", correlationId: "corr-b" }).state;
+  assert.throws(() => updateCompetitorCancellation(state, { expectedStateVersion: 4, action: "request", runId: "run-b", routeId: "routeB", correlationId: "corr-b", requestId: "cancel-1" }), /acceptance-gated/);
+  state = recordCompetitorResult(state, { expectedStateVersion: 4, runId: "run-a", routeId: "routeA", correlationId: "corr-a", criteria: [{ id: "C1", status: "pass", evidence: "accepted route evidence" }] }).state;
+  state = selectRoute(state, { expectedStateVersion: 5, routeId: "routeA" }).state;
+  state = updateCompetitorCancellation(state, { expectedStateVersion: 6, action: "request", runId: "run-b", routeId: "routeB", correlationId: "corr-b", requestId: "cancel-1" }).state;
+  state = updateCompetitorCancellation(state, { expectedStateVersion: 7, action: "unknown", runId: "run-b", routeId: "routeB", correlationId: "corr-b", requestId: "cancel-1" }).state;
+  assert.equal(state.routeSet.competitorRuns.find((run) => run.runId === "run-b").status, "unknown");
+  assert.equal(state.routeSet.competitorRuns.find((run) => run.runId === "run-b").cancellation.phase, "unknown");
+});
+
+test("selected RouteSet route stays isolated from the DAG until the Agent creates one", () => {
+  let state = routeState();
+  state = selectRoute(state, { expectedStateVersion: 1, routeId: "routeA" }).state;
+  assert.equal(state.plan.tasks.length, 0);
+  assert.equal(state.routeSet.selectedRouteId, "routeA");
+  assert.equal(state.plan.routeId, undefined);
+});
 
 test("first prompt is immutable Original Goal; later prompts are recorded updates", () => {
   const first = captureHumanPrompt(emptyGoalRunState(), "Goal: implement smoke test");

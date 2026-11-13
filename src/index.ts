@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import fs from "node:fs";
 import os from "node:os";
-import { executionDriftReason, writeGuardDecision } from "./write-scope.mjs";
+import { executionDriftReason } from "./write-scope.mjs";
 import { questionnaireFailureResultPatch } from "./questionnaire-integration.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +47,7 @@ import {
   shouldSurfaceIssueReview,
   captureHumanPrompt,
   bindDagApprovalQuestionnaire,
+  bindRouteSetQuestionnaire,
   captureHumanDecision,
   dagApprovalStatus,
   recordTaskAssessment,
@@ -62,6 +63,14 @@ import {
   recordExecutionDrift,
   recordExecutionEvent,
   recordWriteTarget,
+  createRouteSet,
+  recordRouteSelection,
+  authorizeRouteExploration,
+  registerCompetitorRun,
+  recordCompetitorResult,
+  selectRoute,
+  updateCompetitorCancellation,
+  routeSetStatus,
   revisePlanState,
   summarizePlanStatus,
   transitionTasks,
@@ -1339,6 +1348,7 @@ function capabilitySchemaSignature(capability: string): string {
   if (capability === "goal_change") return "goal-change-v1";
   if (capability === "acceptance") return "acceptance-v1";
   if (capability === "history") return `history-v1|dag:${state.plan.tasks.length > 0}`;
+  if (capability === "routes") return "routes-v1";
   return "fixed";
 }
 function loadoutSignature(capabilities: string[]) {
@@ -1381,9 +1391,81 @@ function planReviseSchema() {
   }, { additionalProperties: false });
 }
 
+function routeSchema() {
+  return Type.Object({
+    action: Type.String({ enum: ["create", "status", "select", "authorize_exploration", "register_competitor", "result", "cancel_request", "cancel_ack", "cancel_terminal", "cancel_unknown"] }),
+    expectedStateVersion: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000_000 })),
+    baselineRef: Type.Optional(Type.String({ maxLength: 300 })),
+    acceptanceCriteria: Type.Optional(Type.Array(Type.Union([Type.String({ minLength: 1, maxLength: 300 }), Type.Object({ id: Type.String({ minLength: 1, maxLength: 32 }), text: Type.String({ minLength: 1, maxLength: 300 }) }, { additionalProperties: false })]), { maxItems: 12 })),
+    routes: Type.Optional(Type.Array(Type.Object({
+      routeId: Type.String({ minLength: 1, maxLength: 40, pattern: "^[A-Za-z][A-Za-z0-9_-]{0,39}$" }),
+      summary: Type.String({ minLength: 1, maxLength: 500 }),
+      rationale: Type.Optional(Type.String({ maxLength: 500 })),
+      assumptions: Type.Optional(Type.Array(Type.String({ maxLength: 300 }), { maxItems: 8 })),
+      dependencies: Type.Optional(Type.Array(Type.String({ maxLength: 300 }), { maxItems: 8 })),
+      expectedCost: Type.Optional(Type.String({ maxLength: 120 })),
+      expectedLatency: Type.Optional(Type.String({ maxLength: 120 })),
+      risks: Type.Optional(Type.Array(Type.String({ maxLength: 300 }), { maxItems: 8 })),
+    }, { additionalProperties: false }), { minItems: 2, maxItems: 12 })),
+    routeId: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
+    runId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    correlationId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    selectionRequestId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    sourceEntryId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    questionnaire: Type.Optional(Type.Object({ outcome: Type.String(), answers: Type.Array(Type.Object({ answer: Type.Optional(Type.String()), selected: Type.Optional(Type.Array(Type.String())), kind: Type.Optional(Type.String()) }, { additionalProperties: true })) }, { additionalProperties: true })),
+    exploration: Type.Optional(Type.Object({ scope: Type.String({ minLength: 1, maxLength: 500 }), budget: Type.Integer({ minimum: 2, maximum: 24 }), routeIds: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 40 }), { minItems: 2, maxItems: 12 })) }, { additionalProperties: false })),
+    criteria: Type.Optional(Type.Array(Type.Object({ id: Type.String({ minLength: 1, maxLength: 32 }), status: Type.String({ enum: ["pass", "fail", "inconclusive"] }), evidence: Type.String({ minLength: 1, maxLength: 1600 }) }, { additionalProperties: false }), { maxItems: 12 })),
+    caveats: Type.Optional(Type.Array(Type.String({ maxLength: 400 }), { maxItems: 8 })),
+    unresolvedCaveats: Type.Optional(Type.Array(Type.String({ maxLength: 400 }), { maxItems: 8 })),
+    evidenceRefs: Type.Optional(Type.Array(Type.String({ maxLength: 160 }), { maxItems: 8 })),
+    summary: Type.Optional(Type.String({ maxLength: 800 })),
+    status: Type.Optional(Type.String({ enum: ["failed"] })),
+    requestId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    terminalStatus: Type.Optional(Type.String({ maxLength: 32 })),
+  }, { additionalProperties: false });
+}
+
 function registerCapabilityGroup(pi: any, capability: string): string[] {
   const names: string[] = [];
   const activeCheck = (expected: string) => assertCapability(expected);
+
+  if (capability === "routes") {
+    names.push(registerDynamic(pi, "compass_route", {
+      label: "RouteSet",
+      description: "Manage one compact RouteSet authority for alternative strategies. Alternatives are not DAG siblings; exploration requires explicit Human authorization and competitor cancellation requires an accepted shared-criteria result.",
+      promptSnippet: "Create a RouteSet only for materially different strategies; use exact route/run identities and expectedStateVersion for mutations.",
+      parameters: routeSchema(),
+      async execute(_id: string, params: any, ...rest: any[]) {
+        return serialized(async () => {
+          const ctx = getContext(rest);
+          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          activeCheck("routes");
+          const action = params.action;
+          let result: any;
+          if (action === "status") {
+            return readResult(JSON.stringify(routeSetStatus(state)), { routeSet: routeSetStatus(state) });
+          }
+          if (action === "create") result = noMutation(() => createRouteSet(state, params));
+          else if (action === "select") {
+            result = params.questionnaire
+              ? noMutation(() => recordRouteSelection(state, params))
+              : noMutation(() => selectRoute(state, params));
+          } else if (action === "authorize_exploration") result = noMutation(() => authorizeRouteExploration(state, params));
+          else if (action === "register_competitor") result = noMutation(() => registerCompetitorRun(state, params));
+          else if (action === "result") result = noMutation(() => recordCompetitorResult(state, params));
+          else if (action.startsWith("cancel_")) result = noMutation(() => updateCompetitorCancellation(state, { ...params, action: action.slice("cancel_".length) }));
+          else throw new Error(`Unknown RouteSet action ${action}. No state changed.`);
+          state = result.state;
+          afterMutation(pi, contextCwd(ctx));
+          const summary = action === "create"
+            ? `RouteSet ${result.routeSet.id} created; present its exact structured selection questionnaire before choosing or authorizing exploration.`
+            : `RouteSet action ${action} applied at stateVersion ${state.routeSet?.stateVersion ?? 0}.`;
+          return stateResult(summary, { mutation: `route_${action}`, routeSet: routeSetStatus(state), questionnaire: state.routeSet?.selectionRequest?.questionnaire ?? null });
+        });
+      },
+    }));
+    return names;
+  }
 
   if (capability === "planning") {
     if (!state.plan.goal || !state.plan.tasks.length) {
@@ -2333,7 +2415,10 @@ export default function (pi: any) {
       const callId = String(event?.toolCallId ?? event?.callId ?? "");
       const sourceEntryId = persistedAssistantEntryId(getContext([ctx]), callId);
       const bound = bindDagApprovalQuestionnaire(state, event?.input, sourceEntryId, callId);
-      if (bound.bound) persistState(pi);
+      const routeBound = state.routeSet
+        ? bindRouteSetQuestionnaire(state, { expectedStateVersion: state.routeSet.stateVersion, questionnaire: event?.input }, sourceEntryId, callId)
+        : { bound: false };
+      if (bound.bound || routeBound.bound) persistState(pi);
     }
     if (event?.toolName === "compass_context" && event?.parentToolCallId && event?.input?.action !== "search") {
       return { block: true, reason: "Context mutations require a direct standalone compass_context call, not a nested Code Mode call. No context changed." };
@@ -2354,26 +2439,16 @@ export default function (pi: any) {
         const item = state.trace.writes.at(-1);
         persistTrace(pi, { kind: "write", item });
       }
-      const guard = hasActivePlan ? writeGuardDecision({ tasks: state.plan.tasks, target, cwd, hasPlan: true, goalMatches: true }) : null;
-      const driftReason = guard?.blocked ? guard.reason : executionDriftReason({ tasks: state.plan.tasks, target, cwd });
+      const driftReason = hasActivePlan ? executionDriftReason({ tasks: state.plan.tasks, target, cwd }) : "";
       const drift = driftReason ? recordExecutionDrift(state, { tool: event?.toolName, target, reason: driftReason }) : { state, changed: false };
       if (drift.changed) { state = drift.state; driftChanged = true; }
     }
     activated = maybeAutoActivatePlanning(cwd);
-    // A plan-backed write guard is fail-closed only for deterministic, explicit
-    // path writes. Simple Goals remain unrestricted; ambiguous shell/Code Mode
-    // writes are not guessed from arbitrary code or shell text.
-    if (hasActivePlan) {
-      for (const target of canonicalTargets) {
-        const decision = writeGuardDecision({ tasks: state.plan.tasks, target, cwd, hasPlan: true, goalMatches: true });
-        if (decision.blocked) {
-          if (writeAdded || driftChanged || activated) persistState(pi);
-          return { block: true, reason: `Pi Compass write guard: ${decision.reason}` };
-        }
-      }
-    }
+    // Path-scope drift is advisory evidence. Compass does not coordinate
+    // worktrees or act as a global write lock; the Agent/native executor owns
+    // filesystem coordination.
     // Repeated identical writes/drift are no-ops. Observable path violations are
-    // blocked before execution; the tool result carries the warning and state retains its evidence.
+    // retained as advisory evidence.
     if (writeAdded || driftChanged || activated) persistState(pi);
   }));
   pi.on("tool_result", async (event: any, ctx: any) => {
@@ -2411,6 +2486,21 @@ export default function (pi: any) {
         const captured = captureHumanDecision(state, { source: toolName, sourceEntryId, sourceCallId, text, details });
         if (captured.captured) {
           state = captured.state;
+          const routeRequest = state.routeSet?.selectionRequest;
+          if (routeRequest?.sourceEntryId === sourceEntryId && captured.item?.questionnaire) {
+            try {
+              const selected = recordRouteSelection(state, {
+                expectedStateVersion: state.routeSet.stateVersion,
+                selectionRequestId: routeRequest.id,
+                sourceEntryId,
+                questionnaire: captured.item.questionnaire,
+              });
+              state = selected.state;
+            } catch {
+              // Partial/declined/modified route answers remain Human decisions;
+              // the RouteSet stays unselected until a fresh exact answer arrives.
+            }
+          }
           persistState(pi);
           if (dagApprovalStatus(state).approved) scheduleReadySubagentWaves(pi, ctx ?? {});
         }

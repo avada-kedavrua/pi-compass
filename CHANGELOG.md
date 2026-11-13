@@ -2,6 +2,8 @@
 
 ## Unreleased — context foundation
 
+- Implement the M6 RouteSet slice in GoalRun: structured route selection, explicit scoped/budgeted exploration authorization, correlated competitor evidence against shared acceptance criteria/caveats, exact-identity acceptance-gated cancellation with request/ack/terminal/unknown states, and selected-route DAG isolation. Route alternatives never auto-fan-out or become DAG siblings. Path-scope drift remains advisory; the redundant Compass global write lock was removed.
+
 - Stop injecting a full GoalRun anchor before every provider request; persist internal state without duplicating it as a model message when Pi custom-entry persistence succeeds.
 - Filter historical Compass internal messages through `context_with_system`, preserving Pi system/tool patches and unrelated watch/subagent messages. Current development requires Pi >=1.5.2; the released v0.9.1 compatibility/evidence records below are historical.
 - Let Pi/pi-subagents own native tool activation, including its loader. Report executor, loader and pi-await availability separately; retain explicit read-only DAG dispatch and Human veto.

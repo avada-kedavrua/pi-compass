@@ -18,6 +18,7 @@ test("GoalRun v7 module exports the complete runtime contract", () => {
     "explicitGoalChangeUpdates", "hasUsefulTrace", "mergeTrace", "normalizeGoalRunState",
     "recordCheckpoint", "recordDecision", "recordFailure", "recordWriteTarget", "recordExecutionDrift",
     "revisePlanState", "summarizePlanStatus", "transitionTasks",
+    "createRouteSet", "bindRouteSetQuestionnaire", "recordRouteSelection", "authorizeRouteExploration", "registerCompetitorRun", "recordCompetitorResult", "selectRoute", "updateCompetitorCancellation", "routeSetStatus",
   ];
   for (const name of required) assert.equal(typeof goalRun[name], "function", `${name} must be exported`);
 });
