@@ -91,6 +91,54 @@ test("installed runner chains frame entry and return; only committed metadata be
   assert.deepEqual(host.errors, []);
 });
 
+test("tool schema and installed boundary carry verified range moves and Agent-ranked sources", async () => {
+  const host = await setup();
+  const id = host.manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "header\nmove me\nkeep me" }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "stop", timestamp: Date.now() });
+  const version = sourceVersion(host.manager, id);
+  const tool = host.tools.get("compass_context");
+  assert.equal(tool.parameters.additionalProperties, false);
+  assert.equal(tool.parameters.properties.rankedSources.maxItems, 16);
+  const selected = await tool.execute("rank", { action: "search", expectedRevision: 0, rankedSources: [{ id, version, range: { part: 0, startLine: 2, endLine: 2 } }] }, undefined, undefined, host.runner.createContext());
+  assert.equal(JSON.parse(selected.content[0].text).ranked.sources[0].snippet, "move me");
+  await host.turn({ action: "move", expectedRevision: 0, ids: [id], version, range: { part: 0, startLine: 2, endLine: 2 } });
+  await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  const projected = host.manager.buildSessionProjection().messages;
+  const remainder = projected.find((message) => message.role === "assistant" && message.content?.some?.((part) => part.text?.includes("keep me")));
+  assert.ok(remainder);
+  assert.doesNotMatch(JSON.stringify(remainder), /move me/);
+  assert.match(modelText(host.manager), /move me/);
+  assert.match(JSON.stringify(host.manager.getEntry(id)), /move me/);
+  assert.equal(restoreContextState(host.manager.getBranch()).revision, 1);
+  assertPaired(host.manager);
+  assert.deepEqual(host.errors, []);
+});
+
+test("native nested watch arm and cancellation own the frame before a top-level turn ends", async () => {
+  const host = await setup();
+  await host.turn({ action: "call", expectedRevision: 0, task: "wait within frame" });
+  await host.runner.emit({ type: "tool_execution_end", toolName: "watch", toolCallId: "nested-arm", parentToolCallId: "code", isError: false, result: { content: [], details: { id: "nested-watch", instanceId: "native-arm", status: "armed", repeatMs: 1000 } } });
+  let state = restoreContextState(host.manager.getBranch());
+  assert.equal(state.watches["nested-watch"]?.owner, state.frames[0].id);
+  assert.equal(state.watches["nested-watch"]?.instanceId, "native-arm");
+  await host.turn({ action: "return", expectedRevision: state.revision });
+  assert.equal(restoreContextState(host.manager.getBranch()).frames.length, 1, "an owned live nested watch blocks return");
+  await host.runner.emit({ type: "tool_execution_end", toolName: "unwatch", toolCallId: "nested-cancel", parentToolCallId: "code", isError: false, result: { content: [], details: { cancelledInstanceIds: ["native-arm"] } } });
+  state = restoreContextState(host.manager.getBranch());
+  assert.deepEqual(state.watches, {});
+  await host.turn({ action: "return", expectedRevision: state.revision });
+  assert.equal(restoreContextState(host.manager.getBranch()).frames.length, 0);
+  assertPaired(host.manager);
+  assert.deepEqual(host.errors, []);
+});
+
+test("an unsupported GoalRun branch aborts request assembly rather than using stale state", async () => {
+  const host = await setup();
+  host.manager.appendCustomEntry("pi-compass-v2.goalrun", { schemaVersion: 6, goal: {}, plan: {} });
+  await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  assert.equal(host.aborted(), true);
+  assert.ok(host.errors.some((error) => /Unsupported.*schema/.test(error.error)));
+});
+
 test("a later handler altering a context proposal is detected and invokes the public abort action", async () => {
   const host = await setup((event) => {
     const entries = structuredClone(event.entries);

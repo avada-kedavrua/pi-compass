@@ -65,7 +65,7 @@ import {
   recordWriteTarget,
   createRouteSet,
   recordRouteSelection,
-  authorizeRouteExploration,
+  proposeRouteExploration,
   registerCompetitorRun,
   recordCompetitorResult,
   selectRoute,
@@ -110,11 +110,12 @@ let lastLoadoutSignature = "";
 let mutationQueue: Promise<any> = Promise.resolve();
 let loadoutRefreshPending = true;
 let activePi: any = null;
+let branchGeneration = 0;
 let lastCommittedState: any = emptyGoalRunState();
 const stableToolsByPi = new WeakMap<object, Set<string>>();
 const dynamicToolSignaturesByPi = new WeakMap<object, Map<string, string>>();
 const delegationRuntimes = new WeakMap<object, any>();
-const autoSchedulers = new WeakMap<object, { promise: Promise<any> | null; rerunRequested: boolean }>();
+const autoSchedulers = new WeakMap<object, { promise: Promise<unknown> | null }>();
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -224,8 +225,8 @@ function persistedAssistantEntryId(ctx: any, toolCallId: string): string {
 }
 function restoreState(ctx: any): any {
   let restored: any = null;
-  let branch: any[] = [];
-  try { branch = ctx?.sessionManager?.getBranch?.() ?? []; } catch { branch = []; }
+  const branch = ctx?.sessionManager?.getBranch?.();
+  if (!Array.isArray(branch)) throw new Error("Native active branch is unavailable; no GoalRun state changed.");
   const latest = branch.findLast((entry: any) => entry?.type === "custom" && entry.customType === STATE_ENTRY_TYPE);
   if (latest) restored = stateFromEntry(latest);
   if (!restored) restored = emptyGoalRunState();
@@ -235,7 +236,12 @@ function restoreState(ctx: any): any {
 function adoptBranchState(ctx: any) {
   const restored = restoreState(ctx);
   lastCommittedState = clone(restored);
-  return restored;
+  state = restored;
+  // Adoption follows a new lifecycle scope or uncertain persistence. An old
+  // running record no longer has an owning scheduler generation, so it must be
+  // resolvable as unknown rather than stranded forever as running.
+  if (markUnresolvedExecutionUnknown("Dispatch scope was reloaded or invalidated. Check native request/run identities before reconciliation; no automatic redispatch is allowed.")) persistState(activePi);
+  return state;
 }
 function persistState(pi: any, value = state) {
   if (pi !== activePi) throw new Error("Stale Compass session cannot persist GoalRun state.");
@@ -250,11 +256,14 @@ function persistState(pi: any, value = state) {
     // than assert that native persistence was rolled back.
     state = clone(lastCommittedState);
     needsRestore = true;
+    branchGeneration += 1;
+    autoSchedulers.delete(pi);
     loadoutRefreshPending = true;
     throw new Error("GoalRun persistence failed; candidate not activated. Reconcile the native branch before retrying.", { cause: error });
   }
   value.stateRevision = next.stateRevision;
-  lastCommittedState = clone(value);
+  // Reuse the immutable snapshot handed to native persistence, not a second copy.
+  lastCommittedState = next;
 }
 function persistTrace(pi: any, item: any) {
   try { pi.appendEntry?.(`${STATE_ENTRY_TYPE}.trace`, clone(item)); } catch { /* trace is best-effort */ }
@@ -321,7 +330,7 @@ function ensureDelegationRuntime(pi: any) {
       clearTimeout(pending.ackTimer);
       pending.ackTimer = null;
     }
-    void serialized(async () => {
+    void serializedInBranch(pi, pending.generation, async () => {
       const execution = state.plan?.execution;
       if (!execution || execution.requestId !== pending.request.ownerRunId || !executionUnresolved(execution)) return;
       const index = executionResultIndex(execution, pending.request.nodeId);
@@ -361,10 +370,12 @@ function ensureDelegationRuntime(pi: any) {
   delegationRuntimes.set(pi, runtime);
   return runtime;
 }
-function dispatchOneDelegation(pi: any, runtime: any, request: any): Promise<any> {
+function dispatchOneDelegation(pi: any, generation: number, runtime: any, request: any): Promise<any> {
+  if (!inCurrentBranch(pi, generation)) return Promise.resolve({ __compassUnknown: true, reason: "Delegation scope changed before dispatch; no request emitted." });
   return new Promise((resolve) => {
     const pending: any = {
       request,
+      generation,
       resolve,
       started: false,
       ackTimer: null,
@@ -529,8 +540,8 @@ function executionRecordForWave(waveId: string, tasks: any[], planRevision: numb
     })),
   };
 }
-function setExecutionResult(pi: any, waveId: string, taskId: string, patch: any) {
-  return serialized(async () => {
+function setExecutionResult(pi: any, generation: number, waveId: string, taskId: string, patch: any) {
+  return serializedInBranch(pi, generation, async () => {
     const execution = state.plan?.execution;
     if (!execution || execution.requestId !== waveId) return false;
     const index = executionResultIndex(execution, taskId);
@@ -543,8 +554,8 @@ function setExecutionResult(pi: any, waveId: string, taskId: string, patch: any)
 function parsedTaskEvidence(parsed: any): string {
   return clip([parsed.summary, ...(parsed.evidence ?? []).map((item: string) => `Evidence: ${item}`)].filter(Boolean).join("\n"), 1600);
 }
-async function applyDelegationOutcome(pi: any, waveId: string, task: any, parsed: any, fallbackAttempted: boolean, primaryError = "") {
-  await serialized(async () => {
+async function applyDelegationOutcome(pi: any, generation: number, waveId: string, task: any, parsed: any, fallbackAttempted: boolean, primaryError = "") {
+  await serializedInBranch(pi, generation, async () => {
     let execution = state.plan?.execution;
     if (!execution || execution.requestId !== waveId) return;
     let index = executionResultIndex(execution, task.id);
@@ -585,8 +596,8 @@ async function applyDelegationOutcome(pi: any, waveId: string, task: any, parsed
     loadoutRefreshPending = true;
   });
 }
-async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") {
-  if (activePi !== pi) return;
+async function runReadySubagentWaves(pi: any, generation: number, ctx: any, latestInstruction = "") {
+  if (!inCurrentBranch(pi, generation)) return;
   if (!state.goal.current || !state.plan?.tasks?.length) return;
   if (!dagApprovalStatus(state).approved) return;
   if (state.plan.goal && state.plan.goal !== state.goal.current) return;
@@ -594,6 +605,7 @@ async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") 
   // of a response is not proof that a child did not start.
   if (executionUnresolved(state.plan.execution)) return;
   for (let wave = 0; wave < 24; wave += 1) {
+    if (!inCurrentBranch(pi, generation)) return;
     const readyCandidates = selectReadySubagentTasks(state.plan, MAX_WAVE_TASKS);
     const wavePolicy = assessWavePolicy(readyCandidates, state.plan.executionHistory, MAX_WAVE_TASKS);
     const ready = readyCandidates.slice(0, wavePolicy.maxTasks);
@@ -607,7 +619,7 @@ async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") 
         const reason = `Subagent tasks ${ids.join(", ")} have no adequate dispatchReason. Explain why a separate semantic context is worth the extra model call, or route the task to parent/code. No child was dispatched.`;
         const existing = state.plan.execution;
         if (!(existing?.status === "failed" && existing.planRevision === state.plan.revision && sameIds(existing.taskIds ?? [], ids) && existing.error === reason)) {
-          await serialized(async () => {
+          await serializedInBranch(pi, generation, async () => {
             const requestId = randomUUID();
             state.plan.execution = { requestId, runId: null, taskIds: ids, planRevision: state.plan.revision, stateVersion: state.plan.stateVersion ?? 0, status: "failed", startedAt: now(), completedAt: now(), error: reason, results: [] };
             state = recordExecutionEvent(state, { status: "failed", summary: "Subagent dispatch rationale missing.", text: reason, ref: requestId });
@@ -619,13 +631,13 @@ async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") 
       return;
     }
     const availability = await executionAvailability(pi, contextCwd(ctx) || state.projectRoot || process.cwd(), latestInstruction);
-    if (activePi !== pi) return;
+    if (!inCurrentBranch(pi, generation)) return;
     if (!availability.ok) {
       const existing = state.plan.execution;
       const ids = ready.map((task: any) => task.id);
       if (existing?.status === "failed" && existing.planRevision === state.plan.revision
         && sameIds(existing.taskIds ?? [], ids) && existing.error === availability.reason) return;
-      await serialized(async () => {
+      await serializedInBranch(pi, generation, async () => {
         const currentReady = selectReadySubagentTasks(state.plan, MAX_WAVE_TASKS).slice(0, wavePolicy.maxTasks);
         if (!sameIds(currentReady.map((task: any) => task.id), ids) || executionUnresolved(state.plan.execution)) return;
         const requestId = randomUUID();
@@ -667,7 +679,7 @@ async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") 
       thinking: DEFAULT_THINKING,
       timeoutMs: DEFAULT_TIMEOUT_MS,
     }));
-    const prepared = await serialized(async () => {
+    const prepared = await serializedInBranch(pi, generation, async () => {
       const currentReady = selectReadySubagentTasks(state.plan, MAX_WAVE_TASKS).slice(0, wavePolicy.maxTasks);
       if (!dagApprovalStatus(state).approved || state.plan.revision !== selectedPlanRevision || state.goal.version !== selectedGoalVersion
         || !currentReady.length || !sameIds(currentReady.map((task: any) => task.id), ready.map((task: any) => task.id))
@@ -686,12 +698,12 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
       loadoutRefreshPending = true;
       return true;
     });
-    if (!prepared) return;
+    if (!prepared || !inCurrentBranch(pi, generation)) return;
     // Human input can arrive while availability is being checked or the prepared
     // execution record is being persisted. Recheck the exact approval and veto
     // synchronously immediately before the first provider-facing dispatch.
     if (!dagApprovalStatus(state).approved || explicitSubagentVisibilityRequest() === "human_prohibited_subagents") {
-      await serialized(async () => {
+      await serializedInBranch(pi, generation, async () => {
         const execution = state.plan?.execution;
         if (!execution || execution.requestId !== waveId || execution.status !== "dispatching") return;
         state.plan = updateTasks(state.plan, execution.taskIds.map((id: string) => ({ id, status: "pending" })));
@@ -708,23 +720,24 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
       return;
     }
 
-    const primaryResponses = await Promise.all(requests.map((request: any) => dispatchOneDelegation(pi, availability.runtime, request)));
-    if (activePi !== pi) return;
+    const primaryResponses = await Promise.all(requests.map((request: any) => dispatchOneDelegation(pi, generation, availability.runtime, request)));
+    if (!inCurrentBranch(pi, generation)) return;
     const fallbackJobs: any[] = [];
     let unknown = false;
     for (let index = 0; index < requests.length; index += 1) {
+      if (!inCurrentBranch(pi, generation)) return;
       const request = requests[index];
       const task = ready.find((item: any) => item.id === request.nodeId);
       const response = primaryResponses[index];
       if (response?.__compassUnknown) {
         unknown = true;
-        await setExecutionResult(pi, waveId, task.id, { status: "unknown", error: response.reason });
+        await setExecutionResult(pi, generation, waveId, task.id, { status: "unknown", error: response.reason });
         continue;
       }
       const fallbackReason = providerFallbackReason(response);
       if (fallbackReason) {
         const fallbackRequestId = randomUUID();
-        await setExecutionResult(pi, waveId, task.id, {
+        const persisted = await setExecutionResult(pi, generation, waveId, task.id, {
           status: "dispatching",
           requestId: fallbackRequestId,
           model: FALLBACK_MODEL,
@@ -736,6 +749,7 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
           runId: null,
           error: "",
         });
+        if (!persisted || !inCurrentBranch(pi, generation)) return;
         fallbackJobs.push({
           task,
           primaryError: clip(response.error || response.message || "Primary provider failed.", 400),
@@ -761,21 +775,23 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
       });
       if (!parsed) {
         unknown = true;
-        await setExecutionResult(pi, waveId, task.id, { status: "unknown", error: "Terminal response failed correlation/shape validation; no automatic retry was attempted." });
+        await setExecutionResult(pi, generation, waveId, task.id, { status: "unknown", error: "Terminal response failed correlation/shape validation; no automatic retry was attempted." });
         continue;
       }
-      await applyDelegationOutcome(pi, waveId, task, parsed, false);
+      await applyDelegationOutcome(pi, generation, waveId, task, parsed, false);
     }
 
+    if (!inCurrentBranch(pi, generation)) return;
     if (fallbackJobs.length && dagApprovalStatus(state).approved) {
-      const fallbackResponses = await Promise.all(fallbackJobs.map((job: any) => dispatchOneDelegation(pi, availability.runtime, job.request)));
-      if (activePi !== pi) return;
+      const fallbackResponses = await Promise.all(fallbackJobs.map((job: any) => dispatchOneDelegation(pi, generation, availability.runtime, job.request)));
+      if (!inCurrentBranch(pi, generation)) return;
       for (let index = 0; index < fallbackJobs.length; index += 1) {
+        if (!inCurrentBranch(pi, generation)) return;
         const job = fallbackJobs[index];
         const response = fallbackResponses[index];
         if (response?.__compassUnknown) {
           unknown = true;
-          await setExecutionResult(pi, waveId, job.task.id, { status: "unknown", error: response.reason, fallbackAttempted: true, primaryError: job.primaryError });
+          await setExecutionResult(pi, generation, waveId, job.task.id, { status: "unknown", error: response.reason, fallbackAttempted: true, primaryError: job.primaryError });
           continue;
         }
         const parsed = parseSubagentDelegationResponse(response, {
@@ -786,14 +802,14 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
         });
         if (!parsed) {
           unknown = true;
-          await setExecutionResult(pi, waveId, job.task.id, { status: "unknown", error: "Fallback response failed correlation/shape validation; no further retry was attempted." });
+          await setExecutionResult(pi, generation, waveId, job.task.id, { status: "unknown", error: "Fallback response failed correlation/shape validation; no further retry was attempted." });
           continue;
         }
-        await applyDelegationOutcome(pi, waveId, job.task, parsed, true, job.primaryError);
+        await applyDelegationOutcome(pi, generation, waveId, job.task, parsed, true, job.primaryError);
       }
     }
 
-    await serialized(async () => {
+    await serializedInBranch(pi, generation, async () => {
       const execution = state.plan?.execution;
       if (!execution || execution.requestId !== waveId) return;
       const hasUnknown = unknown || execution.results.some((item: any) => item.status === "unknown" || item.status === "dispatching" || item.status === "running");
@@ -863,8 +879,9 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
   }
 }
 
-async function recordAutoDispatchFailure(pi: any, error: any) {
-  await serialized(async () => {
+async function recordAutoDispatchFailure(pi: any, generation: number, error: any, ctx: any) {
+  await serializedInBranch(pi, generation, async () => {
+    if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
     const message = clip(error instanceof Error ? error.message : String(error), 300);
     const execution = state.plan?.execution;
     if (execution && ["dispatching", "running", "unknown"].includes(execution.status)) {
@@ -893,12 +910,22 @@ async function recordAutoDispatchFailure(pi: any, error: any) {
     loadoutRefreshPending = true;
   });
 }
-async function runReadySubagentWavesSafely(pi: any, ctx: any, latestInstruction = "") {
-  if (activePi !== pi) return;
+async function runReadySubagentWavesSafely(pi: any, generation: number, ctx: any, latestInstruction = "") {
+  if (!inCurrentBranch(pi, generation)) return;
   try {
-    await runReadySubagentWaves(pi, ctx, latestInstruction);
+    await runReadySubagentWaves(pi, generation, ctx, latestInstruction);
   } catch (error) {
-    if (activePi === pi) await recordAutoDispatchFailure(pi, error);
+    try {
+      if (inCurrentBranch(pi, generation)) await recordAutoDispatchFailure(pi, generation, error, ctx);
+    } catch (recordingError) {
+      ctx?.abort?.();
+      ctx?.ui?.notify?.(`Compass could not persist the dispatch failure: ${recordingError instanceof Error ? recordingError.message : String(recordingError)}`, "error");
+      return;
+    }
+    if (activePi === pi && needsRestore) {
+      ctx?.abort?.();
+      ctx?.ui?.notify?.(`Compass dispatch persistence is unconfirmed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
   }
 }
 function hasAutoDispatchWork() {
@@ -917,7 +944,7 @@ function hasAutoDispatchWork() {
 function scheduleReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") {
   let scheduler = autoSchedulers.get(pi);
   if (!scheduler) {
-    scheduler = { promise: null, rerunRequested: false };
+    scheduler = { promise: null };
     autoSchedulers.set(pi, scheduler);
   }
   if (scheduler.promise) {
@@ -927,11 +954,10 @@ function scheduleReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") {
     return { started: false, coalesced: true };
   }
   if (!hasAutoDispatchWork()) return { started: false, coalesced: false };
-  scheduler.rerunRequested = false;
-  const running = Promise.resolve().then(() => runReadySubagentWavesSafely(pi, ctx, latestInstruction));
+  const generation = branchGeneration;
+  const running = Promise.resolve().then(() => runReadySubagentWavesSafely(pi, generation, ctx, latestInstruction));
   scheduler.promise = running.finally(() => {
     scheduler!.promise = null;
-    scheduler!.rerunRequested = false;
   });
   return { started: true, coalesced: false };
 }
@@ -979,6 +1005,7 @@ function automaticExecutionSummary(previousHistoryIds: Set<string>): string | nu
 
 async function handleCompassToolResult(pi: any, event: any, ctx: any) {
   return serialized(async () => {
+    if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
     const toolName = String(event?.toolName ?? "");
     if (event?.isError || !/^compass_(?:plan_create|plan_revise|task|execution)$/.test(toolName)) return;
     if (toolName === "compass_execution" && event?.input?.action !== "resolve") return;
@@ -1042,6 +1069,23 @@ function assertCapability(expected: string) {
   if (!active.includes(expected)) {
     throw new Error(`Compass capability not loaded: "${expected}". Loaded: ${active.join(", ") || "none"}. No change was made.`);
   }
+}
+function markUnresolvedExecutionUnknown(reason: string): boolean {
+  const execution = state.plan?.execution;
+  if (!execution || !["dispatching", "running"].includes(execution.status)) return false;
+  execution.status = "unknown";
+  execution.completedAt = null;
+  execution.error = reason;
+  execution.results = (execution.results ?? []).map((item: any) => ["dispatching", "running"].includes(item.status)
+    ? { ...item, status: "unknown", error: reason } : item);
+  state = recordExecutionEvent(state, { status: "unknown", summary: "Native lifecycle changed; unresolved Subagent batch is unknown.", text: reason, ref: execution.requestId });
+  return true;
+}
+function inCurrentBranch(pi: any, generation: number): boolean {
+  return activePi === pi && branchGeneration === generation;
+}
+function serializedInBranch<T>(pi: any, generation: number, fn: () => Promise<T> | T): Promise<T | undefined> {
+  return serialized(() => inCurrentBranch(pi, generation) ? fn() : undefined);
 }
 function serialized<T>(fn: () => Promise<T> | T): Promise<T> {
   const next = mutationQueue.then(fn, fn);
@@ -1176,6 +1220,8 @@ function contextOperationSchema() {
   const sourceId = Type.String({ minLength: 1, maxLength: 64, description: "Stable source entry ID returned by compass_context search; never use a message index." });
   const version = Type.String({ pattern: "^[a-f0-9]{24}$", maxLength: 24, description: "Value version returned by search or a mutation receipt; edits fail closed if it changed." });
   const binding = Type.String({ maxLength: 129, description: "Optional exact scoped binding from search; defaults to the current lexical binding." });
+  const range = Type.Object({ part: Type.Optional(Type.Integer({ minimum: 0 })), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }, { additionalProperties: false, description: "Exact native part/line selection bound to the full source version. Images support part selection without line bounds." });
+  const selection = Type.Object({ id: sourceId, version, binding: Type.Optional(binding), range: Type.Optional(range) }, { additionalProperties: false });
   return Type.Object({
     action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"] }),
     expectedRevision: Type.Integer({ minimum: 0, description: "Context revision from the latest committed native context receipt or compass_state cursor." }),
@@ -1194,7 +1240,9 @@ function contextOperationSchema() {
     reason: Type.Optional(Type.String({ minLength: 1, maxLength: 600, description: "Handling/retirement rationale; retired values are unpinned." })),
     lifetime: Type.Optional(Type.String({ enum: ["goal", "session"], description: "Retention lifetime, default current Goal. Frame ownership still ends on return." })),
     purpose: Type.Optional(Type.String({ minLength: 1, maxLength: 1000, description: "Why this spill artifact is needed." })),
-    range: Type.Optional(Type.Object({ part: Type.Optional(Type.Integer({ minimum: 0 })), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }, { additionalProperties: false, description: "Exact part/line selection bound to the full source version. Images support part selection without line bounds." })),
+    range: Type.Optional(range),
+    compare: Type.Optional(Type.Array(selection, { maxItems: 16, description: "For search: compare exact read-only sources/ranges; similarity is advisory, never an edit." })),
+    rankedSources: Type.Optional(Type.Array(selection, { maxItems: 16, description: "For search: Agent-selected source ordering; runtime verifies IDs, versions and ranges, not semantic scores." })),
     scope: Type.Optional(Type.String({ maxLength: 64, description: "Pin ownership, or transfer destination: root or an active frame ID; defaults to the current frame for pins." })),
 
     kind: Type.Optional(Type.String({ enum: ["working", "memory", "human", "skill"], description: "Value classification, not proof or an authorization grant." })),
@@ -1210,7 +1258,7 @@ function contextOperationSchema() {
 function registerContextTool(pi: any) {
   return registerOnce(pi, "compass_context", {
     label: "Context Frames",
-    description: "Manage same-session attention frames without starting another Pi session. call enters a local task with explicit ref/copy capture; return restores the parent view with explicit exports. search recovers active/parent/history sources and versioned ranges. load creates an explicit data copy or verifies a spill receipt; move relocates whole working values without replaying calls. spill verifies a project artifact before pointer replacement. mark updates handling; retirement unpins. replace/drop preserve Human originals/tool exchanges.",
+    description: "Manage same-session attention frames without starting another Pi session. call enters a local task with explicit ref/copy capture; return restores the parent view with explicit exports. search recovers active/parent/history sources and versioned ranges. load creates an explicit data copy or verifies a spill receipt; move relocates whole working values or selected text ranges without replaying calls. Tool-result ranges remain qualified data copies preserving their complete source exchange. spill verifies a project artifact before pointer replacement. mark updates handling; retirement unpins. replace/drop preserve Human originals/tool exchanges.",
     promptSnippet: "Use same-session context frames only when isolating attention reduces total work; capture and export are explicit and default to none.",
     promptGuidelines: [
       "Frames/edits change attention, not Pi's append-only transcript or environment. Spill writes an explicit artifact; no filesystem rollback occurs.",
@@ -1371,7 +1419,7 @@ function planReviseSchema() {
 
 function routeSchema() {
   return Type.Object({
-    action: Type.String({ enum: ["create", "status", "select", "authorize_exploration", "register_competitor", "result", "cancel_request", "cancel_ack", "cancel_terminal", "cancel_unknown"] }),
+    action: Type.String({ enum: ["create", "status", "select", "propose_exploration", "register_competitor", "result", "cancel_request", "cancel_ack", "cancel_terminal", "cancel_unknown"] }),
     expectedStateVersion: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000_000 })),
     baselineRef: Type.Optional(Type.String({ maxLength: 300 })),
     acceptanceCriteria: Type.Optional(Type.Array(Type.Union([Type.String({ minLength: 1, maxLength: 300 }), Type.Object({ id: Type.String({ minLength: 1, maxLength: 32 }), text: Type.String({ minLength: 1, maxLength: 300 }) }, { additionalProperties: false })]), { maxItems: 12 })),
@@ -1384,14 +1432,13 @@ function routeSchema() {
       expectedCost: Type.Optional(Type.String({ maxLength: 120 })),
       expectedLatency: Type.Optional(Type.String({ maxLength: 120 })),
       risks: Type.Optional(Type.Array(Type.String({ maxLength: 300 }), { maxItems: 8 })),
-    }, { additionalProperties: false }), { minItems: 2, maxItems: 12 })),
+    }, { additionalProperties: false }), { minItems: 2, maxItems: 3 })),
     routeId: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
     runId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
     correlationId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-    selectionRequestId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-    sourceEntryId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-    questionnaire: Type.Optional(Type.Object({ outcome: Type.String(), answers: Type.Array(Type.Object({ answer: Type.Optional(Type.String()), selected: Type.Optional(Type.Array(Type.String())), kind: Type.Optional(Type.String()) }, { additionalProperties: true })) }, { additionalProperties: true })),
-    exploration: Type.Optional(Type.Object({ scope: Type.String({ minLength: 1, maxLength: 500 }), budget: Type.Integer({ minimum: 2, maximum: 24 }), routeIds: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 40 }), { minItems: 2, maxItems: 12 })) }, { additionalProperties: false })),
+    scope: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Exact proposed exploration scope, shown to Human before authorization." })),
+    budget: Type.Optional(Type.Integer({ minimum: 2, maximum: 24, description: "Proposed maximum competitor runs; not authorization until the exact questionnaire is answered." })),
+    routeIds: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 40 }), { minItems: 2, maxItems: 3, uniqueItems: true })),
     criteria: Type.Optional(Type.Array(Type.Object({ id: Type.String({ minLength: 1, maxLength: 32 }), status: Type.String({ enum: ["pass", "fail", "inconclusive"] }), evidence: Type.String({ minLength: 1, maxLength: 1600 }) }, { additionalProperties: false }), { maxItems: 12 })),
     caveats: Type.Optional(Type.Array(Type.String({ maxLength: 400 }), { maxItems: 8 })),
     unresolvedCaveats: Type.Optional(Type.Array(Type.String({ maxLength: 400 }), { maxItems: 8 })),
@@ -1424,11 +1471,8 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             return readResult(JSON.stringify(routeSetStatus(state)), { routeSet: routeSetStatus(state) });
           }
           if (action === "create") result = noMutation(() => createRouteSet(state, params));
-          else if (action === "select") {
-            result = params.questionnaire
-              ? noMutation(() => recordRouteSelection(state, params))
-              : noMutation(() => selectRoute(state, params));
-          } else if (action === "authorize_exploration") result = noMutation(() => authorizeRouteExploration(state, params));
+          else if (action === "select") result = noMutation(() => selectRoute(state, params));
+          else if (action === "propose_exploration") result = noMutation(() => proposeRouteExploration(state, params));
           else if (action === "register_competitor") result = noMutation(() => registerCompetitorRun(state, params));
           else if (action === "result") result = noMutation(() => recordCompetitorResult(state, params));
           else if (action.startsWith("cancel_")) result = noMutation(() => updateCompetitorCancellation(state, { ...params, action: action.slice("cancel_".length) }));
@@ -2165,6 +2209,7 @@ function errorSummary(event: any): string {
 
 export default function (pi: any) {
   activePi = pi;
+  branchGeneration += 1;
   lastCommittedState = emptyGoalRunState();
   state = emptyGoalRunState();
   contextState = emptyContextState();
@@ -2186,18 +2231,12 @@ export default function (pi: any) {
   try { setCompassLoadout(pi, [loaderName]); } catch { /* preflight reports unsupported runtime */ }
 
   pi.on("session_start", async (_event: any, ctx: any) => {
+    branchGeneration += 1;
+    autoSchedulers.delete(pi);
     await serialized(async () => {
+      needsRestore = true;
       state = adoptBranchState(ctx);
       needsRestore = false;
-      if (state.plan?.execution && ["dispatching", "running"].includes(state.plan.execution.status)) {
-        state.plan.execution.status = "unknown";
-        state.plan.execution.completedAt = null;
-        state.plan.execution.error = "Pi session restarted while a Subagent batch was unresolved. No automatic redispatch is allowed until recorded run IDs are checked.";
-        state.plan.execution.results = (state.plan.execution.results ?? []).map((item: any) => ["dispatching", "running"].includes(item.status)
-          ? { ...item, status: "unknown", error: state.plan.execution.error }
-          : item);
-        state = recordExecutionEvent(state, { status: "unknown", summary: "Recovered an unresolved Subagent batch as unknown.", text: state.plan.execution.error, ref: state.plan.execution.requestId });
-      }
       state.projectRoot = contextCwd(ctx);
       restoreContext(ctx);
       const currentLoader = ensureLoader(pi);
@@ -2214,24 +2253,27 @@ export default function (pi: any) {
   // Branch navigation is a native lifecycle boundary. Re-read the committed
   // branch-local context here; pi-await owns live observer disposal and reports
   // any lost arm through its native custom message, so Compass does not poll.
-  pi.on("session_tree", async (_event: any, ctx: any) => serialized(async () => {
-    if (!ctx?.sessionManager?.getBranch) return;
-    restoreContext(ctx);
-    needsRestore = false;
-  }));
+  pi.on("session_tree", async (_event: any, ctx: any) => {
+    branchGeneration += 1;
+    autoSchedulers.delete(pi);
+    return serialized(async () => {
+      if (!ctx?.sessionManager?.getBranch) return;
+      needsRestore = true;
+      state = adoptBranchState(ctx);
+      restoreContext(ctx);
+      needsRestore = false;
+      ensureCurrentLoadout(pi, ctx);
+    });
+  });
 
-  pi.on("session_shutdown", async () => serialized(async () => {
-    const execution = state.plan?.execution;
-    if (!execution || !["dispatching", "running"].includes(execution.status)) return;
-    execution.status = "unknown";
-    execution.completedAt = null;
-    execution.error = "Pi session shut down while a Subagent batch was unresolved. Check recorded run IDs before retrying; Compass will not duplicate it.";
-    execution.results = (execution.results ?? []).map((item: any) => ["dispatching", "running"].includes(item.status)
-      ? { ...item, status: "unknown", error: execution.error }
-      : item);
-    state = recordExecutionEvent(state, { status: "unknown", summary: "Session shutdown left a Subagent batch unresolved.", text: execution.error, ref: execution.requestId });
-    persistState(pi);
-  }));
+  pi.on("session_shutdown", async (_event: any, ctx: any) => {
+    branchGeneration += 1;
+    autoSchedulers.delete(pi);
+    return serialized(async () => {
+      if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
+      if (markUnresolvedExecutionUnknown("Pi session shut down while a Subagent batch was unresolved. Check native run IDs before retrying; Compass will not duplicate it.")) persistState(pi);
+    });
+  });
 
   // before_agent_start captures the prompt before the model sees it. message_end
   // below catches Human steering/follow-up messages that do not start a new run.
@@ -2293,17 +2335,23 @@ export default function (pi: any) {
   // branch snapshot happens to be returned during context assembly.
   pi.on("context", async (event: any, ctx: any) => {
     await mutationQueue;
-    if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-    else {
-      const branchState = restoreState(ctx);
-      if (branchState.stateRevision > (state.stateRevision ?? 0) || (!state.goal.original && branchState.goal.original)) {
-        state = branchState;
-        lastCommittedState = clone(branchState);
+    try {
+      if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
+      else {
+        const branchState = restoreState(ctx);
+        if (branchState.stateRevision > (state.stateRevision ?? 0) || (!state.goal.original && branchState.goal.original)) {
+          state = branchState;
+          lastCommittedState = clone(branchState);
+        }
       }
+      restoreContext(ctx);
+      ensureCurrentLoadout(pi, ctx);
+      // Do not rebuild request history or append a volatile full-state anchor.
+    } catch (error) {
+      needsRestore = true;
+      ctx?.abort?.();
+      throw error;
     }
-    restoreContext(ctx);
-    ensureCurrentLoadout(pi, ctx);
-    // Do not rebuild request history or append a volatile full-state anchor.
   });
 
   pi.on("context_with_system", async (event: any, ctx: any) => {
@@ -2313,6 +2361,7 @@ export default function (pi: any) {
     // Preserve Pi's original system/tool patches instead of folding them into the head.
     const messages = event.messages.filter((message: any) => !(message?.role === "custom" && ["pi-compass-v2.goalrun-state", ANCHOR_MESSAGE_TYPE, "pi-compass-v2.conventions"].includes(message?.customType)));
     try {
+      if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
       const branch = ctx?.sessionManager?.getBranch?.();
       if (!Array.isArray(branch)) throw new Error("Native branch is unavailable; retained pins cannot be restored for this request.");
       const committed = restoreContextState(branch);
@@ -2389,13 +2438,16 @@ export default function (pi: any) {
   // Capture explicit writes, failed tools, and structured answers returned by ask-user-questions.
   // All updates are serialized so a trace event cannot overwrite a concurrent Goal update.
   pi.on("tool_call", async (event: any, ctx: any) => serialized(async () => {
+    if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
     if (/ask.*user.*question|ask_user_question/i.test(String(event?.toolName ?? ""))) {
       const callId = String(event?.toolCallId ?? event?.callId ?? "");
       const sourceEntryId = persistedAssistantEntryId(getContext([ctx]), callId);
       const bound = bindDagApprovalQuestionnaire(state, event?.input, sourceEntryId, callId);
+      state = bound.state;
       const routeBound = state.routeSet
         ? bindRouteSetQuestionnaire(state, { expectedStateVersion: state.routeSet.stateVersion, questionnaire: event?.input }, sourceEntryId, callId)
         : { bound: false };
+      if (routeBound.bound) state = routeBound.state;
       if (bound.bound || routeBound.bound) persistState(pi);
     }
     if (event?.toolName === "compass_context" && event?.parentToolCallId && event?.input?.action !== "search") {
@@ -2436,8 +2488,22 @@ export default function (pi: any) {
   });
 
   pi.on("tool_execution_end", async (event: any, ctx: any) => serialized(async () => {
+    if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
     const toolName = String(event?.toolName ?? "");
     const failed = Boolean(event?.isError || event?.result?.isError);
+    // Code Mode emits native completion events for nested calls without adding
+    // their results to the transcript/turn_end list. Consume deterministic watch
+    // receipts here; the top-level boundary observes the same receipt as a no-op.
+    if (!failed && ["watch", "unwatch"].includes(toolName)) {
+      restoreContext(ctx);
+      const result = event?.result ?? event?.output ?? event?.message;
+      const planned = planWatchBoundary({ state: contextState, boundary: { toolResults: [{ ...result, toolName }] } });
+      if (planned) {
+        pi.appendEntry(CONTEXT_STATE_TYPE, planned.state);
+        restoreContext(ctx);
+      }
+      return;
+    }
     if (/ask.*user.*question|ask_user_question/i.test(toolName)) {
       const result = event?.result ?? event?.output ?? event?.message;
       const text = resultText(result);

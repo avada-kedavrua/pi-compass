@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { executionDriftReason, writeGuardDecision, writeScopeMatches } from "../src/write-scope.mjs";
+import { executionDriftReason, writeScopeMatches } from "../src/write-scope.mjs";
 
 const root = "/tmp/project";
 
@@ -21,18 +21,4 @@ test("drift warning requires a writable in-progress task and checks declared pat
   assert.equal(executionDriftReason({ tasks: [{ id: "edit-a", status: "in_progress", executor: "code", writeScope: "src/**" }], target: "/tmp/project/src/a.ts", cwd: root }), "");
   assert.match(executionDriftReason({ tasks: [{ id: "edit-a", status: "in_progress", executor: "code", writeScope: "src/a.ts" }], target: "/tmp/project/src/b.ts", cwd: root }), /outside every declared scope/i);
   assert.equal(executionDriftReason({ tasks: [{ id: "edit-a", status: "in_progress", executor: "parent", writeScope: "" }], target: "/tmp/project/src/b.ts", cwd: root }), "", "an unscoped writer is not enough evidence to assert a path violation");
-});
-
-
-test("write guard blocks clear path-scope violations only when a matching Goal DAG is active", () => {
-  assert.equal(writeGuardDecision({ tasks: [], target: "/tmp/project/README.md", cwd: root, hasPlan: false }).blocked, false, "simple Goals without a DAG remain unrestricted");
-  assert.equal(writeGuardDecision({ tasks: [{ id: "edit", status: "in_progress", executor: "code", writeScope: "src/**" }], target: "/tmp/project/src/a.ts", cwd: root, hasPlan: true }).blocked, false);
-  const outside = writeGuardDecision({ tasks: [{ id: "edit", status: "in_progress", executor: "code", writeScope: "src/**" }], target: "/tmp/project/README.md", cwd: root, hasPlan: true });
-  assert.equal(outside.blocked, true);
-  assert.match(outside.reason, /outside every declared scope/);
-  const noActiveWriter = writeGuardDecision({ tasks: [{ id: "edit", status: "pending", executor: "code", writeScope: "src/**" }], target: "/tmp/project/src/a.ts", cwd: root, hasPlan: true });
-  assert.equal(noActiveWriter.blocked, true);
-  assert.match(noActiveWriter.reason, /no writable DAG task is in progress/);
-  assert.equal(writeGuardDecision({ tasks: [{ id: "edit", status: "in_progress", executor: "parent", writeScope: "" }], target: "/tmp/project/README.md", cwd: root, hasPlan: true }).blocked, false, "unscoped active writer is ambiguous and must not be falsely blocked");
-  assert.equal(writeGuardDecision({ tasks: [{ id: "inspect", status: "in_progress", executor: "subagent", writeScope: "read-only" }], target: "/tmp/project/src/a.ts", cwd: root, hasPlan: true }).blocked, true, "read-only Subagents never authorize writes");
 });

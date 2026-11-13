@@ -52,33 +52,3 @@ export function executionDriftReason({ tasks = [], target, cwd = process.cwd() }
   if (explicitScopes.some((scope) => writeScopeMatches(target, scope, cwd))) return "";
   return `Write target is outside every declared scope of active writer task(s): ${activeWriters.map((task) => task.id).join(", ")}.`;
 }
-
-
-/**
- * Deterministic write guard for an active DAG. It deliberately does not police
- * simple Goals without a plan, and it allows writes when an active writer has
- * no declared path scope (there is not enough evidence to assert a violation).
- */
-export function writeGuardDecision({ tasks = [], target, cwd = process.cwd(), hasPlan = false, goalMatches = true }) {
-  if (!hasPlan || !goalMatches || !Array.isArray(tasks) || tasks.length === 0) {
-    return { blocked: false, reason: "no_active_dag" };
-  }
-  const writers = tasks.filter((task) => task?.status === "in_progress"
-    && task?.executor !== "subagent"
-    && String(task?.writeScope ?? "").trim().toLowerCase() !== "read-only");
-  if (!writers.length) {
-    return {
-      blocked: true,
-      reason: "A path-based write was blocked because no writable DAG task is in progress. Start or reopen the intended writable task, or revise the plan before writing.",
-    };
-  }
-  if (writers.some((task) => !String(task?.writeScope ?? "").trim())) {
-    return { blocked: false, reason: "active_writer_has_no_declared_scope" };
-  }
-  const matching = writers.filter((task) => writeScopeMatches(target, task.writeScope, cwd));
-  if (matching.length) return { blocked: false, reason: "target_matches_active_writer_scope", taskIds: matching.map((task) => task.id) };
-  return {
-    blocked: true,
-    reason: `A path-based write was blocked because target ${normalizePath(target, cwd)} is outside every declared scope of active writer task(s): ${writers.map((task) => task.id).join(", ")}. Reopen/revise the appropriate task or keep the write within its declared scope.`,
-  };
-}

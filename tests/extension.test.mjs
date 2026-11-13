@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import extensionFactory from "../src/index.ts";
 import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
 
-import { bindDagApprovalQuestionnaire, captureHumanDecision, dagApprovalStatus, GOAL_RUN_RELEASE } from "../src/goal-run.mjs";
+import { bindDagApprovalQuestionnaire, captureHumanDecision, captureHumanPrompt, emptyGoalRunState, revisePlanState, dagApprovalStatus, GOAL_RUN_RELEASE } from "../src/goal-run.mjs";
 
 function fakePi(options = {}) {
   const events = new Map();
@@ -195,8 +195,31 @@ test("unconfirmed host append is reconciled from native history, never called ro
   pi.appendEntry = (type, data) => { append(type, data); throw new Error("after append"); };
   await assert.rejects(() => pi.tools.get("compass_open").execute("open", { capabilities: ["history"] }, undefined, undefined, ctx(pi)), /persistence failed.*not activated/);
   pi.appendEntry = append;
-  await pi.events.get("context")({ messages: [] }, ctx(pi));
+  // An event writer may run before the next request/context reconciliation.
+  await pi.events.get("tool_call")({ toolName: "write", input: { path: "new-file.txt", content: "data" } }, ctx(pi));
   assert.ok(latestState(pi).activeCapabilities.includes("history"));
+  await pi.events.get("context")({ messages: [] }, ctx(pi));
+});
+
+test("native branch navigation adopts the selected lower-revision GoalRun", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  await captureGoal(pi, "Goal: inspect route A");
+  const branchA = structuredClone(pi.entries);
+  await pi.events.get("before_agent_start")({ prompt: "Goal: inspect route B" }, ctx(pi));
+  assert.match(latestState(pi).goal.current, /route B/);
+  pi.entries.splice(0, pi.entries.length, ...branchA);
+  await pi.events.get("session_tree")({}, ctx(pi));
+  const result = await pi.tools.get("compass_state").execute("read", {}, undefined, undefined, ctx(pi));
+  assert.match(JSON.stringify(result), /route A/);
+  assert.doesNotMatch(JSON.stringify(result), /route B/);
+  await pi.events.get("tool_call")({ toolName: "write", input: { path: "a.txt", content: "a" } }, ctx(pi));
+  assert.match(latestState(pi).goal.current, /route A/);
+  const before = structuredClone(pi.entries);
+  const unavailable = { ...ctx(pi), sessionManager: { getBranch() { throw new Error("native branch unavailable"); } } };
+  await assert.rejects(() => pi.events.get("session_tree")({}, unavailable), /native branch unavailable/);
+  await assert.rejects(() => pi.tools.get("compass_state").execute("read", {}, undefined, undefined, unavailable), /native branch unavailable/);
+  assert.deepEqual(pi.entries, before, "a branch read error must not persist an empty replacement");
 });
 
 test("unsupported native GoalRun snapshot fails without overwriting raw history", async () => {
@@ -205,6 +228,9 @@ test("unsupported native GoalRun snapshot fails without overwriting raw history"
   pi.entries.push({ type: "custom", customType: "pi-compass-v2.goalrun", data: { schemaVersion: 6, goal: {}, plan: {} } });
   const before = structuredClone(pi.entries);
   await assert.rejects(() => pi.events.get("session_start")({}, ctx(pi)), /Unsupported.*schema/);
+  assert.deepEqual(pi.entries, before);
+  await assert.rejects(() => pi.events.get("session_tree")({}, ctx(pi)), /Unsupported.*schema/);
+  await assert.rejects(() => pi.events.get("tool_call")({ toolName: "write", input: { path: "bad.txt", content: "data" } }, ctx(pi)), /Unsupported.*schema/);
   assert.deepEqual(pi.entries, before);
 });
 
@@ -238,6 +264,34 @@ test("simple Goal exposes only compact Compass state and preserves native tool a
   assert.ok(pi.activeNames().includes("watch"), "Compass preserves pi-await tools");
   assert.ok(pi.tools.has("compass_state"), "compact state tool is registered before Goal capture");
   assert.ok(pi.tools.has("compass_context"), "same-session context tool is registered before Goal capture");
+});
+
+test("native route questionnaire hook roundtrip selects the exact Human answer", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  await captureGoal(pi, "Goal: compare strategies before implementation");
+  await openCapability(pi, "routes");
+  await currentTool(pi, "compass_route").execute("create-routes", { action: "create", expectedStateVersion: 0, baselineRef: "git:base", acceptanceCriteria: ["Same observable outcome"], routes: [{ routeId: "first", summary: "Existing adapter" }, { routeId: "second", summary: "New adapter" }] }, undefined, undefined, ctx(pi));
+  const request = latestState(pi).routeSet.selectionRequest;
+  persistToolCall(pi, "route-answer");
+  await pi.events.get("tool_call")({ toolName: "ask_user_question", toolCallId: "route-answer", input: { questions: [request.questionnaire] } }, ctx(pi));
+  assert.equal(latestState(pi).routeSet.selectionRequest.status, "presented");
+  await pi.events.get("tool_execution_end")({ toolName: "ask_user_question", toolCallId: "route-answer", result: {
+    content: [{ type: "text", text: "Selected second" }], details: { answers: [{ questionIndex: 0, question: request.questionnaire.question.slice(0, 400), kind: "option", answer: "second", selected: ["second"] }] },
+  } }, ctx(pi));
+  assert.equal(latestState(pi).routeSet.selectedRouteId, "second");
+  const routeTool = currentTool(pi, "compass_route");
+  assert.equal(routeTool.parameters.properties.questionnaire, undefined, "model input cannot fabricate a Human questionnaire result");
+  await routeTool.execute("propose", { action: "propose_exploration", expectedStateVersion: latestState(pi).routeSet.stateVersion, scope: "read-only comparisons", budget: 2, routeIds: ["first", "second"] }, undefined, undefined, ctx(pi));
+  assert.equal(latestState(pi).routeSet.exploration.authorized, false);
+  const explorationRequest = latestState(pi).routeSet.selectionRequest;
+  persistToolCall(pi, "exploration-answer");
+  await pi.events.get("tool_call")({ toolName: "ask_user_question", toolCallId: "exploration-answer", input: { questions: [explorationRequest.questionnaire] } }, ctx(pi));
+  await pi.events.get("tool_execution_end")({ toolName: "ask_user_question", toolCallId: "exploration-answer", result: {
+    content: [{ type: "text", text: "Approved exact exploration" }], details: { answers: [{ questionIndex: 0, question: explorationRequest.questionnaire.question, kind: "option", answer: "parallel_exploration", selected: ["parallel_exploration"] }] },
+  } }, ctx(pi));
+  assert.equal(latestState(pi).routeSet.exploration.authorized, true);
+  assert.equal(latestState(pi).routeSet.exploration.budget, 2);
 });
 
 test("explicit multi-part Goal surfaces planning early without creating or requiring a DAG", async () => {
@@ -473,6 +527,93 @@ test("independent Code Mode work proceeds while the background Subagent wave is 
   for (const release of releases) release();
   await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed", { message: "background child results consumed" });
   assert.deepEqual(latestState(pi).plan.tasks.map((item) => item.status), ["done", "done", "done"]);
+});
+
+test("a detached provider fallback cannot cross into another approved branch", async () => {
+  const releases = [];
+  let started;
+  const bothStarted = new Promise((resolve) => { started = resolve; });
+  const pi = fakePi({ respondDelegation(request) {
+    return new Promise((resolve) => {
+      releases.push(() => resolve({ status: "failed", model: request.model, error: "429 rate limit exceeded" }));
+      if (releases.length === 2) started();
+    });
+  } });
+  extensionFactory(pi);
+  await captureGoal(pi);
+  await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
+  await bothStarted;
+  const branchAEntries = structuredClone(pi.entries);
+  let branchB = captureHumanPrompt(emptyGoalRunState(), "Goal: branch B unrelated work").state;
+  branchB = approvedDagState(revisePlanState(branchB, { acceptanceCriteria: criteria, tasks }).state);
+  branchB.activeCapabilities = ["planning"];
+  pi.entries.splice(0, pi.entries.length, { type: "custom", customType: "pi-compass-v2.goalrun", data: branchB });
+  await pi.events.get("session_tree")({}, ctx(pi));
+  try {
+    for (const release of releases) release();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(pi.delegationRequests.length, 2, "old branch failures must not launch a fallback using the new branch Goal");
+    assert.equal(latestState(pi).plan.execution, null);
+    assert.equal(latestState(pi).goal.current, "Goal: branch B unrelated work");
+    pi.entries.splice(0, pi.entries.length, ...branchAEntries);
+    await pi.events.get("session_tree")({}, ctx(pi));
+    assert.equal(latestState(pi).plan.execution.status, "unknown");
+    await pi.events.get("before_agent_start")({ prompt: "Continue this branch without duplicating unknown work." }, ctx(pi));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(pi.delegationRequests.length, 2);
+  } finally {
+    for (const release of releases) release();
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+});
+
+test("a failed progress append recovers the same native batch as resolvable unknown", async () => {
+  for (const appendBeforeThrow of [false, true]) {
+    let release;
+    let started;
+    const childStarted = new Promise((resolve) => { started = resolve; });
+    const pi = fakePi({ respondDelegation(request) {
+      return new Promise((resolve) => {
+        release = () => resolve({ status: "completed", model: request.model, runId: "native-api", result: { kind: "structured", value: { status: "done", summary: "Inspected API", evidence: ["src/api:1"], reason: "" } } });
+        started();
+      });
+    } });
+    extensionFactory(pi);
+    await captureGoal(pi);
+    await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks: [tasks[0], { ...tasks[2], dependsOn: ["api"] }] }, undefined, undefined, ctx(pi));
+    await approveDag(pi);
+    await childStarted;
+    const request = pi.delegationRequests[0];
+    const append = pi.appendEntry;
+    let failed = false;
+    pi.appendEntry = (type, data) => {
+      if (!failed && data.plan?.execution?.results?.some((row) => row.observedToolCount === 9)) {
+        failed = true;
+        if (appendBeforeThrow) append(type, data);
+        throw new Error("progress append failed");
+      }
+      return append(type, data);
+    };
+    try {
+      pi.events.emit("prompt-template:subagent:update", { requestId: request.requestId, ownerRunId: request.ownerRunId, nodeId: request.nodeId, runId: "native-api", toolCount: 9, currentTool: "read" });
+      await pi.events.get("context")({ messages: [] }, ctx(pi));
+      pi.appendEntry = append;
+      assert.equal(failed, true);
+      assert.equal(latestState(pi).plan.execution.status, "unknown");
+      assert.equal(latestState(pi).plan.execution.results[0].requestId, request.requestId);
+      release();
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(latestState(pi).plan.execution.status, "unknown", "a detached result is not silently treated as terminal evidence");
+      await currentTool(pi, "compass_execution").execute("resolve", { action: "resolve", requestId: request.ownerRunId, confirmedNoActiveRuns: true, confirmationEvidence: "Native status confirmed the correlated request terminal.", results: [{ id: "api", status: "done", evidence: "Native result src/api:1 inspected." }] }, undefined, undefined, ctx(pi));
+      assert.equal(latestState(pi).plan.execution.status, "completed");
+      assert.equal(pi.delegationRequests.length, 1);
+    } finally {
+      pi.appendEntry = append;
+      release();
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
 });
 
 test("before_agent_start recovery sweep cannot bypass draft approval", async () => {
