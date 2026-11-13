@@ -1,4 +1,4 @@
-import { bindingKey, contentVersion, currentValue, logicalSource, rawMessage, snapshotHead, valueContent } from "./context-values.mjs";
+import { bindingKey, contentVersion, currentValue, logicalSource, rawMessage, snapshotHead, sourceQualifications, valueContent } from "./context-values.mjs";
 
 const RESERVED = new Set(["pi-compass-v2.goalrun-state", "pi-compass-v2.goalrun-anchor", "pi-compass-v2.conventions"]);
 const MAX_SCAN = 1024;
@@ -13,11 +13,20 @@ function projected(entry, content) {
 function record(index, id, binding, origin, content, head = null, visibility = "omitted") {
   const entry = index.byId.get(id);
   if (!readable(entry)) return null;
+  const message = rawMessage(entry);
+  const group = index.groups?.get(id);
+  const exchangeComplete = Boolean(group && !group.duplicate && group.calls.size === group.results.size);
+  const qualification = sourceQualifications(entry, index.readRequests?.get(id), exchangeComplete);
+  const derived = head?.field === "operation";
+  const authorship = derived ? "agent-derived" : head?.field === "snapshot" ? "retained-source-data" : message.role === "toolResult" ? "tool-observation" : message.role === "user" ? "human-original" : "agent-message";
+  const caveats = [...new Set([...(qualification.caveats ?? []), ...(head?.caveats ?? [])])];
   return {
     id, binding, origin, content, head, visibility,
     version: head?.version ?? contentVersion(content),
-    role: rawMessage(entry).role,
-    caveats: [...(head?.caveats ?? (rawMessage(entry).isError ? ["Original tool execution failed; a context view is not evidence of a successful rerun."] : []))],
+    role: message.role, authorship, derived,
+    qualification: derived ? "Agent-authored derived value; not a new tool observation or Human instruction." : head?.field === "snapshot" ? "Selected source data; not a new tool execution or Human message." : "Original source content.",
+    ...(head?.readStatus ?? qualification.readStatus ? { readStatus: structuredClone(head?.readStatus ?? qualification.readStatus) } : {}),
+    caveats,
     provenance: [...(head?.sources ?? [id])],
   };
 }
@@ -135,7 +144,7 @@ export function searchSources(index, state, { query = "", ids = [], scope = "act
     const startLine = text.slice(0, Math.max(0, at)).split("\n").length;
     const endLine = Math.min(text.split("\n").length, startLine + 8);
     hits.push({
-      id: candidate.id, binding: candidate.binding, version: candidate.version, role: candidate.role, kind: candidate.head?.kind,
+      id: candidate.id, binding: candidate.binding, version: candidate.version, role: candidate.role, authorship: candidate.authorship, derived: candidate.derived, qualification: candidate.qualification, readStatus: candidate.readStatus, kind: candidate.head?.kind,
       visibility: candidate.visibility, origin: candidate.origin,
       range: part < 0 ? null : { part, startLine, endLine },
       snippet: text.slice(from, to), excerpt: text.slice(from, to), chars: text.length,
@@ -144,54 +153,154 @@ export function searchSources(index, state, { query = "", ids = [], scope = "act
   }
   return { method: "lexical", scope, query, hits, scanned, truncated };
 }
-function rangeBounds(range) {
-  if (!range) return null;
-  return { part: range.part ?? 0, startLine: range.startLine ?? 1, endLine: range.endLine ?? Number.MAX_SAFE_INTEGER };
-}
-function sameRange(left, right) {
-  return JSON.stringify(rangeBounds(left)) === JSON.stringify(rangeBounds(right));
-}
-function containsRange(outer, inner) {
-  if (!outer) return true;
-  if (!inner) return false;
-  const a = rangeBounds(outer), b = rangeBounds(inner);
-  return a.part === b.part && a.startLine <= b.startLine && a.endLine >= b.endLine;
-}
 function textOf(content) {
   const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
   return blocks.filter((part) => part.type === "text").map((part) => part.text).join("\n").slice(0, 8192);
 }
+function canonicalPath(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const input = value.trim().replaceAll("\\", "/");
+  const absolute = input.startsWith("/");
+  const segments = [];
+  for (const segment of input.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === ".." && segments.length && segments.at(-1) !== "..") segments.pop();
+    else if (segment !== ".." || !absolute) segments.push(segment);
+  }
+  return `${absolute ? "/" : ""}${segments.join("/")}` || (absolute ? "/" : ".");
+}
+function readRequest(index, id) {
+  const entry = index.byId.get(id);
+  const message = rawMessage(entry);
+  const call = index.readRequests?.get(id);
+  const exchange = index.groups?.get(id);
+  if (message?.role !== "toolResult" || message.toolName !== "read" || !call || call.name !== "read" || !exchange || exchange.duplicate || exchange.calls.size !== exchange.results.size || message.isError !== false || message.details?.error || (message.details?.truncation && message.details.truncation.truncated !== false)) return null;
+  const args = call.arguments ?? {};
+  const path = canonicalPath(args.path);
+  if (!path || /(^|\/)SKILL\.md$/i.test(path) || /(^|\/)skills\//i.test(path)) return null;
+  const range = args.range && typeof args.range === "object" ? args.range : {};
+  const startLine = range.startLine ?? args.startLine ?? args.offset ?? 1;
+  const requestedEnd = range.endLine ?? args.endLine;
+  const limit = range.limit ?? args.limit;
+  if (!Number.isSafeInteger(startLine) || startLine < 1 || (requestedEnd !== undefined && (!Number.isSafeInteger(requestedEnd) || requestedEnd < startLine)) || (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1))) return null;
+  const content = projected(entry, message.content);
+  const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  if (!Array.isArray(blocks) || !blocks.length || blocks.some((part) => part.type !== "text")) return null;
+  const text = blocks.map((part) => part.text).join("\n");
+  const lines = text.split("\n");
+  const actualEnd = startLine + lines.length - 1;
+  const endLine = requestedEnd ?? (limit === undefined ? actualEnd : Math.min(actualEnd, startLine + limit - 1));
+  const explicitRevision = message.details?.fileRevision;
+  const revision = typeof explicitRevision === "string" && explicitRevision ? explicitRevision : null;
+  return {
+    id, callId: message.toolCallId, path, startLine, endLine, lines,
+    rangeKey: JSON.stringify({ startLine, requestedEnd: requestedEnd ?? null, limit: limit ?? null }),
+    payloadVersion: contentVersion(content), revision,
+  };
+}
 
-/** Exact/subset findings require the same immutable source identity and version. Similarity is advisory only. */
+/** Recognize only successful, complete results from the native read tool; other tool results are not movable reads. */
+export function readOnlyObservation(index, id) { return readRequest(index, id); }
+
+/** Cross-call exact/subset findings use persisted read identity, never bare text equality. */
+function selectedReadWindow(observation, range) {
+  if (!range) return { startLine: observation.startLine, endLine: observation.endLine, lines: observation.lines };
+  if ((range.part ?? 0) !== 0) return null;
+  const startLine = range.startLine ?? 1;
+  const endLine = range.endLine ?? observation.lines.length;
+  if (startLine < 1 || endLine < startLine || endLine > observation.lines.length) return null;
+  return {
+    startLine: observation.startLine + startLine - 1,
+    endLine: observation.startLine + endLine - 1,
+    lines: observation.lines.slice(startLine - 1, endLine),
+  };
+}
+function readWindowMap(window) {
+  return new Map(window.lines.map((line, offset) => [window.startLine + offset, line]));
+}
+function matchingIntersection(left, right) {
+  const startLine = Math.max(left.startLine, right.startLine);
+  const endLine = Math.min(left.endLine, right.endLine);
+  if (endLine < startLine) return null;
+  const a = readWindowMap(left), b = readWindowMap(right);
+  for (let line = startLine; line <= endLine; line++) if (!a.has(line) || !b.has(line) || a.get(line) !== b.get(line)) return { startLine, endLine, matches: false };
+  return { startLine, endLine, matches: true };
+}
+function observedAt(index, state, selection, inputIndex, scope) {
+  if (!selection || typeof selection !== "object") fail("Comparison selections require source IDs and versions.");
+  const item = resolveSource(index, state, { ...selection, range: undefined }, scope);
+  if (item.role !== "toolResult" || item.head?.kind === "skill") return null;
+  const observation = readRequest(index, item.id);
+  if (!observation || observation.payloadVersion !== contentVersion(item.content)) return null;
+  const selected = selection.range ? selectSourceRange(item.content, selection.range) : { content: item.content, range: null };
+  const window = selectedReadWindow(observation, selected.range);
+  if (!window) return null;
+  return { id: item.id, version: item.version, inputIndex, observation, window, content: selected.content };
+}
+
+/** Cross-call findings require persisted successful read calls and source/range identity. */
 export function analyzeRepeatedSelections(index, state, selections, scope = "all") {
   scopes(scope);
   if (!Array.isArray(selections) || selections.length > 16) fail("Comparison requires at most 16 explicit source selections.");
-  const resolved = selections.map((selection) => {
-    if (!selection || typeof selection !== "object") fail("Comparison selections require source IDs and versions.");
-    const item = resolveSource(index, state, selection, scope);
-    if (item.role === "user" || (item.role !== "toolResult" && !item.head?.readOnly)) return null;
-    return { id: item.id, binding: item.binding, version: item.version, range: item.range, content: item.content, role: item.role };
-  }).filter(Boolean);
+  const resolved = selections.map((selection, inputIndex) => observedAt(index, state, selection, inputIndex, scope)).filter(Boolean);
   const exact = [];
   const subsets = [];
+  const changed = [];
+  const unknown = [];
   const similarities = [];
   for (let left = 0; left < resolved.length; left++) for (let right = left + 1; right < resolved.length; right++) {
     const a = resolved[left], b = resolved[right];
-    if (a.id === b.id && a.version === b.version) {
-      if (sameRange(a.range, b.range)) exact.push({ source: a.id, version: a.version, first: left, second: right, range: a.range });
-      else if (containsRange(a.range, b.range)) subsets.push({ source: a.id, version: a.version, superset: left, subset: right, supersetRange: a.range, subsetRange: b.range });
-      else if (containsRange(b.range, a.range)) subsets.push({ source: a.id, version: a.version, superset: right, subset: left, supersetRange: b.range, subsetRange: a.range });
+    if (a.id === b.id || a.observation.callId === b.observation.callId) continue;
+    if (a.observation.path !== b.observation.path) {
+      const termsA = new Set(textOf(a.content).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
+      const termsB = new Set(textOf(b.content).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
+      let intersection = 0;
+      for (const term of termsA) if (termsB.has(term)) intersection++;
+      const score = termsA.size && termsB.size ? intersection / (termsA.size + termsB.size - intersection) : 0;
+      if (score >= 0.35) similarities.push({ first: a.inputIndex, second: b.inputIndex, score: Number(score.toFixed(3)), advisory: "Different read source; lexical similarity is not source identity. No automatic edit or relocation." });
       continue;
     }
-    const termsA = new Set(textOf(a.content).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
-    const termsB = new Set(textOf(b.content).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
-    if (!termsA.size || !termsB.size) continue;
-    let intersection = 0;
-    for (const term of termsA) if (termsB.has(term)) intersection++;
-    const score = intersection / (termsA.size + termsB.size - intersection);
-    if (score >= 0.35) similarities.push({ first: left, second: right, score: Number(score.toFixed(3)), advisory: "Different source identity; inspect before acting. No automatic edit or relocation." });
+    const sameRange = a.window.startLine === b.window.startLine && a.window.endLine === b.window.endLine;
+    const revisionChanged = a.observation.revision && b.observation.revision && a.observation.revision !== b.observation.revision;
+    const intersection = matchingIntersection(a.window, b.window);
+    if (revisionChanged || (sameRange && !intersection?.matches)) {
+      changed.push({ first: a.inputIndex, second: b.inputIndex, firstId: a.id, secondId: b.id, path: a.observation.path, reason: revisionChanged ? "Native file revision changed." : "The same read range returned different payload lines." });
+      continue;
+    }
+    const payloadsMatch = a.observation.payloadVersion === b.observation.payloadVersion;
+    if (sameRange && payloadsMatch && a.observation.rangeKey === b.observation.rangeKey) {
+      const prior = index.positions.get(a.id) <= index.positions.get(b.id) ? a : b;
+      exact.push({ first: a.inputIndex, second: b.inputIndex, firstId: a.id, secondId: b.id, relocateId: prior.id, path: a.observation.path, range: { startLine: a.window.startLine, endLine: a.window.endLine }, payloadVersion: prior.observation.payloadVersion, changed: "Prior read can be relocated as qualified data; neither raw exchange is rewritten." });
+      continue;
+    }
+    if (!intersection) continue;
+    if (!intersection.matches) {
+      changed.push({ first: a.inputIndex, second: b.inputIndex, firstId: a.id, secondId: b.id, path: a.observation.path, range: intersection, reason: "Overlapping line payloads differ; no subset relocation is safe." });
+      continue;
+    }
+    const aContainsB = a.window.startLine <= b.window.startLine && a.window.endLine >= b.window.endLine;
+    const bContainsA = b.window.startLine <= a.window.startLine && b.window.endLine >= a.window.endLine;
+    if (!aContainsB && !bContainsA) continue;
+    const superset = aContainsB ? a : b;
+    const subset = aContainsB ? b : a;
+    const sameRevision = superset.observation.revision && subset.observation.revision && superset.observation.revision === subset.observation.revision;
+    if (!sameRevision) {
+      unknown.push({ first: a.inputIndex, second: b.inputIndex, firstId: a.id, secondId: b.id, supersetId: superset.id, subsetId: subset.id, path: superset.observation.path, matchingLines: intersection, reason: "Native read results expose no shared file revision; equal line payloads do not establish a same-revision subset." });
+      continue;
+    }
+    subsets.push({ first: a.inputIndex, second: b.inputIndex, firstId: a.id, secondId: b.id, supersetId: superset.id, subsetId: subset.id, relocateId: superset.id, path: superset.observation.path, range: { startLine: subset.window.startLine, endLine: subset.window.endLine }, matchingLines: intersection, unrefreshedSupersetOutsideRange: true, fileRevision: superset.observation.revision, changed: "Retain and relocate the complete prior superset; data outside the requested subset remains unrefreshed." });
   }
-  return { exact, subsets, similarities, automaticEdits: 0 };
+  const invalidatedByLaterChange = (finding) => {
+    const pairIds = [finding.firstId, finding.secondId];
+    const pairPosition = Math.max(...pairIds.map((id) => index.positions.get(id) ?? -1));
+    return changed.some((item) => {
+      const ids = [item.firstId, item.secondId];
+      const shared = ids.find((id) => pairIds.includes(id));
+      const newer = ids.find((id) => id !== shared);
+      return shared !== undefined && newer !== undefined && (index.positions.get(newer) ?? -1) > pairPosition;
+    });
+  };
+  return { exact: exact.filter((item) => !invalidatedByLaterChange(item)), subsets: subsets.filter((item) => !invalidatedByLaterChange(item)), changed, unknown, similarities, automaticEdits: 0 };
 }
 
 /** Preserve the Agent's bounded semantic ordering while verifying each native source and requested range. */
@@ -204,7 +313,7 @@ export function rankVerifiedSources(index, state, selections, scope = "all") {
     const text = blocks.filter((part) => part.type === "text").map((part) => part.text).join("\n");
     return {
       rank, id: item.id, binding: item.binding, version: item.version, range: item.range,
-      selectedVersion: contentVersion(item.content), role: item.role, origin: item.origin,
+      selectedVersion: contentVersion(item.content), role: item.role, authorship: item.authorship, derived: item.derived, qualification: item.qualification, readStatus: item.readStatus, origin: item.origin,
       snippet: text.slice(0, 600), truncated: text.length > 600,
       selectedParts: blocks.map((part, partIndex) => ({ part: partIndex, type: part.type, ...(part.type === "image" ? { mimeType: part.mimeType } : {}) })),
       caveats: item.caveats, provenance: item.provenance,

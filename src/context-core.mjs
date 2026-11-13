@@ -2,7 +2,7 @@ import {
   VALUE_MESSAGE_TYPE, adoptValue, bindingKey, contentVersion, copyValue, currentValue, dataBlocks, isValueMessage, logicalSource, questionnaireContent,
   nativeValueViews, rawMessage as messageOf, releaseFrameValues, renderValue, validateValue, valueContent, valueMessage, writeValue,
 } from "./context-values.mjs";
-import { analyzeRepeatedSelections, rankVerifiedSources, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
+import { analyzeRepeatedSelections, rankVerifiedSources, readOnlyObservation, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
 import { loadContextArtifact, writeContextArtifact } from "./context-artifacts.mjs";
 export { contentVersion } from "./context-values.mjs";
 
@@ -120,6 +120,8 @@ function sourceIndex(branch, boundary) {
   const positions = new Map();
   const groups = new Map();
   const calls = new Map();
+  const callDetails = new Map();
+  const readRequests = new Map();
   for (const [position, entry] of branch.entries()) {
     byId.set(entry.id, entry);
     positions.set(entry.id, position);
@@ -134,10 +136,15 @@ function sourceIndex(branch, boundary) {
       if (!toolCalls.length) continue;
       const group = { ids: [entry.id], calls: new Set(toolCalls.map((call) => call.id)), results: new Set(), duplicate: false };
       groups.set(entry.id, group);
-      for (const call of toolCalls) calls.set(call.id, group);
+      for (const call of toolCalls) {
+        calls.set(call.id, group);
+        callDetails.set(call.id, { name: call.name, arguments: structuredClone(call.arguments ?? {}) });
+      }
     }
     if (message?.role === "toolResult") {
       const group = calls.get(message.toolCallId);
+      const call = callDetails.get(message.toolCallId);
+      if (call) readRequests.set(entry.id, call);
       if (!group) continue;
       group.ids.push(entry.id);
       if (group.results.has(message.toolCallId)) group.duplicate = true;
@@ -151,7 +158,7 @@ function sourceIndex(branch, boundary) {
     if (editable(item.sourceEntry)) active.set(item.sourceEntry.id, item);
     if (item.sourceEntry.type === "context_edit") edits.set(item.sourceEntry.targetId, item.sourceEntry);
   }
-  const index = { branch, byId, positions, groups, active, edits };
+  const index = { branch, byId, positions, groups, readRequests, active, edits };
   return { ...index, valueViews: nativeValueViews(index) };
 }
 function source(index, id) {
@@ -303,7 +310,7 @@ function planReturn({ next, index, boundary, operation }) {
   for (const [number, id] of (operation.exportIds ?? []).entries()) {
     const value = currentValue(next, index, id);
     ensureContent(value.content);
-    entries.push(sourceDataDraft(next, operation, { ...value, caveats: value.head.caveats, provenance: [...new Set([...value.head.sources, value.head.entryId])] }, "export", number, frame.parent));
+    entries.push(sourceDataDraft(next, operation, { ...value, caveats: value.head.caveats, provenance: [...new Set([...value.head.sources, value.head.entryId])], readStatus: value.head.readStatus }, "export", number, frame.parent));
   }
   if (operation.result !== undefined && operation.result !== "") {
     ensureText(operation.result, "Return value");
@@ -331,8 +338,7 @@ function planPins({ next, index, operation }) {
     source(index, id);
     const value = currentValue(next, index, id, { key: operation.binding, allowHidden: operation.action === "unpin" });
     if (operation.action === "pin") {
-      if (operation.kind === "skill" && index.byId.get(value.head.entryId)?.message?.isError) fail("A failed Skill read cannot be activated; load a verified source first.");
-      if (operation.kind === "skill" && index.byId.get(value.head.entryId)?.message?.details?.truncation?.truncated) fail("A truncated Skill read cannot be activated as complete; recover its remaining content first.");
+      if (operation.kind === "skill" && (value.head.field !== "content" || value.key !== value.viewKey || value.message?.role !== "toolResult" || value.message.toolName !== "read" || value.nativeId !== id || value.head.readStatus?.sourceId !== id || value.head.readStatus?.status !== "complete" || value.head.readStatus.fullSkillFile !== true || value.head.readStatus.payloadVersion !== value.head.version)) fail("Skill activation requires the exact original payload of a successful, complete native Skill-file read; loaded, copied, failed, truncated, or derived content is not enough.");
       const scopes = ["root", ...next.frames.map((frame) => frame.id)];
       if (scopes.indexOf(scope) < scopes.indexOf(value.key.split("/")[0])) fail("A local value cannot outlive its binding; explicitly export it before pinning it in a parent scope.");
       const head = adoptValue(next, value);
@@ -423,6 +429,7 @@ function sourceDataDraft(state, operation, selected, action, number = 0, owner =
   const head = {
     entryId: id, field: "snapshot", version: contentVersion(content), kind: "memory", readOnly: false, rendered: true, handling: "active",
     caveats: [...selected.caveats], sources: [...selected.provenance],
+    ...(selected.readStatus ? { readStatus: { ...structuredClone(selected.readStatus), fullSkillFile: selected.readStatus.fullSkillFile === true && !selected.range && contentVersion(content) === selected.readStatus.payloadVersion } } : {}),
     origin: { id: selected.id, version: selected.version, range: selected.range ?? null },
   };
   const draft = valueMessage({ id, key: `${owner}/${id}`, head }, content);
@@ -454,9 +461,14 @@ export async function prepareContextOperation({ state, branch, boundary, operati
     const index = sourceIndex(branch, boundary);
     const selected = resolveSource(index, state, { id: operation.ids[0], binding: operation.binding, version: operation.version }, operation.sourceScope ?? "all");
     const sourceEntry = index.byId.get(selected.id);
+    if (selected.head?.kind === "skill") fail("Active Skill content is not eligible for relocation.");
     if (selected.role === "assistant" && sourceEntry.message?.content?.some?.((part) => part.type === "toolCall")) fail("Assistant tool-call records are immutable.");
     if (!(["assistant", "toolResult"].includes(selected.role))) fail("Selected-range movement is limited to Agent-authored text or a complete read-only tool result; Human messages are immutable.");
-    if (selected.role === "toolResult") exchangeClosure(index, [selected.id]);
+    if (selected.role === "toolResult") {
+      const observation = readOnlyObservation(index, selected.id);
+      if (!observation || observation.payloadVersion !== selected.version) fail("Only successful, untruncated native read results at the exact observed payload version can be range-relocated.");
+      exchangeClosure(index, [selected.id]);
+    }
     const cut = cutTextRange(selected.content, operation.range);
     return { operation: { ...operation, range: cut.range, selectedRange: cut.selected, remaining: cut.remaining, preserveSource: selected.role === "toolResult" } };
   }
@@ -480,9 +492,10 @@ export async function prepareContextOperation({ state, branch, boundary, operati
   if (reference?.action !== "spill") return { operation };
   const artifact = reference.artifact;
   const loaded = await loadContextArtifact({ projectRoot, relativePath: artifact.path, artifact, source: artifact.source, binding: artifact.binding, version: artifact.version, range: artifact.range, purpose: artifact.purpose });
-  const content = dataBlocks(selectSourceRange(loaded.content, operation.range).content);
+  const selection = selectSourceRange(loaded.content, operation.range);
+  const content = dataBlocks(selection.content);
   return {
-    operation: { ...operation, recovery: { artifact, payloadVersion: contentVersion(content) } },
+    operation: { ...operation, recovery: { artifact, payloadVersion: contentVersion(content), range: selection.range } },
     content: [{ type: "text", text: "Verified artifact data queued for a native context copy; this is not a new Human instruction or acceptance result." }, ...content],
   };
 }
@@ -495,7 +508,7 @@ function planLoad({ next, index, operation, boundary }) {
     if (original?.action !== "spill" || contentVersion(original.artifact) !== contentVersion(operation.recovery.artifact)) fail("Artifact receipt changed before native load commit.");
     const content = boundary.toolResults[0].content.slice(1);
     if (contentVersion(content) !== operation.recovery.payloadVersion) fail("Verified artifact payload changed before commit.");
-    selected = { ...selected, content, version: original.artifact.version, caveats: original.artifact.caveats, provenance: original.artifact.provenance };
+    selected = { ...selected, content, version: original.artifact.version, caveats: original.artifact.caveats, provenance: original.artifact.provenance, range: operation.recovery.range ?? null };
   }
   const draft = sourceDataDraft(next, operation, selected, "load");
   return [...(operation.recovery ? [nativeEdit(boundary.toolResultEntryIds[0], [{ type: "text", text: `Verified artifact payload follows as ${draft.details.sourceId} @${draft.details.version}.` }])] : []), draft];
@@ -509,9 +522,57 @@ function planSpill({ next, index, operation, boundary }) {
   const head = {
     entryId: boundary.toolResultEntryIds[0], field: "operation", version: contentVersion(operation.pointer), kind: "memory",
     readOnly: false, rendered: true, handling: "active", caveats: [...value.head.caveats], sources: [...value.head.sources],
+    ...(value.head.readStatus ? { readStatus: structuredClone(value.head.readStatus) } : {}),
   };
   next.values[value.key] = head;
   return writeView(next, value, head, operation.pointer);
+}
+function verifyMoveComparison(index, state, operation) {
+  if (operation.verifiedAgainst === undefined) return null;
+  if (operation.action !== "move" || operation.range || operation.ids?.length !== 1 || !operation.verifiedAgainst || typeof operation.verifiedAgainst !== "object") fail("verifiedAgainst is supported only for one explicit whole-read relocation.");
+  const sourceId = operation.ids[0];
+  const sourceVersion = operation.version;
+  const comparison = operation.verifiedAgainst;
+  ensureIds([comparison.id]);
+  const sourceObservation = readOnlyObservation(index, sourceId);
+  const comparedObservation = readOnlyObservation(index, comparison.id);
+  if (!sourceObservation || !comparedObservation) fail("Read relocation requires successful, untruncated read results with complete paired exchanges.");
+  ensureVersion(sourceVersion);
+  ensureVersion(comparison.version);
+  if (sourceVersion !== sourceObservation.payloadVersion || comparison.version !== comparedObservation.payloadVersion) fail("Read relocation source or comparison payload version is stale.");
+  resolveSource(index, state, { ...comparison, range: undefined }, operation.sourceScope ?? "all");
+  if (sourceObservation.path !== comparedObservation.path) fail("Read relocation sources do not identify the same canonical path.");
+  exchangeClosure(index, [sourceId]);
+  exchangeClosure(index, [comparison.id]);
+  const candidates = new Map([
+    [sourceId, { id: sourceId, version: sourceObservation.payloadVersion }],
+    [comparison.id, { id: comparison.id, version: comparedObservation.payloadVersion, ...(comparison.range !== undefined ? { range: comparison.range } : {}) }],
+  ]);
+  let afterSource = false;
+  let scannedAfterSource = 0;
+  for (const id of index.readRequests.keys()) {
+    if (id === sourceId) { afterSource = true; continue; }
+    if (!afterSource || index.readRequests.get(id)?.name !== "read") continue;
+    if (++scannedAfterSource > 256) fail("Too many later read results to verify relocation within the bounded safety scan; no context changed.");
+    if (candidates.has(id)) continue;
+    const observation = readOnlyObservation(index, id);
+    if (observation?.path === sourceObservation.path) candidates.set(id, { id, version: observation.payloadVersion });
+  }
+  if (candidates.size > 16) fail("Too many read observations exist for this path to verify one relocation safely; no context changed.");
+  const samePath = [...candidates.values()];
+  const report = analyzeRepeatedSelections(index, state, samePath, operation.sourceScope ?? "all");
+  const sourcePosition = index.positions.get(sourceId);
+  const newerConflict = report.changed.find((item) => (item.firstId === sourceId && index.positions.get(item.secondId) > sourcePosition) || (item.secondId === sourceId && index.positions.get(item.firstId) > sourcePosition));
+  if (newerConflict) fail(`Read relocation rejected: later changed-file or payload evidence conflicts (${newerConflict.reason}).`);
+  const pair = (item) => (item.firstId === sourceId && item.secondId === comparison.id) || (item.secondId === sourceId && item.firstId === comparison.id);
+  const exact = report.exact.find((item) => pair(item) && item.relocateId === sourceId);
+  if (exact) return { kind: "exact", ...exact };
+  const subset = report.subsets.find((item) => pair(item) && item.relocateId === sourceId && item.supersetId === sourceId);
+  if (subset) return { kind: "subset", ...subset };
+  const unknown = report.unknown.find(pair);
+  if (unknown) fail(`Read relocation rejected: ${unknown.reason}`);
+  if (report.changed.length) fail(`Read relocation rejected: changed-file or payload evidence conflicts (${report.changed[0].reason}).`);
+  fail("Read relocation requires an exact repeated range or a revision-verified covered subset; no source information was changed.");
 }
 function planMove({ next, index, operation, boundary }) {
   ensureIds(operation.ids);
@@ -524,6 +585,9 @@ function planMove({ next, index, operation, boundary }) {
     ensureVersion(operation.version);
     if (value.version !== operation.version) fail(`Source ${id} changed since selection.`);
     const preserveSource = value.message?.role === "toolResult";
+    if (value.head.kind === "skill") fail("Active Skill content is not eligible for relocation.");
+    const observation = preserveSource ? readOnlyObservation(index, value.nativeId) : null;
+    if (preserveSource && (!observation || observation.payloadVersion !== value.version)) fail("Only successful, untruncated native read results at the exact observed payload version can be range-relocated.");
     if (value.head.readOnly && !preserveSource) fail("This value is read-only and cannot be range-moved.");
     if (!preserveSource && (value.message?.role !== "assistant" || value.message.content?.some?.((part) => part.type === "toolCall"))) fail("Human messages and executed call records cannot be range-moved.");
     if (operation.preserveSource !== preserveSource) fail("Prepared source-preservation mode does not match the selected source.");
@@ -532,7 +596,7 @@ function planMove({ next, index, operation, boundary }) {
     if (contentVersion(verifiedCut.selected) !== contentVersion(operation.selectedRange) || (!preserveSource && contentVersion(verifiedCut.remaining) !== contentVersion(operation.remaining))) fail(`Selected range payload changed after preparation for source ${id}.`);
     const moved = sourceDataDraft(next, operation, {
       id: value.id, version: value.version, range: operation.range, content: operation.selectedRange,
-      caveats: value.head.caveats, provenance: [...new Set([...value.head.sources, value.id])],
+      caveats: value.head.caveats, provenance: [...new Set([...value.head.sources, value.id])], readStatus: value.head.readStatus,
     }, "move-range");
     if (preserveSource) return [moved];
     const head = {
@@ -548,6 +612,12 @@ function planMove({ next, index, operation, boundary }) {
   for (const id of operation.ids) {
     const value = currentValue(next, index, id, { key: operation.binding });
     assertWritableValue(next, value);
+    if (value.head.kind === "skill") fail("Active Skill content is not eligible for relocation.");
+    if (value.message?.role === "toolResult") {
+      exchangeClosure(index, [value.nativeId]);
+      const observation = readOnlyObservation(index, value.nativeId);
+      if (!observation || observation.payloadVersion !== value.version) fail("Move only a verified successful read result at its exact observed payload version; other executed results remain immutable.");
+    }
     if (value.head.readOnly) fail("Move a loaded data copy, not an original Human instruction or executed call.");
     const expected = operation.ids.length === 1 ? operation.version ?? versions.get(id) : versions.get(id);
     ensureVersion(expected);
@@ -579,6 +649,8 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
   if (operation.expectedRevision !== next.revision) fail(`Stale context revision ${operation.expectedRevision}; current revision is ${next.revision}.`);
   if ((boundary.entries ?? []).some((entry) => entry.type !== "custom")) fail("Another extension proposed context changes; run this context operation at a separate boundary.");
   const args = { next, index: sourceIndex(branch, boundary), boundary, operation, turnIds: new Set([boundary.messageEntryId, ...boundary.toolResultEntryIds]) };
+  if (operation.verifiedAgainst !== undefined && operation.action !== "move") fail("verifiedAgainst is valid only for action=move.");
+  args.moveComparison = operation.action === "move" ? verifyMoveComparison(args.index, next, operation) : null;
   let entries;
   switch (operation.action) {
     case "call": entries = planCall(args); break;
@@ -598,7 +670,24 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
   }
   next.revision += 1;
   const references = entries.filter((entry) => entry.type === "custom_message" && entry.customType === VALUE_MESSAGE_TYPE && entry.details.derived).map((entry) => ({ id: entry.details.sourceId, binding: entry.details.key, version: entry.details.version }));
-  if (!["call", "return"].includes(operation.action) || references.length) entries.push(nativeMessage(`Context ${operation.action} applied; revision ${next.revision}. Sources: ${(operation.ids ?? []).join(", ")}.${references.length ? ` Values: ${JSON.stringify(references)}` : ""}`, { action: operation.action, revision: next.revision, references }));
+  if (!["call", "return"].includes(operation.action) || references.length) {
+    const movedEntry = operation.action === "move" ? args.index.byId.get(operation.ids?.[0]) : null;
+    const movedRole = movedEntry ? messageOf(movedEntry)?.role : null;
+    const comparison = args.moveComparison;
+    const comparisonText = comparison?.kind === "exact"
+      ? ` Verified exact repeat of ${comparison.firstId} and ${comparison.secondId} at ${comparison.path}; the earlier payload was relocated.`
+      : comparison?.kind === "subset"
+        ? ` Verified subset of ${comparison.path} on file revision ${comparison.fileRevision}; the full prior superset was relocated and content outside lines ${comparison.range.startLine}-${comparison.range.endLine} remains unrefreshed.`
+        : "";
+    const change = operation.action !== "move" ? "" : operation.range
+      ? movedRole === "toolResult"
+        ? " Selected verified read lines were appended as qualified data; the original call/result and larger source remain unchanged."
+        : " Selected Agent-authored lines were removed from the future view and appended as qualified data; the raw message remains unchanged."
+      : movedRole === "toolResult"
+        ? " The complete verified read payload was relocated to the append end; its original call/result pair remains present with a projection pointer."
+        : " The selected working value was moved to the append end.";
+    entries.push(nativeMessage(`Context ${operation.action} applied; revision ${next.revision}. Sources: ${(operation.ids ?? []).join(", ")}.${change}${comparisonText}${references.length ? ` Values: ${JSON.stringify(references)}` : ""}`, { action: operation.action, revision: next.revision, references, ...(operation.action === "move" ? { sourceIds: [...(operation.ids ?? [])], range: operation.range ?? null, rawExchangePreserved: movedRole === "toolResult", rawSourcePreserved: movedRole !== "toolResult", ...(comparison ? { relocationComparison: comparison } : {}) } : {}) }));
+  }
   return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: ["call", "return"].includes(operation.action) && boundary.outcome === "completed" };
 }
 

@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import {
   CONTEXT_MESSAGE_TYPE, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, prepareContextOperation, releaseWatchMessages, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
 } from "../src/context-core.mjs";
@@ -60,6 +63,29 @@ test("uncaptured parent ranges load as editable data copies with actionable expo
   assertPaired(manager);
 });
 
+test("range recovery from a verified spill retains exact source-range provenance", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "compass-range-spill-"));
+  try {
+    const manager = host();
+    const id = value(manager, "zero\none\ntwo");
+    const spillBoundary = queueOperation(manager, { action: "spill", ids: [id], version: sourceVersion(manager, id), path: "source.json", purpose: "retain selected source" });
+    const spill = await prepareContextOperation({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: spillBoundary, operation: spillBoundary.toolResults[0].details.contextOperation, projectRoot: root });
+    spillBoundary.toolResults[0].details.contextOperation = spill.operation;
+    const spillPlan = planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: spillBoundary });
+    appendDrafts(manager, [...spillBoundary.entries, ...spillPlan.entries]);
+
+    const loadBoundary = queueOperation(manager, { action: "load", ids: [id], version: sourceVersion(manager, id), range: { part: 0, startLine: 2, endLine: 2 } });
+    const load = await prepareContextOperation({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: loadBoundary, operation: loadBoundary.toolResults[0].details.contextOperation, projectRoot: root });
+    loadBoundary.toolResults[0].details.contextOperation = load.operation;
+    loadBoundary.toolResults[0].content = load.content;
+    const loadPlan = planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: loadBoundary });
+    const snapshot = loadPlan.entries.find((entry) => entry.details?.action === "load");
+    assert.deepEqual(snapshot.details.origin.range, { part: 0, startLine: 2, endLine: 2 });
+    assert.match(JSON.stringify(snapshot.content), /one/);
+    assert.doesNotMatch(JSON.stringify(snapshot.content), /zero|two/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("selected-range move cuts only verified Agent text and appends a qualified data copy", async () => {
   const manager = host();
   const id = manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "intro\nmove this line\nkeep this line" }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "stop", timestamp: Date.now() });
@@ -95,31 +121,76 @@ test("selected tool-result range relocates as data while preserving the complete
   assertPaired(manager);
 });
 
-test("exact repetition and source-range subsets require stable read-only identity", () => {
+test("cross-read repeat checks use persisted call identity, exact payloads, and explicit subset revision", () => {
   const manager = host();
-  const exchange = toolExchange(manager, ["read"]);
-  const id = exchange.results[0];
-  const version = sourceVersion(manager, id);
-  const compare = (selections) => searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { compare: selections }).repetition;
-  assert.equal(compare([{ id, version }, { id, version }]).exact.length, 1);
-  assert.equal(compare([{ id, version }, { id, version, range: { part: 0, startLine: 1, endLine: 1 } }]).subsets.length, 1);
-  const human = user(manager, "same words as source-0");
-  assert.equal(compare([{ id: human, version: sourceVersion(manager, human) }, { id, version }]).exact.length, 0);
-  const addRead = (callId, resultText) => {
-    manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: callId } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
-    return manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text: resultText }], isError: false, timestamp: Date.now() });
+  const addRead = (callId, { path = "src/file.txt", offset, limit, revision }, resultText, { isError = false, truncated = false } = {}) => {
+    const arguments_ = { path, ...(offset === undefined ? {} : { offset }), ...(limit === undefined ? {} : { limit }) };
+    manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: "read", arguments: arguments_ }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
+    return manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text: resultText }], details: { ...(revision ? { fileRevision: revision } : {}), ...(truncated ? { truncation: { truncated: true } } : {}) }, isError, timestamp: Date.now() });
   };
-  const first = addRead("similar-a", "configuration region EU west");
-  const other = addRead("similar-b", "configuration region EU north");
-  const similar = compare([{ id: first, version: sourceVersion(manager, first) }, { id: other, version: sourceVersion(manager, other) }]);
-  assert.ok(similar.similarities.length, `different source identities may produce a bounded advisory only: ${JSON.stringify(similar)}`);
-  assert.equal(similar.automaticEdits, 0);
-  const ranked = searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), {
-    rankedSources: [{ id: other, version: sourceVersion(manager, other) }, { id: first, version: sourceVersion(manager, first), range: { part: 0, startLine: 1, endLine: 1 } }],
-  }).ranked;
-  assert.equal(ranked.method, "agent-selected-verified");
-  assert.deepEqual(ranked.sources.map((source) => source.id), [other, first]);
-  assert.throws(() => searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { rankedSources: [{ id: first, version: "0".repeat(24) }] }), /stale/);
+  const compare = (selections) => searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { compare: selections }).repetition;
+  const human = user(manager, "identical words do not establish source identity");
+  const first = addRead("same-a", { path: "src/./file.txt", offset: 1, limit: 4 }, "alpha\nbeta\ngamma\ndelta");
+  const duplicate = addRead("same-b", { path: "src/file.txt", offset: 1, limit: 4 }, "alpha\nbeta\ngamma\ndelta");
+  const repeated = compare([
+    { id: human, version: sourceVersion(manager, human) },
+    { id: first, version: sourceVersion(manager, first) },
+    { id: duplicate, version: sourceVersion(manager, duplicate) },
+  ]);
+  assert.equal(repeated.exact.length, 1);
+  assert.deepEqual([repeated.exact[0].first, repeated.exact[0].second], [1, 2], "filtered Human selections do not shift returned indexes");
+  assert.equal(repeated.exact[0].relocateId, first);
+
+  const changed = addRead("changed", { path: "src/file.txt", offset: 1, limit: 4 }, "alpha\nBETA\ngamma\ndelta");
+  const changedReport = compare([{ id: duplicate, version: sourceVersion(manager, duplicate) }, { id: changed, version: sourceVersion(manager, changed) }]);
+  assert.equal(changedReport.exact.length, 0);
+  assert.ok(changedReport.changed.some((item) => /different payload/.test(item.reason)));
+  const invalidatedRepeat = compare([{ id: first, version: sourceVersion(manager, first) }, { id: duplicate, version: sourceVersion(manager, duplicate) }, { id: changed, version: sourceVersion(manager, changed) }]);
+  assert.equal(invalidatedRepeat.exact.length, 0, "later changed-file evidence invalidates an older exact repeat finding");
+  const moveAfterChange = queueOperation(manager, { action: "move", ids: [first], version: sourceVersion(manager, first), verifiedAgainst: { id: duplicate, version: sourceVersion(manager, duplicate) } });
+  const revisionBeforeRejectedMove = restoreContextState(manager.getBranch()).revision;
+  assert.throws(() => planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: moveAfterChange }), /later changed-file or payload evidence conflicts/);
+  assert.equal(restoreContextState(manager.getBranch()).revision, revisionBeforeRejectedMove);
+  assertPaired(manager);
+
+  const superset = addRead("superset", { offset: 1, limit: 4, revision: "file-v1" }, "one\ntwo\nthree\nfour");
+  const subset = addRead("subset", { offset: 2, limit: 2, revision: "file-v1" }, "two\nthree");
+  const subsetReport = compare([{ id: superset, version: sourceVersion(manager, superset) }, { id: subset, version: sourceVersion(manager, subset) }]);
+  assert.equal(subsetReport.subsets[0].relocateId, superset);
+  assert.equal(subsetReport.subsets[0].unrefreshedSupersetOutsideRange, true);
+  assert.match(subsetReport.subsets[0].changed, /outside the requested subset remains unrefreshed/);
+  const originalSuperset = structuredClone(manager.getEntry(superset));
+  applyOperation(manager, { action: "move", ids: [superset], version: sourceVersion(manager, superset), verifiedAgainst: { id: subset, version: sourceVersion(manager, subset) } });
+  assert.deepEqual(manager.getEntry(superset), originalSuperset, "explicit relocation changes only the future projection");
+  assert.match(modelText(manager), /full prior superset was relocated/);
+  assertPaired(manager);
+  const revisedSubset = addRead("revised-subset", { offset: 2, limit: 2, revision: "file-v2" }, "two\nthree");
+  const revisionChanged = compare([{ id: superset, version: sourceVersion(manager, superset) }, { id: revisedSubset, version: sourceVersion(manager, revisedSubset) }]);
+  assert.match(revisionChanged.changed[0].reason, /file revision changed/);
+
+  const noRevision = addRead("no-revision", { offset: 2, limit: 2 }, "two\nthree");
+  const unknown = compare([{ id: superset, version: sourceVersion(manager, superset) }, { id: noRevision, version: sourceVersion(manager, noRevision) }]);
+  assert.equal(unknown.subsets.length, 0);
+  assert.match(unknown.unknown[0].reason, /no shared file revision/);
+
+  const failed = addRead("failed-read", { path: "src/file.txt", offset: 1, limit: 4 }, "alpha\nbeta\ngamma\ndelta", { isError: true });
+  const truncated = addRead("truncated-read", { path: "src/file.txt", offset: 1, limit: 4 }, "alpha\nbeta", { truncated: true });
+  assert.equal(compare([{ id: duplicate, version: sourceVersion(manager, duplicate) }, { id: failed, version: sourceVersion(manager, failed) }]).exact.length, 0);
+  assert.equal(compare([{ id: duplicate, version: sourceVersion(manager, duplicate) }, { id: truncated, version: sourceVersion(manager, truncated) }]).exact.length, 0);
+});
+
+test("read range relocation rejects shell results and retained Skill content", async () => {
+  for (const [tool, file] of [["bash", "src/file.txt"], ["read", ".agents/skills/demo/SKILL.md"]]) {
+    const manager = host();
+    const callId = `unsafe-${tool}`;
+    manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: tool, arguments: { path: file } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
+    const id = manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: tool, content: [{ type: "text", text: "line one\\nline two" }], isError: false, timestamp: Date.now() });
+    const boundary = queueOperation(manager, { action: "move", ids: [id], version: sourceVersion(manager, id), range: { part: 0, startLine: 1, endLine: 1 } });
+    await assert.rejects(prepareContextOperation({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary, operation: boundary.toolResults[0].details.contextOperation }), /successful, untruncated native read results/);
+    const wholeMove = queueOperation(manager, { action: "move", ids: [id], version: sourceVersion(manager, id) });
+    assert.throws(() => planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: wholeMove }), /verified successful read result/);
+    assertPaired(manager);
+  }
 });
 
 test("moving a result payload keeps its complete parallel execution envelope", () => {
@@ -133,6 +204,7 @@ test("moving a result payload keeps its complete parallel execution envelope", (
   assert.equal(sourceVersion(manager, id), version);
   assert.deepEqual(manager.getEntry(id), original);
   assert.match(modelText(manager), /Context relocation pointer/);
+  assert.match(modelText(manager), /complete verified read payload was relocated/);
   assertPaired(manager);
   const control = restoreContextState(manager.getBranch());
   const stale = queueOperation(manager, { action: "move", ids: [id], version: "0".repeat(24) });
@@ -158,13 +230,54 @@ test("Goal-scoped retention expires without retiring explicit session data", () 
   assert.deepEqual(planned.state.pins.map((pin) => pin.id), [session]);
 });
 
+test("parent/history retrieval and loaded copies preserve failed and truncated read qualifications", () => {
+  const manager = host();
+  const read = (callId, isError, truncated) => {
+    manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: `.agents/skills/demo/SKILL.md` } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
+    return manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text: `${callId} content` }], isError, details: truncated ? { truncation: { truncated: true } } : {} , timestamp: Date.now() });
+  };
+  const failed = read("failed-skill-copy", true, false);
+  const truncated = read("truncated-skill-copy", false, true);
+  const versions = new Map([failed, truncated].map((id) => [id, sourceVersion(manager, id)]));
+  applyOperation(manager, { action: "call", task: "recover qualified sources" });
+  const state = restoreContextState(manager.getBranch());
+  const parent = searchContext(manager.getBranch(), { context: contextPreview(manager) }, state, { sourceScope: "parent", ids: [failed, truncated] });
+  const history = searchContext(manager.getBranch(), { context: contextPreview(manager) }, state, { sourceScope: "history", ids: [failed, truncated] });
+  assert.match(parent.hits.find((hit) => hit.id === failed).caveats.join(" "), /execution failed/);
+  assert.match(parent.hits.find((hit) => hit.id === truncated).caveats.join(" "), /truncated/);
+  assert.match(history.hits.find((hit) => hit.id === failed).caveats.join(" "), /execution failed/);
+  assert.match(history.hits.find((hit) => hit.id === truncated).caveats.join(" "), /truncated/);
+  for (const id of [failed, truncated]) {
+    const loaded = applyOperation(manager, { action: "load", ids: [id], version: versions.get(id), sourceScope: "parent" });
+    const snapshot = loaded.planned.entries.find((entry) => entry.details?.action === "load");
+    assert.ok(snapshot.details.readStatus, "read outcome survives in the immutable data snapshot");
+    assert.throws(() => applyOperation(manager, { action: "pin", ids: [snapshot.details.sourceId], kind: "skill" }), /successful, complete native Skill-file read/);
+  }
+});
+
+test("Skill activation accepts only the exact original complete native read, not a copied value", () => {
+  const manager = host();
+  const callId = "complete-skill";
+  manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: ".agents/skills/demo/SKILL.md" } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
+  const id = manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text: "Complete skill instructions" }], isError: false, timestamp: Date.now() });
+  applyOperation(manager, { action: "pin", ids: [id], kind: "skill" });
+  const loaded = applyOperation(manager, { action: "load", ids: [id], version: sourceVersion(manager, id) });
+  const loadedSnapshot = loaded.planned.entries.find((entry) => entry.details?.action === "load");
+  assert.throws(() => applyOperation(manager, { action: "pin", ids: [loadedSnapshot.details.sourceId], kind: "skill" }), /original payload.*loaded/);
+  applyOperation(manager, { action: "call", task: "inspect copied instructions", capture: [{ id, mode: "copy", version: sourceVersion(manager, id) }] });
+  assert.throws(() => applyOperation(manager, { action: "pin", ids: [id], kind: "skill" }), /original payload.*copied/);
+  applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "Derived from the skill source" });
+  assert.throws(() => applyOperation(manager, { action: "pin", ids: [id], kind: "skill" }), /original payload.*derived/);
+  assertPaired(manager);
+});
+
 test("failed Skill reads cannot be activated as successful retained instructions", () => {
   const manager = host();
   manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "failed-skill", name: "read", arguments: { path: "SKILL.md" } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
   const id = manager.appendMessage({ role: "toolResult", toolCallId: "failed-skill", toolName: "read", content: [{ type: "text", text: "Read failed" }], isError: true, timestamp: Date.now() });
   const pending = queueOperation(manager, { action: "pin", ids: [id], kind: "skill" });
   const before = manager.getEntries().length;
-  assert.throws(() => planContextBoundary({ state: emptyContextState(), branch: manager.getBranch(), boundary: pending }), /failed Skill read/);
+  assert.throws(() => planContextBoundary({ state: emptyContextState(), branch: manager.getBranch(), boundary: pending }), /successful, complete native Skill-file read/);
   assert.equal(manager.getEntries().length, before);
 });
 

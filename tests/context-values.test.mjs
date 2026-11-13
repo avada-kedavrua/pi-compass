@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { planContextBoundary, restoreContextState, searchContext } from "../src/context-core.mjs";
-import { SessionManager, applyOperation, assertPaired, contextPreview, modelText, queueOperation, sourceVersion, user, value } from "./helpers/context-host.mjs";
+import { SessionManager, applyOperation, assertPaired, contextPreview, modelText, queueOperation, sourceVersion, toolExchange, user, value } from "./helpers/context-host.mjs";
 
 function host() { const manager = SessionManager.inMemory("/context-values"); user(manager, "parent"); return manager; }
 function capture(manager, id, mode) { return { id, mode, version: sourceVersion(manager, id) }; }
@@ -51,12 +51,17 @@ test("copy-on-write does not overwrite a simultaneously visible parent pin", () 
 
 test("derived writes and exports retain structured caveats and provenance", () => {
   const manager = host();
-  const id = value(manager, "observed result");
+  const id = toolExchange(manager, ["read"]).results[0];
   applyOperation(manager, { action: "pin", ids: [id], kind: "memory", caveats: ["Local evidence only; no provider acceptance."] });
   applyOperation(manager, { action: "unpin", ids: [id] });
   applyOperation(manager, { action: "call", task: "derive", capture: [capture(manager, id, "ref")] });
   applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "derived conclusion" });
   assert.match(modelText(manager), /Agent-authored derived value/);
+  const derivedHit = search(manager, id);
+  assert.equal(derivedHit.role, "toolResult");
+  assert.equal(derivedHit.authorship, "agent-derived");
+  assert.equal(derivedHit.derived, true);
+  assert.match(derivedHit.qualification, /not a new tool observation/);
   applyOperation(manager, { action: "return", exportIds: [id] });
   const hit = search(manager, id);
   assert.deepEqual(hit.caveats, ["Local evidence only; no provider acceptance."]);

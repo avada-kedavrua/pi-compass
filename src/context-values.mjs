@@ -16,6 +16,38 @@ export function rawMessage(entry) {
 function normalizeContent(entry, content) {
   return typeof content === "string" && ["assistant", "toolResult"].includes(rawMessage(entry)?.role) ? [{ type: "text", text: content }] : content;
 }
+function isSkillPath(path) {
+  if (typeof path !== "string") return false;
+  const normalized = path.toLowerCase().split(String.fromCharCode(92)).join("/");
+  return normalized === "skill.md" || normalized.endsWith("/skill.md") || normalized.includes("/skills/");
+}
+export function sourceQualifications(entry, call = null, exchangeComplete = false) {
+  const message = rawMessage(entry);
+  const caveats = [];
+  if (message?.isError || message?.details?.error) caveats.push("Original tool execution failed; a context view is not evidence of a successful rerun.");
+  else if (message?.role === "toolResult" && message.isError !== false) caveats.push("Original tool result has no explicit success status; do not treat it as verified execution evidence.");
+  if (message?.details?.truncation?.truncated === true) caveats.push("Original tool output was truncated; this source is not evidence that the full content was read.");
+  let readStatus;
+  if (message?.role === "toolResult" && message.toolName === "read" && call?.name === "read") {
+    const args = call.arguments ?? {};
+    const range = args.range && typeof args.range === "object" ? args.range : {};
+    const requestedStart = range.startLine ?? args.startLine ?? args.offset ?? 1;
+    const startLine = Number.isSafeInteger(requestedStart) && requestedStart >= 1 ? requestedStart : 0;
+    const endLine = range.endLine ?? args.endLine;
+    const limit = range.limit ?? args.limit;
+    const truncated = message.details?.truncation?.truncated === true || (message.details?.truncation && message.details.truncation.truncated !== false);
+    const failed = message.isError === true || Boolean(message.details?.error);
+    const status = failed ? "failed" : truncated ? "truncated" : message.isError === false ? "complete" : "unknown";
+    const content = normalizeContent(entry, message.content);
+    readStatus = {
+      sourceId: entry.id, payloadVersion: contentVersion(content), status, exchangeComplete,
+      path: typeof args.path === "string" ? args.path.slice(0, 1000) : "",
+      range: { startLine, ...(endLine !== undefined ? { endLine } : {}), ...(limit !== undefined ? { limit } : {}) },
+      fullSkillFile: status === "complete" && exchangeComplete && isSkillPath(args.path) && startLine === 1 && endLine === undefined && limit === undefined,
+    };
+  }
+  return { caveats, ...(readStatus ? { readStatus } : {}) };
+}
 export function validateValue(head) {
   if (!head || !["content", "operation", "snapshot", "questionnaire"].includes(head.field) || typeof head.entryId !== "string" || !/^[a-f0-9]{24}$/.test(head.version) || !VALUE_KINDS.has(head.kind) || typeof head.readOnly !== "boolean" || typeof head.rendered !== "boolean") fail("Invalid context value reference.");
   if (head.pointerVersion !== undefined && !/^[a-f0-9]{24}$/.test(head.pointerVersion)) fail("Invalid source pointer version.");
@@ -23,6 +55,7 @@ export function validateValue(head) {
   if (head.handlingReason !== undefined && (typeof head.handlingReason !== "string" || head.handlingReason.length > 600)) fail("Invalid handling reason.");
   if (!Array.isArray(head.caveats) || head.caveats.length > 12 || head.caveats.some((text) => typeof text !== "string" || text.length > 600)) fail("Caveats must contain at most 12 bounded strings.");
   if (!Array.isArray(head.sources) || head.sources.length > 32 || head.sources.some((id) => typeof id !== "string")) fail("Invalid context value provenance.");
+  if (head.readStatus !== undefined && (!head.readStatus || typeof head.readStatus !== "object" || !["complete", "failed", "truncated", "unknown"].includes(head.readStatus.status) || typeof head.readStatus.sourceId !== "string" || !/^[a-f0-9]{24}$/.test(head.readStatus.payloadVersion) || typeof head.readStatus.path !== "string" || typeof head.readStatus.fullSkillFile !== "boolean" || typeof head.readStatus.exchangeComplete !== "boolean" || !head.readStatus.range || !Number.isSafeInteger(head.readStatus.range.startLine))) fail("Invalid immutable read-status qualification.");
 }
 export function valueContent(index, head) {
   validateValue(head);
@@ -84,14 +117,15 @@ function defaultHead(index, sourceId, item) {
   const entry = index.byId.get(sourceId);
   const raw = rawMessage(entry);
   if (entry?.customType === VALUE_MESSAGE_TYPE && entry.details?.derived) return snapshotHead(entry);
-  const caveats = [];
-  if (raw?.isError) caveats.push("Original tool execution failed; a context edit is not evidence of a successful rerun.");
-  if (raw?.details?.truncation?.truncated) caveats.push("Original tool output was truncated; this source is not evidence that the full content was read.");
+  const group = index.groups?.get(entry.id);
+  const exchangeComplete = Boolean(group && !group.duplicate && group.calls.size === group.results.size);
+  const qualification = sourceQualifications(entry, index.readRequests?.get(entry.id), exchangeComplete);
   const calls = raw?.role === "assistant" && Array.isArray(raw.content) && raw.content.some((part) => part.type === "toolCall");
   return {
     entryId: entry.id, editId: index.edits.get(entry.id)?.id ?? null, field: "content", version: contentVersion(message.content),
     kind: raw?.role === "user" ? "human" : "working", readOnly: raw?.role === "user" || Boolean(calls), rendered: false, handling: "active",
-    caveats, sources: [sourceId],
+    caveats: qualification.caveats, sources: [sourceId],
+    ...(qualification.readStatus ? { readStatus: qualification.readStatus } : {}),
   };
 }
 export function snapshotHead(entry) {
@@ -99,6 +133,7 @@ export function snapshotHead(entry) {
     entryId: entry.id, field: "snapshot", version: entry.details.version, kind: entry.details.kind,
     readOnly: false, rendered: true, handling: entry.details.handling, caveats: [...entry.details.caveats], sources: [...entry.details.sources],
     origin: structuredClone(entry.details.origin),
+    ...(entry.details.readStatus ? { readStatus: structuredClone(entry.details.readStatus) } : {}),
   };
 }
 export function currentValue(state, index, id, { allowHidden = false, key: selectedKey } = {}) {
@@ -138,6 +173,7 @@ export function writeValue(state, index, value, operation, resultEntryId) {
     entryId: resultEntryId, field: "operation", version: contentVersion(operation.content), kind: operation.kind ?? value.head.kind,
     readOnly: false, rendered: true, handling: "active", caveats: operation.caveats ?? [...value.head.caveats], sources: [...sources],
     ...(value.head.origin ? { origin: structuredClone(value.head.origin) } : {}),
+    ...(value.head.readStatus ? { readStatus: structuredClone(value.head.readStatus) } : {}),
   };
   validateValue(head);
   // The payload is already persisted in Pi's tool result, not duplicated in control state.
@@ -165,7 +201,7 @@ export function renderValue(value, content = value.content, head = value.head) {
 export function valueMessage(value, content = value.content, head = value.head) {
   return {
     type: "custom_message", customType: VALUE_MESSAGE_TYPE, content: structuredClone(renderValue(value, content, head)), display: false,
-    details: { key: value.key, sourceId: value.id, version: head.version, kind: head.kind, handling: head.handling, caveats: [...head.caveats], sources: [...head.sources] },
+    details: { key: value.key, sourceId: value.id, version: head.version, kind: head.kind, handling: head.handling, caveats: [...head.caveats], sources: [...head.sources], ...(head.readStatus ? { readStatus: structuredClone(head.readStatus) } : {}) },
   };
 }
 export function isValueMessage(message, key, version) {
