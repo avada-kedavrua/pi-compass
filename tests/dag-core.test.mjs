@@ -5,6 +5,7 @@ import {
   createOrRevisePlan,
   emptyDagState,
   readyTasks,
+  taskAssessmentBinding,
   recordContinuityNote,
   updateTasks,
 } from "../src/dag-core.mjs";
@@ -50,12 +51,17 @@ test("cannot mark a task done without concrete evidence", () => {
   assert.throws(() => updateTasks(state, [{ id: "inspect-api", status: "done" }]), /without concrete evidence/);
 });
 
-test("ready tasks advance after dependency evidence is recorded", () => {
+test("dependencies require an explicit semantic pass after task completion", () => {
   let state = plan();
   state = updateTasks(state, [
     { id: "inspect-api", status: "done", evidence: "Read server routes; /health exists and checks process liveness only." },
     { id: "inspect-ui", status: "done", evidence: "Read router and package scripts; primary route is /dashboard." },
   ]);
+  assert.deepEqual(readyTasks(state).map((task) => task.id), []);
+  for (const id of ["inspect-api", "inspect-ui"]) {
+    const task = state.tasks.find((item) => item.id === id);
+    task.assessment = { status: "pass", planRevision: state.revision, binding: taskAssessmentBinding(state, task) };
+  }
   assert.deepEqual(readyTasks(state).map((task) => task.id), ["design-smoke"]);
 });
 
@@ -107,8 +113,12 @@ test("replanning invalidates completed descendants when a prerequisite changes",
   state = updateTasks(state, [
     { id: "inspect-api", status: "done", evidence: "API inspected." },
     { id: "inspect-ui", status: "done", evidence: "UI inspected." },
-    { id: "design-smoke", status: "done", evidence: "Smoke path chosen." },
   ]);
+  for (const id of ["inspect-api", "inspect-ui"]) {
+    const task = state.tasks.find((item) => item.id === id);
+    task.assessment = { status: "pass", planRevision: state.revision, binding: taskAssessmentBinding(state, task) };
+  }
+  state = updateTasks(state, [{ id: "design-smoke", status: "done", evidence: "Smoke path chosen." }]);
   const revised = plan(state, [
     { id: "inspect-api", title: "Inspect backend API", acceptance: "Existing health/readiness behavior is documented", dependsOn: [], writeScope: "read-only" },
     { id: "inspect-ui", title: "Inspect frontend entry", acceptance: "Primary route and startup behavior are documented", dependsOn: [], writeScope: "read-only" },

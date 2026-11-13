@@ -1,4 +1,6 @@
-import { emptyDagState, readyTasks, createOrRevisePlan } from "./dag-core.mjs";
+import { emptyDagState, readyTasks, createOrRevisePlan, taskAssessmentBinding, taskAssessmentIsCurrent } from "./dag-core.mjs";
+import { approvalIsCurrent, clearDagApprovalAnswer, createDagApprovalRequest, dagApprovalBinding, matchesDagApprovalQuestion } from "./dag-approval.mjs";
+import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 
 export const GOAL_RUN_API_VERSION = 7;
 export const GOAL_RUN_RELEASE = "0.9.1";
@@ -10,7 +12,6 @@ const MAX_GOAL_CHANGES = 5;
 const MAX_FAILURES = 12;
 const MAX_WRITES = 12;
 const MAX_HUMAN_DECISIONS = 8;
-const MAX_QUESTIONNAIRE_ANSWERS = 4;
 const MAX_SESSION_DIRECTIVES = 24;
 const MAX_HARD_SESSION_DIRECTIVES = 48;
 const MAX_EVENTS = 80;
@@ -73,47 +74,6 @@ const clip = (value, max = 500) => {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 };
 const timestamp = () => new Date().toISOString();
-
-function normalizeQuestionnaireRecord(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const answers = Array.isArray(value.answers)
-    ? value.answers.slice(0, MAX_QUESTIONNAIRE_ANSWERS).map((answer) => {
-      if (!answer || typeof answer !== "object" || Array.isArray(answer)) return null;
-      const questionIndex = Number.isInteger(answer.questionIndex) && answer.questionIndex >= 0 && answer.questionIndex < MAX_QUESTIONNAIRE_ANSWERS
-        ? answer.questionIndex : null;
-      const question = clip(answer.question, 400);
-      const kind = ["option", "custom", "multi"].includes(answer.kind) ? answer.kind : null;
-      if (questionIndex === null || !question || !kind) return null;
-      const selected = Array.isArray(answer.selected)
-        ? [...new Set(answer.selected.filter((item) => typeof item === "string" && item.trim()).slice(0, 4).map((item) => clip(item, 60))) ]
-        : [];
-      const answerText = typeof answer.answer === "string" ? clip(answer.answer, 500) : null;
-      const notes = clip(answer.notes, 300);
-      return {
-        questionIndex,
-        question,
-        kind,
-        answer: answerText,
-        ...(selected.length ? { selected } : {}),
-        ...(notes ? { notes } : {}),
-        ...(answer.hasPreview === true || (typeof answer.preview === "string" && answer.preview.length > 0) ? { hasPreview: true } : {}),
-      };
-    }).filter(Boolean)
-    : [];
-  const unanswered = Array.isArray(value.unanswered)
-    ? [...new Set(value.unanswered.filter((item) => Number.isInteger(item) && item >= 0 && item < MAX_QUESTIONNAIRE_ANSWERS))].slice(0, MAX_QUESTIONNAIRE_ANSWERS)
-    : [];
-  const globalNote = clip(value.globalNote, 600);
-  const cancelled = value.outcome === "declined" || value.cancelled === true;
-  if (!cancelled && answers.length === 0 && unanswered.length === 0 && !globalNote) return null;
-  const outcome = cancelled ? "declined" : unanswered.length ? "partial" : "answered";
-  return {
-    outcome,
-    answers,
-    ...(unanswered.length ? { unanswered } : {}),
-    ...(globalNote ? { globalNote } : {}),
-  };
-}
 
 function normalizeHumanDecisionRecord(value, index, fallbackVersion = 1) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -832,6 +792,8 @@ export function captureHumanDecision(stateValue, input) {
     : (typeof input?.text === "string" && input.text.trim() ? nonEmpty(input.text, "text", 2600) : "");
   if (!text && !questionnaire) return { state, captured: false, kind: "no_decision" };
   const sourceCallId = typeof input?.sourceCallId === "string" ? input.sourceCallId : "";
+  const approvalRequest = state.plan.approvalRequest;
+  const correlatedApprovalAnswer = Boolean(approvalRequest?.toolCallId && approvalRequest.toolCallId === sourceCallId);
   if (sourceCallId && state.humanDecisions.some((item) => item.sourceCallId === sourceCallId)) {
     return { state, captured: false, kind: "duplicate" };
   }
@@ -851,6 +813,20 @@ export function captureHumanDecision(stateValue, input) {
     ...(questionnaire ? { questionnaire } : {}),
   };
   state.humanDecisions = [...state.humanDecisions, item].slice(-MAX_HUMAN_DECISIONS);
+  if (correlatedApprovalAnswer) {
+    approvalRequest.status = "answered";
+    const approvalAnswerClear = clearDagApprovalAnswer(approvalRequest, questionnaire);
+    const approvalDefinitionCurrent = approvalRequest.binding === dagApprovalBinding(state);
+    if (approvalAnswerClear && approvalDefinitionCurrent) {
+      state.plan.approval = {
+        requestId: approvalRequest.id,
+        binding: approvalRequest.binding,
+        sourceCallId,
+        goalVersion: state.goal.version ?? 1,
+        approvedAt: timestamp(),
+      };
+    }
+  }
   appendEvent(state, "human_decision", {
     at: item.at,
     source,
@@ -871,6 +847,9 @@ export function recordHumanQuestionnaireFailure(stateValue, input) {
   const errorCode = QUESTIONNAIRE_ERRORS.has(suppliedCode) ? suppliedCode : "unknown";
   if (sourceCallId && state.events.some((event) => event.kind === "human_questionnaire_error" && event.ref === sourceCallId)) {
     return { state, captured: false, kind: "duplicate" };
+  }
+  if (state.plan.approvalRequest?.toolCallId && state.plan.approvalRequest.toolCallId === sourceCallId) {
+    state.plan.approvalRequest.status = "questionnaire_error";
   }
   const reason = clip(input?.reason, 360);
   const event = appendEvent(state, "human_questionnaire_error", {
@@ -2112,14 +2091,15 @@ export function summarizePlanStatus(stateValue) {
   const blocked = plan.tasks.filter((task) => task.status === "blocked");
   const acceptance = acceptanceStatus(state);
   const outcome = goalOutcomeStatus(state);
-  const lines = [`DAG revision: ${plan.revision}; stateVersion: ${plan.stateVersion ?? 0}; ${done}/${plan.tasks.length} tasks done; ${inProgress.length} in progress; ${blocked.length} blocked.`, `Goal outcome: ${outcome.status} (evidence=${outcome.evidenceLevel}; independentlyVerified=false).`, `Goal acceptance: ${acceptance.status} (${acceptance.passed}/${acceptance.total} reported pass; ${acceptance.failed} failed; ${acceptance.blocked} blocked).`];
+  const approved = approvalIsCurrent(state);
+  const lines = [`DAG revision: ${plan.revision}; stateVersion: ${plan.stateVersion ?? 0}; ${done}/${plan.tasks.length} tasks done; ${inProgress.length} in progress; ${blocked.length} blocked.`, `DAG approval: ${approved ? "current" : "missing or stale"}${approved ? "" : "; all progression is locked until a correlated structured Human approval"}.`, `Goal outcome: ${outcome.status} (evidence=${outcome.evidenceLevel}; independentlyVerified=false).`, `Goal acceptance: ${acceptance.status} (${acceptance.passed}/${acceptance.total} reported pass; ${acceptance.failed} failed; ${acceptance.blocked} blocked).`];
   if (blocked.length && acceptance.status === "reported_satisfied") {
     lines.push(`Outcome caveat: acceptance is Agent-reported satisfied, but task(s) remain blocked: ${blocked.map((task) => task.id).join(", ")}. Do not claim the overall Goal outcome is achieved without explaining the blocker.`);
   }
   for (const task of plan.tasks) {
     lines.push(`- ${task.id} [${task.status}] ${clip(task.title, 110)}; executor=${task.executor || "parent"}${task.executor === "subagent" ? `/${task.agent || "scout"}` : ""}${task.dependsOn.length ? ` <- ${task.dependsOn.join(", ")}` : ""}${task.reason ? `; ${clip(task.reason, 140)}` : ""}`);
   }
-  lines.push(`Ready: ${ready.length ? ready.map((task) => task.id).join(", ") : "none"}.`);
+  lines.push(`${approved ? "Progression-ready" : "Dependency-ready (approval locked)"}: ${ready.length ? ready.map((task) => task.id).join(", ") : "none"}.`);
   const parallel = ready.filter((task) => task.executor === "subagent" && String(task.writeScope || "").toLowerCase() === "read-only");
   if (parallel.length >= 2) lines.push(`Explicitly routed read-only Subagent candidates: ${parallel.map((task) => task.id).join(", ")}. Dependency readiness and write scope are code-derived; semantic independence and expected savings still require judgment.`);
   return lines.join("\n");
@@ -2147,8 +2127,11 @@ export function revisePlanState(stateValue, input) {
   if (changed) {
     state.plan.execution = null;
     state.plan.executionDrift = null;
+    state.plan.approval = null;
+    state.plan.approvalRequest = null;
   }
   syncAcceptanceCriteria(state, criteria, "dag");
+  if (changed) state.plan.approvalRequest = createDagApprovalRequest(state);
   if (changed) appendEvent(state, previousRevision ? "plan_revised" : "plan_created", {
     summary: `DAG r${state.plan.revision}: ${state.plan.tasks.length} tasks.`,
     text: input.changeReason || (previousRevision ? "Reason not recorded." : "Initial plan."),
@@ -2156,8 +2139,73 @@ export function revisePlanState(stateValue, input) {
   return { state, changed, summary: summarizePlanStatus(state) };
 }
 
+export function renewDagApprovalRequest(stateValue) {
+  const state = normalizeGoalRunState(stateValue);
+  if (!state.plan?.tasks?.length || state.plan.goal !== state.goal.current) throw new Error("A current Goal DAG is required to request approval. No state changed.");
+  if (state.plan.execution && ["dispatching", "running", "unknown"].includes(state.plan.execution.status)) throw new Error("Cannot request new approval while a Subagent batch is unresolved. No state changed.");
+  state.plan.approvalRequest = createDagApprovalRequest(state);
+  state.plan.approval = null;
+  return { state, request: state.plan.approvalRequest };
+}
+
+export function bindDagApprovalQuestionnaire(stateValue, input, toolCallId) {
+  const state = normalizeGoalRunState(stateValue);
+  const request = state.plan.approvalRequest;
+  if (!request || request.status !== "awaiting_questionnaire" || !matchesDagApprovalQuestion(request, input)) return { state, bound: false };
+  if (typeof toolCallId !== "string" || !toolCallId.trim()) return { state, bound: false };
+  request.toolCallId = toolCallId.slice(0, 128);
+  request.status = "presented";
+  return { state, bound: true, requestId: request.id };
+}
+
+export function recordTaskAssessment(stateValue, input) {
+  const state = normalizeGoalRunState(stateValue);
+  if (!approvalIsCurrent(state)) throw new Error("The current Goal DAG has no current correlated Human approval. No assessment was recorded.");
+  if (!input || !["pass", "fail", "inconclusive"].includes(input.status)) throw new Error('status must be "pass", "fail", or "inconclusive". No assessment was recorded.');
+  const id = nonEmpty(input.taskId, "taskId", 40);
+  const task = state.plan.tasks.find((item) => item.id === id);
+  if (!task) throw new Error(`Unknown or stale task ID "${id}". No assessment was recorded.`);
+  if (task.status !== "done") throw new Error(`Task "${id}" must be completed before assessment. No assessment was recorded.`);
+  const evidence = nonEmpty(input.evidence, "evidence", 1600);
+  if (!Array.isArray(input.caveats ?? []) || (input.caveats ?? []).some((item) => typeof item !== "string" || !item.trim())) throw new Error("caveats must be an array of non-empty strings. No assessment was recorded.");
+  if (!Array.isArray(input.unresolvedCaveats ?? []) || (input.unresolvedCaveats ?? []).some((item) => typeof item !== "string" || !item.trim())) throw new Error("unresolvedCaveats must be an array of non-empty strings. No assessment was recorded.");
+  const unresolvedCaveats = [...new Set((input.unresolvedCaveats ?? []).map((item) => nonEmpty(item, "unresolvedCaveat", 400)))];
+  if (input.status === "pass" && unresolvedCaveats.length) throw new Error(`Task "${id}" cannot pass with unresolved caveats. Record fail or inconclusive, or resolve the caveats first. No assessment was recorded.`);
+  task.assessment = {
+    status: input.status,
+    criteria: task.acceptance,
+    evidence,
+    caveats: [...new Set((input.caveats ?? []).map((item) => nonEmpty(item, "caveat", 400)))],
+    unresolvedCaveats,
+    goalVersion: state.goal.version ?? 1,
+    planRevision: state.plan.revision,
+    approvalBinding: state.plan.approval.binding,
+    binding: taskAssessmentBinding(state.plan, task),
+    assessedAt: timestamp(),
+  };
+  state.plan.stateVersion = (state.plan.stateVersion ?? 0) + 1;
+  appendEvent(state, "task_assessed", {
+    summary: `Task ${id} assessment: ${input.status}.`,
+    text: `${evidence}${task.assessment.caveats.length ? `\nCaveats: ${task.assessment.caveats.join("; ")}` : ""}${unresolvedCaveats.length ? `\nUnresolved caveats: ${unresolvedCaveats.join("; ")}` : ""}`,
+    ref: id,
+    status: input.status,
+  });
+  return { state, assessment: task.assessment };
+}
+
+export function dagApprovalStatus(stateValue) {
+  const state = normalizeGoalRunState(stateValue);
+  return {
+    approved: approvalIsCurrent(state),
+    requestId: state.plan.approvalRequest?.id ?? null,
+    status: approvalIsCurrent(state) ? "approved" : state.plan.approvalRequest?.status ?? "not_requested",
+    currentBinding: dagApprovalBinding(state),
+  };
+}
+
 export function transitionTasks(stateValue, action, items, updateTasksFn) {
   const state = normalizeGoalRunState(stateValue);
+  if (!approvalIsCurrent(state) && action !== "block") throw new Error("The current Goal DAG has no current correlated Human approval. No task state changed.");
   const tasks = state.plan.tasks ?? [];
   if (!tasks.length) throw new Error("No DAG exists. Create a plan before changing task state.");
   if (!Array.isArray(items) || items.length === 0) throw new Error("At least one task is required.");
@@ -2173,13 +2221,21 @@ export function transitionTasks(stateValue, action, items, updateTasksFn) {
     if (!task) throw new Error(`Unknown or stale task ID "${id}". No state changed; read current DAG status before retrying.`);
     if (action === "start") {
       if (task.status !== "pending") throw new Error(`Task "${id}" is ${task.status}; only pending tasks can start.`);
-      const unfinished = task.dependsOn.filter((dep) => byId.get(dep)?.status !== "done");
-      if (unfinished.length) throw new Error(`Task "${id}" is not ready; dependencies unfinished: ${unfinished.join(", ")}.`);
+      const unfinished = task.dependsOn.filter((dep) => {
+        const prerequisite = byId.get(dep);
+        return prerequisite?.status !== "done" || prerequisite.assessment?.status !== "pass"
+          || !taskAssessmentIsCurrent(state.plan, prerequisite);
+      });
+      if (unfinished.length) throw new Error(`Task "${id}" is not ready; dependencies unfinished or not semantically checked: ${unfinished.join(", ")}.`);
       updates.push({ id, status: "in_progress" });
     } else if (action === "done") {
       if (task.status === "pending") {
-        const unfinished = task.dependsOn.filter((dep) => byId.get(dep)?.status !== "done");
-        if (unfinished.length) throw new Error(`Task "${id}" is pending and not ready; dependencies unfinished: ${unfinished.join(", ")}.`);
+        const unfinished = task.dependsOn.filter((dep) => {
+          const prerequisite = byId.get(dep);
+          return prerequisite?.status !== "done" || prerequisite.assessment?.status !== "pass"
+            || !taskAssessmentIsCurrent(state.plan, prerequisite);
+        });
+        if (unfinished.length) throw new Error(`Task "${id}" is pending and not ready; dependencies unfinished or not semantically checked: ${unfinished.join(", ")}.`);
         completedWithoutStart.push(id);
       } else if (task.status !== "in_progress") {
         throw new Error(`Task "${id}" is ${task.status}; only ready pending or in-progress tasks can be marked done.`);

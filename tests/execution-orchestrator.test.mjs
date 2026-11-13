@@ -17,7 +17,9 @@ import {
   parseSubagentDelegationResponse,
   selectReadySubagentTasks,
 } from "../src/execution-orchestrator.mjs";
-import { emptyDagState, createOrRevisePlan, updateTasks } from "../src/dag-core.mjs";
+import { emptyDagState, createOrRevisePlan, taskAssessmentBinding, updateTasks } from "../src/dag-core.mjs";
+import { bindDagApprovalQuestionnaire, captureHumanDecision } from "../src/goal-run-v0-9-0.mjs";
+import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
 import { emptyGoalRunState, captureHumanPrompt, normalizeGoalRunState, recordExecutionDrift, recordExecutionEvent, buildGoalAnchor, transitionTasks, revisePlanState } from "../src/goal-run-v0-9-0.mjs";
 
 const task = (id, overrides = {}) => ({
@@ -63,6 +65,7 @@ test("ready Subagent selection requires explicit read-only executor and satisfie
   assert.deepEqual(selectReadySubagentTasks(plan).map((item) => item.id), ["a"]);
   assert.deepEqual(selectReadySubagentTasks(plan, 1).map((item) => item.id), ["a"]);
   plan.tasks[0].status = "done";
+  plan.tasks[0].assessment = { status: "pass", binding: taskAssessmentBinding(plan, plan.tasks[0]) };
   assert.deepEqual(selectReadySubagentTasks(plan).map((item) => item.id), ["b"]);
 });
 
@@ -307,9 +310,24 @@ test("GoalRun normalization preserves unknown usage/cost fields as null", () => 
   assert.equal(normalized.plan.executionHistory[0].estimatedParallelSavingsMs, null);
 });
 
+function approvePlan(state) {
+  const request = state.plan.approvalRequest;
+  const callId = `approval-${request.id}`;
+  const bound = bindDagApprovalQuestionnaire(state, {
+    questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }],
+  }, callId);
+  assert.equal(bound.bound, true);
+  return captureHumanDecision(bound.state, {
+    source: "ask_user_question",
+    sourceCallId: callId,
+    details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] },
+  }).state;
+}
+
 test("runtime drift records a compact warning once and the next Goal anchor explains recovery", () => {
   let state = captureHumanPrompt(emptyGoalRunState(), "Goal: implement two related changes").state;
-  state.plan = createOrRevisePlan(state.plan, { goal: state.goal.current, acceptanceCriteria: ["Both changes pass"], tasks: [task("a", { executor: "code", writeScope: "src/a.ts" }), task("b", { executor: "code", writeScope: "src/b.ts" })] });
+  state = revisePlanState(state, { acceptanceCriteria: ["Both changes pass"], tasks: [task("a", { executor: "code", writeScope: "src/a.ts" }), task("b", { executor: "code", writeScope: "src/b.ts" })] }).state;
+  state = approvePlan(state);
   const first = recordExecutionDrift(state, { tool: "edit", target: "/tmp/project/src/a.ts", reason: "No writable task is in progress." });
   const second = recordExecutionDrift(first.state, { tool: "edit", target: "/tmp/project/src/a.ts", reason: "No writable task is in progress." });
   assert.equal(first.changed, true);

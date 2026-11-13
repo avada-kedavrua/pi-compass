@@ -46,7 +46,11 @@ import {
   recordAcceptanceResult,
   shouldSurfaceIssueReview,
   captureHumanPrompt,
+  bindDagApprovalQuestionnaire,
   captureHumanDecision,
+  dagApprovalStatus,
+  recordTaskAssessment,
+  renewDagApprovalRequest,
   emptyGoalRunState,
   explicitGoalChangeUpdates,
   mergeTrace,
@@ -573,6 +577,7 @@ async function applyDelegationOutcome(pi: any, waveId: string, task: any, parsed
 }
 async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") {
   if (!state.goal.current || !state.plan?.tasks?.length) return;
+  if (!dagApprovalStatus(state).approved) return;
   if (state.plan.goal && state.plan.goal !== state.goal.current) return;
   // A restored or timed-out wave is never automatically re-dispatched: absence
   // of a response is not proof that a child did not start.
@@ -648,7 +653,7 @@ async function runReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") 
     }));
     const prepared = await serialized(async () => {
       const currentReady = selectReadySubagentTasks(state.plan, MAX_WAVE_TASKS).slice(0, wavePolicy.maxTasks);
-      if (state.plan.revision !== selectedPlanRevision || state.goal.version !== selectedGoalVersion
+      if (!dagApprovalStatus(state).approved || state.plan.revision !== selectedPlanRevision || state.goal.version !== selectedGoalVersion
         || !currentReady.length || !sameIds(currentReady.map((task: any) => task.id), ready.map((task: any) => task.id))
         || executionUnresolved(state.plan.execution)) return false;
       const started = transitionTasks(state, "start", currentReady.map((task: any) => ({ id: task.id })), updateTasks);
@@ -666,6 +671,26 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
       return true;
     });
     if (!prepared) return;
+    // Human input can arrive while availability is being checked or the prepared
+    // execution record is being persisted. Recheck the exact approval and veto
+    // synchronously immediately before the first provider-facing dispatch.
+    if (!dagApprovalStatus(state).approved || explicitSubagentVisibilityRequest() === "human_prohibited_subagents") {
+      await serialized(async () => {
+        const execution = state.plan?.execution;
+        if (!execution || execution.requestId !== waveId || execution.status !== "dispatching") return;
+        state.plan = updateTasks(state.plan, currentReady.map((task: any) => ({ id: task.id, status: "pending" })));
+        state.plan.execution = null;
+        state = recordExecutionEvent(state, {
+          status: "failed",
+          summary: "Prepared dispatch cancelled before child launch.",
+          text: "The approval became stale or a Human prohibition arrived before any child request was emitted. Tasks remain pending; no child was dispatched.",
+          ref: waveId,
+        });
+        persistState(pi);
+        loadoutRefreshPending = true;
+      });
+      return;
+    }
 
     const primaryResponses = await Promise.all(requests.map((request: any) => dispatchOneDelegation(pi, availability.runtime, request)));
     const fallbackJobs: any[] = [];
@@ -725,7 +750,7 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
       await applyDelegationOutcome(pi, waveId, task, parsed, false);
     }
 
-    if (fallbackJobs.length) {
+    if (fallbackJobs.length && dagApprovalStatus(state).approved) {
       const fallbackResponses = await Promise.all(fallbackJobs.map((job: any) => dispatchOneDelegation(pi, availability.runtime, job.request)));
       for (let index = 0; index < fallbackJobs.length; index += 1) {
         const job = fallbackJobs[index];
@@ -858,7 +883,7 @@ async function runReadySubagentWavesSafely(pi: any, ctx: any, latestInstruction 
   }
 }
 function hasAutoDispatchWork() {
-  if (!state.goal.current || !state.plan?.tasks?.length) return false;
+  if (!state.goal.current || !state.plan?.tasks?.length || !dagApprovalStatus(state).approved) return false;
   if (state.plan.goal && state.plan.goal !== state.goal.current) return false;
   if (executionUnresolved(state.plan.execution)) return false;
   if (selectReadySubagentTasks(state.plan, MAX_WAVE_TASKS).length) return true;
@@ -939,6 +964,14 @@ async function handleCompassToolResult(pi: any, event: any, ctx: any) {
     if (event?.isError || !/^compass_(?:plan_create|plan_revise|task|execution)$/.test(toolName)) return;
     if (toolName === "compass_execution" && event?.input?.action !== "resolve") return;
 
+    if (["compass_plan_create", "compass_plan_revise"].includes(toolName) && state.plan?.approvalRequest && !dagApprovalStatus(state).approved) {
+      const request = state.plan.approvalRequest;
+      const approvalPrompt = `Before any DAG task starts, present the exact structured Human question below through ask_user_question. Do not execute or treat text/partial/custom/UI-error output as approval. Preserve its exact question and option labels so Compass can correlate the response.\n\nQuestion: ${request.question}\nOptions: ${JSON.stringify(["Approve this exact DAG", "Revise the DAG"])}\n\nApproval request: ${request.id}`;
+      const details = { ...(event?.details && typeof event.details === "object" ? clone(event.details) : {}), dagApproval: dagApprovalStatus(state), approvalQuestion: request.question, approvalOptions: ["Approve this exact DAG", "Revise the DAG"] };
+      const content = Array.isArray(event?.content) ? [...event.content] : [];
+      content.push({ type: "text", text: approvalPrompt });
+      return { content, details };
+    }
     const beforeSnapshot = executionSnapshotForToolResult();
     const previousHistoryIds = new Set((state.plan?.executionHistory ?? []).map((batch: any) => batch.requestId));
     const readyBefore = selectReadySubagentTasks(state.plan, MAX_WAVE_TASKS).map((task: any) => task.id);
@@ -1314,7 +1347,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
     if (!state.plan.goal || !state.plan.tasks.length) {
       names.push(registerOnce(pi, "compass_plan_create", {
         label: "Create Goal DAG",
-        description: "Create the initial dependency DAG for a complex Goal. After this tool's execution boundary, Compass automatically dispatches explicitly routed read-only Subagent tasks through pi-subagents and consumes their structured results; parent and Code Mode tasks remain for the main Agent. Use only for real dependencies or independent work; simple Goals need no DAG.",
+        description: "Create an optional draft DAG for a complex Goal. Execution stays blocked until the Human answers Compass's correlated structured approval questionnaire for the exact Goal, criteria, tasks, dependencies, executors, and Human constraints.",
         promptSnippet: "Create a small DAG only when the Goal has real dependencies or independent tracks.",
         parameters: planCreateSchema(),
         async execute(_id: string, params: any, ...rest: any[]) {
@@ -1329,13 +1362,35 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             setActiveCapabilities([...activeCapabilities(), "acceptance"]);
             state.autoActivation = null;
             afterMutation(pi, contextCwd(ctx));
-            const ready = readyTasks(state.plan).map((task: any) => task.id);
-            return stateResult(`DAG created (r${state.plan.revision}); ${state.plan.tasks.length} tasks; ready: ${ready.join(", ") || "none"}. Acceptance tracking is active.`, { mutation: "plan_create", revision: state.plan.revision, ready });
+            const dependencyReady = readyTasks(state.plan).map((task: any) => task.id);
+            const ready = dagApprovalStatus(state).approved ? dependencyReady : [];
+            return stateResult(`Draft DAG created (r${state.plan.revision}); ${state.plan.tasks.length} tasks; executable now: ${ready.join(", ") || "none"}. A correlated structured Human approval is required before any progression.`, { mutation: "plan_create", revision: state.plan.revision, ready, dependencyReady, approval: dagApprovalStatus(state) });
           });
         },
       }));
       return names;
     }
+
+    names.push(registerOnce(pi, "compass_plan_approval", {
+      label: "Request DAG Approval",
+      description: "Create a fresh identity-bound structured Human approval question for the current exact Goal DAG after a prior answer was partial, modified, declined, or unavailable, or after a material constraint/decision changed. This never approves or starts work by itself.",
+      promptSnippet: "Use this only to request Human approval again; execution remains blocked until the correlated structured answer selects the exact approval option.",
+      parameters: Type.Object({}, { additionalProperties: false }),
+      async execute(_id: string, _params: any, ...rest: any[]) {
+        return serialized(async () => {
+          const ctx = getContext(rest);
+          if (needsRestore) { state = restoreState(ctx); needsRestore = false; }
+          activeCheck("planning");
+          const result = noMutation(() => renewDagApprovalRequest(state));
+          state = result.state;
+          afterMutation(pi, contextCwd(ctx));
+          return stateResult(`Present this exact structured Human question before any task progression. Approval request ${result.request.id}: ${result.request.question}`, {
+            mutation: "dag_approval_request",
+            approvalRequest: { id: result.request.id, question: result.request.question, options: ["Approve this exact DAG", "Revise the DAG"] },
+          });
+        });
+      },
+    }));
 
     names.push(registerOnce(pi, "compass_plan_status", {
       label: "DAG Status",
@@ -1349,7 +1404,9 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         const plan = state.plan;
         const acceptance = acceptanceStatus(state);
         const outcome = goalOutcomeStatus(state);
-        const ready = readyTasks(plan).map((task: any) => task.id);
+        const dependencyReady = readyTasks(plan).map((task: any) => task.id);
+        const approved = dagApprovalStatus(state).approved;
+        const ready = approved ? dependencyReady : [];
         const blocked = plan.tasks.filter((task: any) => task.status === "blocked").map((task: any) => task.id);
         return readResult(summarizePlanStatus(state), {
           revision: plan.revision ?? 0,
@@ -1358,6 +1415,8 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           done: plan.tasks.filter((task: any) => task.status === "done").length,
           inProgress: plan.tasks.filter((task: any) => task.status === "in_progress").map((task: any) => task.id),
           ready,
+          dependencyReady,
+          approval: dagApprovalStatus(state),
           blocked,
           tasks: plan.tasks.map((task: any) => ({ id: task.id, title: clip(task.title, 100), status: task.status, dependsOn: task.dependsOn, executor: task.executor || "parent", ...(task.executor === "subagent" ? { agent: task.agent || "scout" } : {}), writeScope: task.writeScope || null, reason: task.reason ? clip(task.reason, 140) : null })),
           acceptance: { status: acceptance.status, total: acceptance.total, reportedPass: acceptance.passed, failed: acceptance.failed, blocked: acceptance.blocked, unverified: acceptance.unverified },
@@ -1396,13 +1455,14 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             reason: task.reason || "Task definition or dependency changed during plan revision.",
           }));
           const reset = invalidatedDetails.map((item: any) => item.id);
-          const readyNow = readyTasks(state.plan).map((task: any) => task.id);
+          const dependencyReady = readyTasks(state.plan).map((task: any) => task.id);
+          const readyNow = dagApprovalStatus(state).approved ? dependencyReady : [];
           const blockedNow = state.plan.tasks.filter((task: any) => task.status === "blocked").map((task: any) => task.id);
           if (changed) afterMutation(pi, contextCwd(ctx));
           const invalidatedText = invalidatedDetails.length
             ? ` Invalidated work: ${invalidatedDetails.map((item: any) => `${item.id} (${item.from} → pending; ${clip(item.reason, 100)})`).join("; ")}.`
             : "";
-          return stateResult(`DAG ${state.plan.revision === before ? "unchanged" : `revised r${state.plan.revision}`}; state v${state.plan.stateVersion}. Ready: ${readyNow.join(", ") || "none"}.${invalidatedText}${blockedNow.length ? ` Blocked: ${blockedNow.join(", ")}.` : ""}`, { mutation: "plan_revise", unchanged: !changed, revision: state.plan.revision, stateVersion: state.plan.stateVersion, ready: readyNow, invalidated: reset, invalidatedDetails, blocked: blockedNow });
+          return stateResult(`DAG ${state.plan.revision === before ? "unchanged" : `revised r${state.plan.revision}`}; state v${state.plan.stateVersion}. Executable now: ${readyNow.join(", ") || "none"}; approval=${dagApprovalStatus(state).approved ? "current" : "required"}.${invalidatedText}${blockedNow.length ? ` Blocked: ${blockedNow.join(", ")}.` : ""}`, { mutation: "plan_revise", unchanged: !changed, revision: state.plan.revision, stateVersion: state.plan.stateVersion, ready: readyNow, dependencyReady, approval: dagApprovalStatus(state), invalidated: reset, invalidatedDetails, blocked: blockedNow });
         });
       },
     }));
@@ -1410,11 +1470,18 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
     const taskId = () => Type.String({ minLength: 1, maxLength: 40, pattern: "^[a-zA-Z][a-zA-Z0-9_-]{0,39}$", description: "Task ID from the current DAG. Runtime validates current status and dependencies." });
     names.push(registerOnce(pi, "compass_task", {
       label: "Update DAG Tasks",
-      description: "One stable task-lifecycle tool. action=start requires taskIds only; done requires tasks with id/evidence; block and reopen require tasks with id/reason. Subagent-routed tasks are started and completed by Compass automatically; do not manually start them. Runtime rejects mismatched fields, stale IDs, invalid dependencies, and changes to tasks in an unresolved Subagent batch.",
-      promptSnippet: "Use action=start with taskIds; use action=done/block/reopen with tasks. For done provide concrete evidence; for block/reopen provide a reason. Do not mix the two input shapes.",
+      description: "Task lifecycle and explicit semantic checks. Every progression action requires current correlated Human approval. Completion, assessment, independent review, and final Goal acceptance remain distinct; dependencies unlock only after an explicit passing assessment with no unresolved caveats.",
+      promptSnippet: "After completing a task, explicitly assess it against its approved acceptance criterion with evidence, caveats, and pass/fail/inconclusive. Only a pass unlocks dependent tasks.",
       parameters: Type.Object({
-        action: Type.String({ enum: ["start", "done", "block", "reopen"] }),
+        action: Type.String({ enum: ["start", "done", "block", "reopen", "assess"] }),
         taskIds: Type.Optional(Type.Array(taskId(), { minItems: 1, maxItems: 24, uniqueItems: true, description: "Required only for action=start." })),
+        assessment: Type.Optional(Type.Object({
+          taskId: taskId(),
+          status: Type.String({ enum: ["pass", "fail", "inconclusive"] }),
+          evidence: Type.String({ minLength: 1, maxLength: 1600 }),
+          caveats: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 400 }), { maxItems: 8 })),
+          unresolvedCaveats: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 400 }), { maxItems: 8 })),
+        }, { additionalProperties: false })),
         tasks: Type.Optional(Type.Array(Type.Object({
           id: taskId(),
           evidence: Type.Optional(Type.String({ minLength: 1, maxLength: 1600, description: "Required only for action=done; concrete command result, test output, artifact path, or observed behavior." })),
@@ -1432,6 +1499,13 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const tasks = Array.isArray(params?.tasks) ? params.tasks : [];
           if (action === "start") {
             if (!taskIds.length || Object.prototype.hasOwnProperty.call(params ?? {}, "tasks") || !Array.isArray(params?.taskIds)) throw new Error('action="start" requires taskIds and forbids tasks. No state changed.');
+          } else if (action === "assess") {
+            if (!params.assessment || hasTaskIds || Object.prototype.hasOwnProperty.call(params ?? {}, "tasks")) throw new Error('action="assess" requires assessment and forbids taskIds/tasks. No state changed.');
+            const result = noMutation(() => recordTaskAssessment(state, params.assessment));
+            state = result.state;
+            afterMutation(pi, contextCwd(ctx));
+            const readyNow = readyTasks(state.plan).map((task: any) => task.id);
+            return stateResult(`Task ${params.assessment.taskId} assessment recorded: ${params.assessment.status}. Newly ready: ${readyNow.join(", ") || "none"}.`, { mutation: "task_assess", taskId: params.assessment.taskId, assessment: result.assessment, ready: readyNow });
           } else if (["done", "block", "reopen"].includes(action)) {
             if (!tasks.length || hasTaskIds || !Array.isArray(params?.tasks)) throw new Error(`action="${action}" requires tasks and forbids taskIds. No state changed.`);
             for (const [index, item] of tasks.entries()) {
@@ -2197,6 +2271,11 @@ export default function (pi: any) {
   // Capture explicit writes, failed tools, and structured answers returned by ask-user-questions.
   // All updates are serialized so a trace event cannot overwrite a concurrent Goal update.
   pi.on("tool_call", async (event: any) => serialized(async () => {
+    if (/ask.*user.*question|ask_user_question/i.test(String(event?.toolName ?? ""))) {
+      const callId = String(event?.toolCallId ?? event?.callId ?? "");
+      const bound = bindDagApprovalQuestionnaire(state, event?.input, callId);
+      if (bound.bound) persistState(pi);
+    }
     if (event?.toolName === "compass_context" && event?.parentToolCallId && event?.input?.action !== "search") {
       return { block: true, reason: "Context mutations require a direct standalone compass_context call, not a nested Code Mode call. No context changed." };
     }
@@ -2244,7 +2323,7 @@ export default function (pi: any) {
     return handleCompassToolResult(pi, event, ctx);
   });
 
-  pi.on("tool_execution_end", async (event: any) => serialized(async () => {
+  pi.on("tool_execution_end", async (event: any, ctx: any) => serialized(async () => {
     const toolName = String(event?.toolName ?? "");
     const failed = Boolean(event?.isError || event?.result?.isError);
     if (/ask.*user.*question|ask_user_question/i.test(toolName)) {
@@ -2252,12 +2331,12 @@ export default function (pi: any) {
       const text = resultText(result);
       const details = result?.details && typeof result.details === "object" && !Array.isArray(result.details) ? result.details : null;
       const sourceCallId = String(event?.toolCallId ?? event?.callId ?? "");
-      if (details?.error) {
+      if (details?.error || (failed && state.plan.approvalRequest?.toolCallId === sourceCallId)) {
         const recorded = recordHumanQuestionnaireFailure(state, {
           source: toolName,
           sourceCallId,
-          errorCode: details.error,
-          reason: text,
+          errorCode: details?.error ?? "unknown",
+          reason: text || "The structured questionnaire tool failed before returning a Human answer.",
         });
         if (recorded.captured) {
           state = recorded.state;
@@ -2270,6 +2349,7 @@ export default function (pi: any) {
         if (captured.captured) {
           state = captured.state;
           persistState(pi);
+          if (dagApprovalStatus(state).approved) scheduleReadySubagentWaves(pi, ctx ?? {});
         }
       }
       if (!failed) return;

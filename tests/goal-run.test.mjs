@@ -27,8 +27,13 @@ import {
   buildGoalDetails,
   summarizePlanStatus,
   transitionTasks,
+  revisePlanState,
+  bindDagApprovalQuestionnaire,
+  dagApprovalStatus,
+  recordTaskAssessment,
 } from "../src/goal-run-v0-9-0.mjs";
-import { createOrRevisePlan, emptyDagState, updateTasks } from "../src/dag-core.mjs";
+import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
+import { createOrRevisePlan, emptyDagState, readyTasks, updateTasks } from "../src/dag-core.mjs";
 
 const acceptanceCriteria = ["API request returns expected data", "Started processes are cleaned up"];
 const tasks = [
@@ -40,10 +45,23 @@ const tasks = [
 function withGoal(prompt = "Create a reliable full-stack smoke test") {
   return captureHumanPrompt(emptyGoalRunState(), prompt).state;
 }
+function approvePlan(state) {
+  const request = state.plan.approvalRequest;
+  const callId = `approval-${request.id}`;
+  const bound = bindDagApprovalQuestionnaire(state, { questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] }, callId);
+  assert.equal(bound.bound, true);
+  return captureHumanDecision(bound.state, {
+    source: "ask_user_question",
+    sourceCallId: callId,
+    details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] },
+  }).state;
+}
 function withPlan(state) {
-  state.plan = createOrRevisePlan(emptyDagState(), { goal: state.goal.current, acceptanceCriteria, tasks });
-  state.goal.acceptanceCriteria = [...acceptanceCriteria];
-  return state;
+  return approvePlan(revisePlanState(state, { acceptanceCriteria, tasks }).state);
+}
+function completeAndAssess(state, taskId, evidence) {
+  state = transitionTasks(state, "done", [{ id: taskId, evidence }], updateTasks).state;
+  return recordTaskAssessment(state, { taskId, status: "pass", evidence: `Assessment against approved criterion: ${evidence}`, caveats: [], unresolvedCaveats: [] }).state;
 }
 
 test("first prompt is immutable Original Goal; later prompts are recorded updates", () => {
@@ -434,13 +452,15 @@ test("tool failures are on-demand trace, not automatically injected into the Goa
 
 test("reopening a prerequisite resets downstream dependents but preserves unrelated work", () => {
   let state = withPlan(withGoal());
-  state.plan = updateTasks(state.plan, [{ id: "api", status: "done", evidence: "API inspected" }, { id: "ui", status: "done", evidence: "UI inspected" }]);
-  state.plan = updateTasks(state.plan, [{ id: "smoke", status: "in_progress" }]);
-  state.plan = updateTasks(state.plan, [{ id: "smoke", status: "done", evidence: "Smoke passed" }]);
+  state = completeAndAssess(state, "api", "API inspected");
+  state = completeAndAssess(state, "ui", "UI inspected");
+  state = transitionTasks(state, "start", [{ id: "smoke" }], updateTasks).state;
+  state = transitionTasks(state, "done", [{ id: "smoke", evidence: "Smoke passed" }], updateTasks).state;
   // Add an unrelated completed task to make preservation observable.
-  state.plan = createOrRevisePlan(state.plan, { goal: state.goal.current, acceptanceCriteria, tasks: [...tasks, { id: "docs", title: "Document command", acceptance: "Command is documented", dependsOn: [], writeScope: "docs" }], changeReason: "Documentation is a separate deliverable" });
-  state.plan = updateTasks(state.plan, [{ id: "docs", status: "in_progress" }]);
-  state.plan = updateTasks(state.plan, [{ id: "docs", status: "done", evidence: "README command added" }]);
+  state = revisePlanState(state, { acceptanceCriteria, tasks: [...tasks, { id: "docs", title: "Document command", acceptance: "Command is documented", dependsOn: [], writeScope: "docs" }], changeReason: "Documentation is a separate deliverable" }).state;
+  state = approvePlan(state);
+  state = transitionTasks(state, "start", [{ id: "docs" }], updateTasks).state;
+  state = transitionTasks(state, "done", [{ id: "docs", evidence: "README command added" }], updateTasks).state;
   const result = transitionTasks(state, "reopen", [{ id: "api", reason: "New API evidence invalidates prior investigation" }], updateTasks);
   const byId = new Map(result.state.plan.tasks.map((task) => [task.id, task]));
   assert.equal(byId.get("api").status, "pending");
@@ -696,8 +716,57 @@ test("ready pending tasks can be completed directly, but dependency gates still 
   assert.equal(completed.state.plan.tasks.find((task) => task.id === "api").status, "done");
   assert.throws(
     () => transitionTasks(state, "done", [{ id: "smoke", evidence: "Smoke output exists." }], updateTasks),
-    /pending and not ready; dependencies unfinished: api, ui/,
+    /pending and not ready; dependencies unfinished or not semantically checked: api, ui/,
   );
+});
+
+test("DAG progression requires a correlated exact approval; partial and custom answers do not approve", () => {
+  let state = revisePlanState(withGoal(), { acceptanceCriteria, tasks }).state;
+  const request = state.plan.approvalRequest;
+  assert.match(request.question, /executor=parent/);
+  assert.match(request.question, /API request returns expected data/);
+  assert.equal(dagApprovalStatus(state).approved, false);
+  assert.throws(() => transitionTasks(state, "start", [{ id: "api" }], updateTasks), /no current correlated Human approval/);
+  assert.equal(state.plan.tasks[0].status, "pending", "rejected progression does not mutate state");
+
+  const callId = "questionnaire-call-1";
+  assert.equal(bindDagApprovalQuestionnaire(state, { questions: [{ question: `${request.question} altered`, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] }, callId).bound, false);
+  const bound = bindDagApprovalQuestionnaire(state, { questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] }, callId);
+  assert.equal(bound.bound, true);
+  const unrelated = captureHumanDecision(bound.state, { sourceCallId: "wrong-call", details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION }] } }).state;
+  assert.equal(dagApprovalStatus(unrelated).approved, false, "unrelated questionnaire cannot authorize the DAG");
+
+  const partialBound = bindDagApprovalQuestionnaire(state, { questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] }, callId);
+  const partial = captureHumanDecision(partialBound.state, { sourceCallId: callId, details: { unanswered: [0], answers: [] } }).state;
+  assert.equal(dagApprovalStatus(partial).approved, false, "partial response does not approve");
+
+  const revised = revisePlanState(state, { acceptanceCriteria, tasks: tasks.map((task) => task.id === "api" ? { ...task, acceptance: "API route and health semantics are documented with readiness evidence" } : task) }).state;
+  assert.notEqual(revised.plan.approvalRequest.id, request.id, "material revision gets a new approval identity");
+  assert.equal(dagApprovalStatus(revised).approved, false);
+});
+
+test("task completion is separate from version-bound semantic assessment and unresolved caveats block dependencies", () => {
+  let state = withPlan(withGoal());
+  state = transitionTasks(state, "done", [{ id: "api", evidence: "API route read and health behavior recorded." }], updateTasks).state;
+  assert.equal(state.plan.tasks.find((task) => task.id === "api").assessment, null);
+  assert.equal(state.plan.tasks.find((task) => task.id === "smoke").status, "pending");
+  assert.throws(() => recordTaskAssessment(state, {
+    taskId: "api", status: "pass", evidence: "The route is correct.", caveats: [], unresolvedCaveats: ["Readiness semantics remain unknown."],
+  }), /cannot pass with unresolved caveats/);
+  state = recordTaskAssessment(state, { taskId: "api", status: "inconclusive", evidence: "Liveness only; readiness remains unknown.", caveats: ["Health endpoint checks liveness."], unresolvedCaveats: ["Readiness not checked."] }).state;
+  assert.deepEqual(readyTasks(state.plan).map((task) => task.id), ["ui"], "inconclusive prerequisite does not unlock dependents");
+  state = recordTaskAssessment(state, { taskId: "api", status: "pass", evidence: "Additional evidence confirms the approved acceptance criterion.", caveats: [], unresolvedCaveats: [] }).state;
+  assert.ok(state.plan.tasks.find((task) => task.id === "api").assessment.planRevision === state.plan.revision);
+});
+
+test("ordinary task status updates preserve approval while material Human constraints invalidate it", () => {
+  let state = withPlan(withGoal());
+  assert.equal(dagApprovalStatus(state).approved, true);
+  state = transitionTasks(state, "start", [{ id: "api" }], updateTasks).state;
+  assert.equal(dagApprovalStatus(state).approved, true);
+  state = captureHumanPrompt(state, "Please keep the API read-only during this work.").state;
+  assert.equal(dagApprovalStatus(state).approved, false);
+  assert.throws(() => transitionTasks(state, "done", [{ id: "api", evidence: "API reviewed." }], updateTasks), /no current correlated Human approval/);
 });
 
 test("acceptance evidence accepts realistic bounded evidence and survives state normalization", () => {
@@ -752,9 +821,10 @@ test("acceptance is explicit, evidence-bearing, and never calls an Agent report 
 
 test("Goal criteria and DAG task completion remain separate states", () => {
   let state = withPlan(withGoal());
-  state.plan = updateTasks(state.plan, [{ id: "api", status: "done", evidence: "API inspected" }, { id: "ui", status: "done", evidence: "UI inspected" }]);
-  state.plan = updateTasks(state.plan, [{ id: "smoke", status: "in_progress" }]);
-  state.plan = updateTasks(state.plan, [{ id: "smoke", status: "done", evidence: "Implementation exists" }]);
+  state = completeAndAssess(state, "api", "API inspected");
+  state = completeAndAssess(state, "ui", "UI inspected");
+  state = transitionTasks(state, "start", [{ id: "smoke" }], updateTasks).state;
+  state = transitionTasks(state, "done", [{ id: "smoke", evidence: "Implementation exists" }], updateTasks).state;
   assert.equal(state.plan.tasks.every((task) => task.status === "done"), true);
   assert.equal(acceptanceStatus(state).status, "active");
   assert.match(buildGoalAnchor(state), /Do not equate task closure with Goal completion/);

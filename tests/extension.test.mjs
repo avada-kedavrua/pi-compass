@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import extensionFactory from "../src/index.ts";
-import { GOAL_RUN_RELEASE } from "../src/goal-run-v0-9-0.mjs";
+import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
+
+import { bindDagApprovalQuestionnaire, captureHumanDecision, dagApprovalStatus, GOAL_RUN_RELEASE } from "../src/goal-run-v0-9-0.mjs";
 
 function fakePi(options = {}) {
   const events = new Map();
@@ -79,6 +81,40 @@ function fakePi(options = {}) {
 }
 const ctx = (pi, cwd = "/tmp/example-project") => ({ cwd, sessionManager: { getBranch: () => pi.branch(), getEntries: () => pi.branch() }, ui: { notify() {} } });
 function latestState(pi) { return pi.entries.filter((entry) => entry.customType === "pi-compass-v2.goalrun").at(-1)?.data; }
+function approvedDagState(state) {
+  const request = state.plan.approvalRequest;
+  assert.ok(request, "a draft DAG must have an identity-bound approval request");
+  const callId = `human-approval-${request.id}`;
+  const input = { questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] };
+  const bound = bindDagApprovalQuestionnaire(state, input, callId);
+  assert.equal(bound.bound, true);
+  return captureHumanDecision(bound.state, {
+    source: "ask_user_question", sourceCallId: callId,
+    details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] },
+  }).state;
+}
+async function assessTask(pi, taskId) {
+  const tool = currentTool(pi, "compass_task");
+  const result = await tool.execute(`assess-${taskId}`, { action: "assess", assessment: {
+    taskId, status: "pass", evidence: `Reviewed child/task evidence against the approved acceptance criterion for ${taskId}.`, caveats: [], unresolvedCaveats: [],
+  } }, undefined, undefined, ctx(pi));
+  await pi.events.get("tool_result")({ toolName: "compass_task", input: { action: "assess" }, content: result.content, details: result.details, isError: false }, ctx(pi));
+  return result;
+}
+async function approveDag(pi) {
+  const state = latestState(pi);
+  const request = state?.plan?.approvalRequest;
+  assert.ok(request, "a draft DAG must have an identity-bound approval request");
+  const callId = `human-approval-${request.id}`;
+  const input = { questions: [{ question: request.question, options: [DAG_APPROVAL_OPTION, "Revise the DAG"] }] };
+  await pi.events.get("tool_call")({ toolName: "ask_user_question", toolCallId: callId, input }, ctx(pi));
+  await pi.events.get("tool_execution_end")({
+    toolName: "ask_user_question", toolCallId: callId, isError: false,
+    result: { content: [{ type: "text", text: "Human approved this exact DAG." }], details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] } },
+  }, ctx(pi));
+  assert.ok(latestState(pi).plan.approval, `correlated approval was not granted: ${JSON.stringify({ request: latestState(pi).plan.approvalRequest, approval: latestState(pi).plan.approval, execution: latestState(pi).plan.execution, decisions: latestState(pi).humanDecisions.slice(-1), approvalStatus: dagApprovalStatus(latestState(pi)) })}`);
+  assert.equal(latestState(pi).plan.approval.sourceCallId, callId);
+}
 async function waitFor(predicate, { timeoutMs = 6000, intervalMs = 10, message = "condition" } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -272,6 +308,7 @@ test("an already-running read-only task is not treated as an unassigned delegati
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   assert.ok(pi.activeNames().some((name) => /subagent/i.test(name)));
   await assert.rejects(
     () => currentTool(pi, "compass_task").execute("start", { action: "start", taskIds: ["api"] }, undefined, undefined, ctx(pi)),
@@ -292,8 +329,10 @@ test("DAG mutation auto-dispatches explicit read-only Subagent tasks and consume
   }, undefined, undefined, ctx(pi));
   assert.deepEqual(latestState(pi).plan.tasks.map((item) => item.status), ["pending", "pending", "pending"], "dispatch is triggered at the tool-execution boundary, not recursively in the tool handler");
   const patch = await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
-  assert.match(patch.content.at(-1).text, /Compass (?:queued automatic dispatch|dispatched read-only Subagent|auto-executed 2 read-only Subagent)/);
-  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed", { message: "background Subagent wave completion" });
+  assert.match(patch.content.at(-1).text, /Before any DAG task starts, present the exact structured Human question/);
+  assert.equal(pi.delegationRequests.length, 0, "a draft plan cannot dispatch before the Human answers");
+  await approveDag(pi);
+  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed", { message: "approved background Subagent wave completion" });
   const state = latestState(pi);
   assert.deepEqual(pi.delegationRequests.map((request) => request.nodeId), ["api", "ui"]);
   assert.deepEqual(state.plan.tasks.map((item) => item.status), ["done", "done", "pending"]);
@@ -315,6 +354,7 @@ test("Code Mode executor stays with the main Agent and is never auto-dispatched 
     { id: "summarize", title: "Summarize parsed metadata", acceptance: "Summary recorded", dependsOn: ["inspect"], writeScope: "read-only", executor: "parent" },
   ];
   const create = await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: ["Metadata is parsed and summarized"], tasks: codeTasks }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   const patch = await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
   assert.equal(patch, undefined, "no Subagent execution result is appended when there is no explicitly routed Subagent task");
   assert.equal(pi.delegationRequests.length, 0);
@@ -348,8 +388,10 @@ test("independent Code Mode work proceeds while the background Subagent wave is 
   const start = Date.now();
   const patch = await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
   assert.ok(Date.now() - start < 500, "the tool_result boundary must not wait for child model completion");
-  assert.match(patch.content.at(-1).text, /queued automatic dispatch|dispatched read-only Subagent/);
-  await waitFor(() => pi.delegationRequests.length === 2 && latestState(pi)?.plan?.tasks?.filter((item) => item.executor === "subagent").every((item) => item.status === "in_progress"), { message: "two live Subagent tasks" });
+  assert.match(patch.content.at(-1).text, /structured Human question/);
+  assert.equal(pi.delegationRequests.length, 0, "the tool-result boundary cannot bypass pending Human approval");
+  await approveDag(pi);
+  await waitFor(() => pi.delegationRequests.length === 2 && latestState(pi)?.plan?.tasks?.filter((item) => item.executor === "subagent").every((item) => item.status === "in_progress"), { message: "two approved live Subagent tasks" });
   assert.equal(releases.length, 2, "both independent child requests remain unresolved until explicitly released");
 
   const taskTool = currentTool(pi, "compass_task");
@@ -365,7 +407,7 @@ test("independent Code Mode work proceeds while the background Subagent wave is 
   assert.deepEqual(latestState(pi).plan.tasks.map((item) => item.status), ["done", "done", "done"]);
 });
 
-test("before_agent_start resumes ready Subagent tasks when a prior scheduler boundary was missed", async () => {
+test("before_agent_start recovery sweep cannot bypass draft approval", async () => {
   const pi = fakePi({ autoDelegation: true });
   extensionFactory(pi);
   await captureGoal(pi);
@@ -373,23 +415,35 @@ test("before_agent_start resumes ready Subagent tasks when a prior scheduler bou
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: ["Both areas are evidenced"], tasks }, undefined, undefined, ctx(pi));
   assert.equal(latestState(pi).plan.tasks[0].status, "pending");
   await pi.events.get("before_agent_start")({ prompt: "Continue the current Goal." }, ctx(pi));
-  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed", { message: "recovered Subagent batch" });
-  assert.deepEqual(pi.delegationRequests.map((request) => request.nodeId), ["api", "ui"]);
-  assert.deepEqual(latestState(pi).plan.tasks.map((item) => item.status), ["done", "done", "pending"]);
+  assert.equal(latestState(pi).plan.execution, null, "recovery does not schedule or mutate an unapproved DAG");
+  assert.equal(pi.delegationRequests.length, 0);
+  assert.ok(latestState(pi).plan.tasks.every((item) => item.status === "pending"));
 });
 
-test("latest Human instruction veto is checked before resume dispatch", async () => {
+test("before_agent_start can recover a ready DAG only after a persisted approval", async () => {
+  const pi = fakePi({ autoDelegation: true });
+  extensionFactory(pi);
+  await captureGoal(pi);
+  await openCapability(pi, "planning");
+  await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: ["Both areas are evidenced"], tasks }, undefined, undefined, ctx(pi));
+  const persisted = approvedDagState(structuredClone(latestState(pi)));
+  pi.appendEntry("pi-compass-v2.goalrun", persisted);
+  await pi.events.get("session_start")({}, ctx(pi));
+  await pi.events.get("before_agent_start")({ prompt: "Continue the approved current Goal." }, ctx(pi));
+  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed", { message: "approved recovery dispatch" });
+  assert.deepEqual(pi.delegationRequests.map((request) => request.nodeId), ["api", "ui"]);
+});
+
+test("latest Human instruction and approval gates both fail closed during recovery", async () => {
   const pi = fakePi({ autoDelegation: true });
   extensionFactory(pi);
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: ["Both areas are evidenced"], tasks }, undefined, undefined, ctx(pi));
   await pi.events.get("before_agent_start")({ prompt: "Do not use Subagents for this turn." }, ctx(pi));
-  await waitFor(() => latestState(pi)?.plan?.execution?.status === "failed", { message: "Human veto result" });
-  assert.equal(latestState(pi).plan.execution.status, "failed");
-  assert.match(latestState(pi).plan.execution.error, /Human instructions prohibit Subagent execution/);
+  assert.equal(latestState(pi).plan.execution, null, "the unapproved recovery sweep does not create a failed dispatch record");
   assert.equal(pi.delegationRequests.length, 0);
-  assert.deepEqual(latestState(pi).plan.tasks.map((item) => item.status), ["pending", "pending", "pending"]);
+  assert.ok(latestState(pi).plan.tasks.every((item) => item.status === "pending"));
 });
 
 test("a new Human Subagent prohibition cancels exact active delegation attempts and prevents further waves", async () => {
@@ -415,10 +469,11 @@ test("a new Human Subagent prohibition cancels exact active delegation attempts 
     tasks: tasks.slice(0, 2),
   }, undefined, undefined, ctx(pi));
   await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
-  await waitFor(() => pi.delegationRequests.length === 2 && latestState(pi)?.plan?.tasks?.every((item) => item.status === "in_progress"), { message: "two active read-only delegations" });
+  await approveDag(pi);
+  await waitFor(() => pi.delegationRequests.length === 2 && latestState(pi)?.plan?.tasks?.every((item) => item.status === "in_progress"), { message: "two approved active read-only delegations" });
 
   await pi.events.get("before_agent_start")({ prompt: "Do not use Subagents for this turn." }, ctx(pi));
-  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed" && latestState(pi)?.plan?.tasks?.every((item) => item.status === "blocked"), { message: "active delegations cancelled and recorded" });
+  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed" && latestState(pi)?.plan?.tasks?.every((item) => item.status === "blocked"), { message: `active delegations cancelled and recorded; ${JSON.stringify({ cancellations, execution: latestState(pi)?.plan?.execution, tasks: latestState(pi)?.plan?.tasks })}` });
   assert.equal(cancellations.length, 2);
   for (const cancel of cancellations) {
     const request = pi.delegationRequests.find((item) => item.requestId === cancel.requestId);
@@ -430,7 +485,7 @@ test("a new Human Subagent prohibition cancels exact active delegation attempts 
   assert.equal(pi.delegationRequests.length, 2, "no later wave is dispatched after the Human veto");
 });
 
-test("automatic DAG scheduling advances through dependent Subagent waves without another Agent dispatch call", async () => {
+test("automatic DAG scheduling advances through dependent Subagent waves only after semantic checks", async () => {
   const pi = fakePi({ autoDelegation: true });
   extensionFactory(pi);
   await captureGoal(pi);
@@ -442,11 +497,17 @@ test("automatic DAG scheduling advances through dependent Subagent waves without
   ];
   const create = await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: ["A, B, and combined evidence are present"], tasks: waveTasks }, undefined, undefined, ctx(pi));
   await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
-  await waitFor(() => latestState(pi)?.plan?.executionHistory?.length === 2, { message: "both DAG Subagent waves" });
+  await approveDag(pi);
+  await waitFor(() => latestState(pi)?.plan?.executionHistory?.length === 1, { message: "first approved Subagent wave" });
+  assert.deepEqual(pi.delegationRequests.map((request) => request.nodeId), ["a", "b"], "completed child evidence does not auto-advance dependencies without semantic checks");
+  assert.deepEqual(latestState(pi).plan.tasks.map((item) => item.status), ["done", "done", "pending"]);
+  await assessTask(pi, "a");
+  await assessTask(pi, "b");
+  await waitFor(() => latestState(pi)?.plan?.executionHistory?.length === 2, { message: "dependent wave after explicit passing checks" });
   const state = latestState(pi);
   assert.deepEqual(pi.delegationRequests.map((request) => request.nodeId), ["a", "b", "merge"]);
   assert.equal(pi.delegationRequests[0].ownerRunId, pi.delegationRequests[1].ownerRunId, "independent tasks share one wave");
-  assert.notEqual(pi.delegationRequests[2].ownerRunId, pi.delegationRequests[0].ownerRunId, "dependent task starts only after the first wave settles");
+  assert.notEqual(pi.delegationRequests[2].ownerRunId, pi.delegationRequests[0].ownerRunId, "dependent task starts only after the first wave is assessed");
   assert.deepEqual(state.plan.tasks.map((item) => item.status), ["done", "done", "done"]);
   assert.equal(state.plan.executionHistory.length, 2);
   assert.ok(state.plan.executionHistory.every((item) => item.status === "completed"));
@@ -459,7 +520,7 @@ test("restarted unresolved execution is marked unknown and can be reconciled wit
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: ["API and UI evidence captured"], tasks }, undefined, undefined, ctx(pi));
-  const persisted = structuredClone(latestState(pi));
+  const persisted = approvedDagState(structuredClone(latestState(pi)));
   persisted.stateRevision += 1;
   persisted.plan.tasks = persisted.plan.tasks.map((item) => ["api", "ui"].includes(item.id) ? { ...item, status: "in_progress" } : item);
   persisted.plan.execution = {
@@ -532,7 +593,8 @@ test("auto-dispatch falls back to DeepSeek once for a provider quota failure and
     tasks: oneTaskPlan,
   }, undefined, undefined, ctx(pi));
   await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
-  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed", { message: "DeepSeek fallback completion" });
+  await approveDag(pi);
+  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed", { message: "approved DeepSeek fallback completion" });
   const state = latestState(pi);
   assert.deepEqual(pi.delegationRequests.map((request) => request.model), ["cliproxyapi/gpt-6-luna", "jrt/deepseek-v4.1-flash"]);
   assert.equal(state.plan.tasks.find((item) => item.id === "api").status, "done");
@@ -551,7 +613,10 @@ test("missing structured-delegation handler fails fast without launching a task"
   const started = Date.now();
   await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
   assert.ok(Date.now() - started < 5000, "tool_result must not wait for child completion");
-  await waitFor(() => latestState(pi)?.plan?.execution?.status === "failed", { timeoutMs: 5000, message: "missing bridge fail-closed state" });
+  assert.equal(latestState(pi).plan.execution, null, "no bridge check or dispatch occurs while the plan is a draft");
+  await approveDag(pi);
+  await pi.events.get("before_agent_start")({ prompt: "" }, ctx(pi));
+  await waitFor(() => latestState(pi)?.plan?.execution?.status === "failed", { timeoutMs: 5000, message: "missing bridge fail-closed state after approval" });
   const state = latestState(pi);
   assert.equal(state.plan.execution.status, "failed");
   assert.match(state.plan.execution.error, /No correlated invalid_request response/);
@@ -567,13 +632,15 @@ test("structured runtime dispatch works while the model-visible native Subagent 
   await openCapability(pi, "planning");
   const create = await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: ["Both areas are evidenced"], tasks }, undefined, undefined, ctx(pi));
   const patch = await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
-  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed", { message: "hidden native tool dispatch" });
+  assert.match(patch.content.at(-1).text, /structured Human question/);
+  await approveDag(pi);
+  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed", { message: "approved hidden native tool dispatch" });
   const state = latestState(pi);
   assert.equal(state.plan.execution.status, "completed");
   assert.deepEqual(state.plan.tasks.map((item) => item.status), ["done", "done", "pending"]);
   assert.equal(pi.delegationRequests.length, 2, "the structured event API is independent from native tool visibility");
   assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)), "Compass must not force-enable the model-visible Subagent tool");
-  assert.match(patch.content.at(-1).text, /Compass (?:queued automatic dispatch|auto-executed 2 read-only Subagent task)/);
+  assert.match(patch.content.at(-1).text, /structured Human question/);
 });
 
 test("an explicit Human prohibition blocks automatic Subagent dispatch", async () => {
@@ -583,13 +650,14 @@ test("an explicit Human prohibition blocks automatic Subagent dispatch", async (
   await openCapability(pi, "planning");
   const create = await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: ["Both areas are evidenced"], tasks }, undefined, undefined, ctx(pi));
   const patch = await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
+  await approveDag(pi);
   await waitFor(() => latestState(pi)?.plan?.execution?.status === "failed", { message: "explicit Human prohibition" });
   const state = latestState(pi);
   assert.equal(state.plan.execution.status, "failed");
   assert.match(state.plan.execution.error, /Human instructions prohibit Subagent execution/);
   assert.deepEqual(state.plan.tasks.map((item) => item.status), ["pending", "pending", "pending"]);
   assert.equal(pi.delegationRequests.length, 0);
-  assert.match(patch.content.at(-1).text, /latest Human instruction prohibits Subagent execution/);
+  assert.match(patch.content.at(-1).text, /Before any DAG task starts, present the exact structured Human question/);
 });
 
 test("active DAG blocks explicit out-of-scope writes before tool execution, but allows in-scope writes", async () => {
@@ -604,6 +672,7 @@ test("active DAG blocks explicit out-of-scope writes before tool execution, but 
       { id: "review_src", title: "Review source change", acceptance: "Source change reviewed", dependsOn: ["edit_src"], writeScope: "read-only", executor: "parent" },
     ],
   }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   await currentTool(pi, "compass_task").execute("start-scoped-write", { action: "start", taskIds: ["edit_src"] }, undefined, undefined, ctx(pi));
 
   const allowed = await pi.events.get("tool_call")({ toolName: "write", input: { path: "src/a.ts", content: "ok" } }, ctx(pi));
@@ -657,6 +726,7 @@ test("DAG progress never changes native Subagent activation", async () => {
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   const before = pi.activeNames().filter((name) => !name.startsWith("compass_"));
   await currentTool(pi, "compass_task").execute("done-api", { action: "done", tasks: [{ id: "api", evidence: "Read API route and recorded source location" }] }, undefined, undefined, ctx(pi));
   assert.deepEqual(pi.activeNames().filter((name) => !name.startsWith("compass_")), before);
@@ -671,6 +741,7 @@ test("already-completed ready tasks can be closed without a redundant start call
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   const done = currentTool(pi, "compass_task");
   const result = await done.execute("direct-done", { action: "done", tasks: [{ id: "api", evidence: "Read the route and verified the health handler." }] }, undefined, undefined, ctx(pi));
   assert.deepEqual(result.details.completedWithoutStart, ["api"]);
@@ -678,7 +749,7 @@ test("already-completed ready tasks can be closed without a redundant start call
   assert.equal(latestState(pi).plan.tasks.find((task) => task.id === "api").status, "done");
   await assert.rejects(
     () => done.execute("blocked-direct-done", { action: "done", tasks: [{ id: "smoke", evidence: "A smoke artifact exists." }] }, undefined, undefined, ctx(pi)),
-    /pending and not ready; dependencies unfinished: ui/,
+    /pending and not ready; dependencies unfinished or not semantically checked: api, ui/,
   );
 });
 
@@ -688,9 +759,10 @@ test("task transition schemas remain stable and execution revalidates current st
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks: tasks.map((task) => ({ ...task, executor: "code" })) }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   const oldStart = currentTool(pi, "compass_task");
   assert.equal(oldStart.parameters.properties.taskIds.items.enum, undefined, "task IDs are validated at execution so status changes do not invalidate the schema");
-  assert.deepEqual(oldStart.parameters.properties.action.enum, ["start", "done", "block", "reopen"]);
+  assert.deepEqual(oldStart.parameters.properties.action.enum, ["start", "done", "block", "reopen", "assess"]);
   await assert.rejects(() => oldStart.execute("bad-action-shape", { action: "start", taskIds: ["api"], tasks: [{ id: "ui", evidence: "mixed" }] }, undefined, undefined, ctx(pi)), /requires taskIds and forbids tasks/);
   await assert.rejects(() => oldStart.execute("empty-forbidden-shape", { action: "start", taskIds: ["api"], tasks: [] }, undefined, undefined, ctx(pi)), /requires taskIds and forbids tasks/);
   await oldStart.execute("start", { action: "start", taskIds: ["api", "ui"] }, undefined, undefined, ctx(pi));
@@ -702,9 +774,13 @@ test("task transition schemas remain stable and execution revalidates current st
     { id: "api", evidence: "Read route definitions and health handler." },
     { id: "ui", evidence: "Read primary route and API client." },
   ] }, undefined, undefined, ctx(pi));
-  assert.match(doneResult.content[0].text, /Ready: smoke/);
+  assert.match(doneResult.content[0].text, /Ready: none/);
+  const beforeChecks = await currentTool(pi, "compass_plan_status").execute("ready-before-checks", {}, undefined, undefined, ctx(pi));
+  assert.ok(!beforeChecks.details.ready.includes("smoke"), "task completion alone does not unlock dependents");
+  await assessTask(pi, "api");
+  await assessTask(pi, "ui");
   const ready = await currentTool(pi, "compass_plan_status").execute("ready-status", {}, undefined, undefined, ctx(pi));
-  assert.ok(ready.details.ready.includes("smoke"), "plan status already returns ready IDs; no redundant ready-only tool is needed");
+  assert.ok(ready.details.ready.includes("smoke"), "only passing semantic checks unlock dependencies");
   const revise = currentTool(pi, "compass_plan_revise");
   assert.equal(revise.parameters.properties.expectedStateVersion.enum, undefined, "plan revision version is checked at execution, not baked into a changing schema");
   assert.equal(revise.name, "compass_plan_revise", "task schema changes update the existing tool name rather than creating name variants");
@@ -716,6 +792,7 @@ test("plan revision uses a plan-state version and rejects stale full-graph overw
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks: tasks.map((task) => ({ ...task, executor: "code" })) }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   const oldRevise = currentTool(pi, "compass_plan_revise");
   const oldVersion = latestState(pi).plan.stateVersion;
   await currentTool(pi, "compass_task").execute("start", { action: "start", taskIds: ["api"] }, undefined, undefined, ctx(pi));
@@ -733,11 +810,14 @@ test("plan revision explains each invalidated task in the mutation result", asyn
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks: tasks.map((task) => ({ ...task, executor: "code" })) }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   await currentTool(pi, "compass_task").execute("start-independent", { action: "start", taskIds: ["api", "ui"] }, undefined, undefined, ctx(pi));
   await currentTool(pi, "compass_task").execute("done-independent", { action: "done", tasks: [
     { id: "api", evidence: "API route and health handler inspected." },
     { id: "ui", evidence: "Primary route and API client inspected." },
   ] }, undefined, undefined, ctx(pi));
+  await assessTask(pi, "api");
+  await assessTask(pi, "ui");
   await currentTool(pi, "compass_task").execute("start-smoke", { action: "start", taskIds: ["smoke"] }, undefined, undefined, ctx(pi));
   await currentTool(pi, "compass_task").execute("done-smoke", { action: "done", tasks: [{ id: "smoke", evidence: "Smoke path passed." }] }, undefined, undefined, ctx(pi));
   const expectedStateVersion = latestState(pi).plan.stateVersion;
@@ -955,6 +1035,7 @@ test("parallel state mutations serialize; one stale mutation fails without racin
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks: tasks.map((task) => ({ ...task, executor: "code" })) }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   const start = currentTool(pi, "compass_task");
   const calls = await Promise.allSettled([
     start.execute("start-a", { action: "start", taskIds: ["api"] }, undefined, undefined, ctx(pi)),
@@ -972,6 +1053,7 @@ test("parallel task mutations serialize without a global-epoch conflict, but dup
   await captureGoal(pi);
   await openCapability(pi, "planning");
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks: tasks.map((task) => ({ ...task, executor: "code" })) }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   const start = currentTool(pi, "compass_task");
   const independent = await Promise.allSettled([
     start.execute("start-api", { action: "start", taskIds: ["api"] }, undefined, undefined, ctx(pi)),
@@ -1156,6 +1238,7 @@ test("path-based writes report scope drift immediately without injecting a Goal 
     { id: "edit-a", title: "Edit file A", acceptance: "Only file A changes", dependsOn: [], writeScope: "src/a.ts", executor: "code" },
   ];
   await currentTool(pi, "compass_plan_create").execute("create-scoped", { acceptanceCriteria: ["The requested change is correct"], tasks: scopedTasks }, undefined, undefined, ctx(pi));
+  await approveDag(pi);
   await currentTool(pi, "compass_task").execute("start-writer", { action: "start", taskIds: ["edit-a"] }, undefined, undefined, ctx(pi));
   await pi.events.get("tool_call")({ toolName: "edit", input: { path: "src/a.ts" } }, ctx(pi));
   assert.equal(latestState(pi).plan.executionDrift, null, "a write within the declared scope does not create drift");
@@ -1271,10 +1354,10 @@ test("Human prohibition blocks automatic DAG dispatch without rewriting native t
   await openCapability(pi, "planning");
   const create = await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
   await pi.events.get("message_end")({ message: { role: "user", content: "Do not use subagents for this Goal." } }, ctx(pi));
-  await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
-  await waitFor(() => latestState(pi)?.plan?.execution?.status === "failed", { message: "Human veto applied" });
+  const patch = await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
+  assert.match(patch.content.at(-1).text, /Before any DAG task starts/);
+  assert.equal(latestState(pi).plan.execution, null, "a later Human constraint invalidates the draft approval binding");
   assert.equal(pi.delegationRequests.length, 0);
-  assert.match(latestState(pi).plan.execution.error, /Human instructions prohibit/);
   assert.ok(pi.activeNames().includes("subagent"), "native schema visibility is not execution authorization");
 });
 
@@ -1355,12 +1438,12 @@ test("live acceptance command verifies a real-shaped parallel/dependency DAG wit
   const command = pi.commands.get("compass-live-acceptance");
   assert.ok(command, "live acceptance command is registered in the candidate build");
   await command.handler("", { cwd: root, sessionManager: { getBranch: () => pi.branch(), getEntries: () => pi.branch() }, ui: { notify: (message, level) => notifications.push({ message, level }) } });
-  assert.match(notifications.at(-1).message, /Compass live acceptance: PASS/);
-  assert.deepEqual(pi.delegationRequests.map((request) => request.nodeId), ["probe_a", "probe_b", "probe_c"]);
-  assert.equal(pi.delegationRequests[0].ownerRunId, pi.delegationRequests[1].ownerRunId);
-  assert.notEqual(pi.delegationRequests[2].ownerRunId, pi.delegationRequests[0].ownerRunId);
+  assert.match(notifications.at(-1).message, /Compass live acceptance: FAIL/);
+  assert.match(notifications.at(-1).message, /shared post-tool-result scheduler dispatches without compass_execution/);
+  assert.equal(pi.delegationRequests.length, 0, "the command-generated draft cannot implicitly approve itself");
   const finalState = latestState(pi);
-  assert.deepEqual(finalState.plan.tasks.map((item) => item.status), ["done", "done", "done", "pending", "pending"]);
-  assert.equal(finalState.plan.executionHistory.length, 2);
-  assert.ok(finalState.plan.executionHistory[0].taskMetrics.length === 2);
+  assert.ok(finalState.plan.approvalRequest, "the command leaves a concrete approval request in GoalRun");
+  assert.equal(finalState.plan.approval, null);
+  assert.deepEqual(finalState.plan.tasks.map((item) => item.status), ["pending", "pending", "pending", "pending", "pending"]);
+  assert.equal(finalState.plan.executionHistory.length, 0);
 });

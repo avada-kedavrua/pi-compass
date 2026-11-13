@@ -2,6 +2,8 @@
 // This uses the public structured-delegation event family; it does not call the
 // model-visible `subagent` tool recursively and does not create a second runner.
 
+import { taskAssessmentIsCurrent } from "./dag-core.mjs";
+
 export const DELEGATION_EVENTS = Object.freeze({
   request: "prompt-template:subagent:request",
   started: "prompt-template:subagent:started",
@@ -64,7 +66,11 @@ export function selectReadySubagentTasks(plan, maxTasks = MAX_WAVE_TASKS) {
     && task.executor === "subagent"
     && String(task.writeScope ?? "").trim().toLowerCase() === "read-only"
     && typeof task.dispatchReason === "string" && task.dispatchReason.trim().length >= 12
-    && (task.dependsOn ?? []).every((dep) => byId.get(dep)?.status === "done"))
+    && (task.dependsOn ?? []).every((dep) => {
+      const prerequisite = byId.get(dep);
+      return prerequisite?.status === "done" && prerequisite.assessment?.status === "pass"
+        && taskAssessmentIsCurrent(plan, prerequisite);
+    }))
     .slice(0, Math.min(MAX_WAVE_TASKS, maxTasks));
 }
 

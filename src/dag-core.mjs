@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const TASK_STATUSES = new Set(["pending", "in_progress", "done", "blocked"]);
 const MAX_PLAN_HISTORY = 8;
 const MAX_DECISIONS = 8;
@@ -18,6 +20,8 @@ export function emptyDagState() {
     checkpoints: [],
     activity: [],
     executionHistory: [],
+    approvalRequest: null,
+    approval: null,
     nextDecisionNumber: 1,
     nextCheckpointNumber: 1,
   };
@@ -105,6 +109,7 @@ function normalizeTask(raw, index) {
     status: "pending",
     evidence: "",
     reason: "",
+    assessment: null,
   };
 }
 
@@ -203,7 +208,7 @@ export function createOrRevisePlan(currentState, input) {
   const preservedTasks = tasks.map((task) => {
     const old = oldById.get(task.id);
     if (sameGoal && old && taskSignature(old) === taskSignature(task)) {
-      return { ...task, status: old.status, evidence: old.evidence ?? "", reason: old.reason ?? "" };
+      return { ...task, status: old.status, evidence: old.evidence ?? "", reason: old.reason ?? "", assessment: old.assessment ?? null };
     }
     if (old && (old.status !== "pending" || old.evidence || old.reason)) {
       return { ...task, reason: "Reset because this task's definition or dependencies changed during replanning." };
@@ -268,10 +273,26 @@ export function createOrRevisePlan(currentState, input) {
   };
 }
 
+export function taskAssessmentBinding(plan, task) {
+  return createHash("sha256").update(JSON.stringify({
+    goal: plan?.goal ?? null,
+    acceptanceCriteria: plan?.acceptanceCriteria ?? [],
+    task: taskSignature(task),
+  })).digest("hex");
+}
+
+export function taskAssessmentIsCurrent(plan, task) {
+  return task?.assessment?.binding === taskAssessmentBinding(plan, task);
+}
+
 export function readyTasks(state) {
   const byId = new Map((state?.tasks ?? []).map((task) => [task.id, task]));
   return (state?.tasks ?? []).filter((task) => task.status === "pending"
-    && task.dependsOn.every((dep) => byId.get(dep)?.status === "done"));
+    && task.dependsOn.every((dep) => {
+      const prerequisite = byId.get(dep);
+      return prerequisite?.status === "done" && prerequisite.assessment?.status === "pass"
+        && taskAssessmentIsCurrent(state, prerequisite);
+    }));
 }
 
 export function updateTasks(state, updates) {
@@ -301,6 +322,7 @@ export function updateTasks(state, updates) {
     }
     const before = { status: task.status, evidence: task.evidence ?? "", reason: task.reason ?? "" };
     task.status = update.status;
+    if (update.status === "pending") task.assessment = null;
     if (update.status === "done") {
       task.evidence = update.evidence.trim();
       task.reason = "";
@@ -327,7 +349,11 @@ export function updateTasks(state, updates) {
 
   for (const task of next.tasks) {
     if (task.status === "done" || task.status === "in_progress") {
-      const unfinished = task.dependsOn.filter((dep) => byId.get(dep)?.status !== "done");
+      const unfinished = task.dependsOn.filter((dep) => {
+        const prerequisite = byId.get(dep);
+        return prerequisite?.status !== "done" || prerequisite.assessment?.status !== "pass"
+          || !taskAssessmentIsCurrent(next, prerequisite);
+      });
       if (unfinished.length > 0) {
         throw new Error(`Task "${task.id}" cannot be ${task.status} until dependencies are done: ${unfinished.join(", ")}. Revise the DAG if this dependency is no longer valid.`);
       }
