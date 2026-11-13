@@ -1,18 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { piRoot } from "../scripts/register-pi-host-typebox.mjs";
 import extensionFactory from "../src/index.ts";
 import { emptyContextState, planWatchBoundary, restoreContextState } from "../src/context-core.mjs";
-import { SessionManager, appendDrafts, assertPaired, contextPreview, modelText, user } from "./helpers/context-host.mjs";
+import { SessionManager, appendDrafts, assertPaired, contextPreview, modelText, sourceVersion, user } from "./helpers/context-host.mjs";
 
 const { ExtensionRunner } = await import(new URL("dist/core/extensions/runner.js", pathToFileURL(`${piRoot}/`)));
 let nextCall = 0;
 
 // Real installed boundary chaining and session projection; tool registry/lifecycle
 // actions are adapters. This is not a live AgentSession/provider acceptance test.
-async function setup(laterHandler, earlierContextHandler) {
-  const manager = SessionManager.inMemory("/context-integration");
+async function setup(laterHandler, earlierContextHandler, cwd = "/context-integration") {
+  const manager = SessionManager.inMemory(cwd);
   const handlers = new Map();
   const tools = new Map();
   let active = ["read", "bash", "codemode", "watch", "watches", "unwatch"];
@@ -29,7 +32,7 @@ async function setup(laterHandler, earlierContextHandler) {
   const extensions = [{ path: "compass", handlers }];
   if (earlierContextHandler) extensions.unshift({ path: "earlier-extension", handlers: new Map([["context", [earlierContextHandler]]]) });
   if (laterHandler) extensions.push({ path: "later-extension", handlers: new Map([["turn_end", [laterHandler]]]) });
-  const runner = new ExtensionRunner(extensions, {}, "/context-integration", manager, undefined);
+  const runner = new ExtensionRunner(extensions, {}, cwd, manager, undefined);
   const errors = [];
   let aborted = false;
   runner.errorListeners.add((error) => errors.push(error));
@@ -259,6 +262,78 @@ test("request snapshots cannot mutate immutable source image blocks", async () =
   const messages = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
   messages.find((message) => message.customType === "pi-compass-v2.value").content.at(-1).data = "mutated downstream";
   assert.deepEqual(host.manager.getEntry(id), original);
+});
+
+test("explicit active Skill retention survives native compaction and frames, then retires", async () => {
+  const host = await setup();
+  const source = { role: "assistant", content: [{ type: "toolCall", id: "read-skill", name: "read", arguments: { path: "SKILL.md" } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() };
+  host.manager.appendMessage(source);
+  const id = host.manager.appendMessage({ role: "toolResult", toolCallId: "read-skill", toolName: "read", content: [{ type: "text", text: "FULL_SKILL_RULE_MUST_SURVIVE" }], isError: false, timestamp: Date.now() });
+  const original = structuredClone(host.manager.getEntry(id));
+  await host.turn({ action: "pin", expectedRevision: 0, ids: [id], kind: "skill", scope: "root" });
+  host.manager.appendCompaction("lossy summary", host.manager.getLeafId(), 100);
+  await host.turn({ action: "call", expectedRevision: 1, task: "apply the active Skill without copying parent process" });
+  assert.match(modelText(host.manager), /FULL_SKILL_RULE_MUST_SURVIVE/);
+  let control = restoreContextState(host.manager.getBranch());
+  await host.turn({ action: "return", expectedRevision: control.revision });
+  control = restoreContextState(host.manager.getBranch());
+  await host.turn({ action: "mark", expectedRevision: control.revision, ids: [id], version: sourceVersion(host.manager, id), handling: "retired", reason: "Skill no longer applies to the completed local work." });
+  host.manager.appendCompaction("after retirement", host.manager.getLeafId(), 100);
+  const outgoing = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  assert.doesNotMatch(JSON.stringify(outgoing), /FULL_SKILL_RULE_MUST_SURVIVE/);
+  assert.deepEqual(host.manager.getEntry(id), original);
+  assertPaired(host.manager);
+  assert.deepEqual(host.errors, []);
+});
+
+test("structured Human answers survive a frame without previews or lost handling notes", async () => {
+  const host = await setup();
+  await host.turn({ action: "call", expectedRevision: 0, task: "clarify inside a frame" });
+  const question = { role: "assistant", content: [{ type: "toolCall", id: "human-question", name: "ask_user_question", arguments: { questions: [{ question: "Select storage?", header: "Storage", options: [{ label: "Postgres", description: "SQL storage", preview: "RICH_PREVIEW_SHOULD_NOT_REPEAT" }, { label: "SQLite", description: "Local storage" }] }, { question: "Select region?", header: "Region", options: [{ label: "EU", description: "European region" }, { label: "US", description: "US region" }] }] } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() };
+  const source = host.manager.appendMessage(question);
+  const details = { schemaVersion: 1, outcome: "partial", answers: [{ questionIndex: 0, question: "Select storage?", kind: "option", answer: "Postgres", notes: `${"qualified ".repeat(100)}END ANSWER NOTE`, selected: ["Postgres"], preview: "RICH_PREVIEW_SHOULD_NOT_REPEAT" }], unanswered: [1], globalNote: `${"EU only ".repeat(100)}END GLOBAL NOTE` };
+  const result = { role: "toolResult", toolCallId: "human-question", toolName: "ask_user_question", content: [{ type: "text", text: "Rendered summary omits material notes." }], details, isError: false, timestamp: Date.now() };
+  const id = host.manager.appendMessage(result);
+  const proposal = await host.runner.emitBoundary({ type: "turn_end", turnIndex: 0, outcome: "completed", message: question, toolResults: [result], messageEntryId: source, toolResultEntryIds: [id] }, (drafts) => contextPreview(host.manager, drafts));
+  assert.equal(proposal.valid, true);
+  appendDrafts(host.manager, proposal.entries);
+  await host.turn({ action: "return", expectedRevision: 2 });
+  const text = modelText(host.manager);
+  assert.match(text, /END ANSWER NOTE/);
+  assert.match(text, /END GLOBAL NOTE/);
+  assert.match(text, /partial/);
+  assert.doesNotMatch(text, /RICH_PREVIEW_SHOULD_NOT_REPEAT/);
+  assertPaired(host.manager);
+  let control = restoreContextState(host.manager.getBranch());
+  assert.equal(control.values[`root/${id}`].handling, "active");
+  await host.turn({ action: "mark", expectedRevision: control.revision, ids: [id], version: sourceVersion(host.manager, id), handling: "handled", reason: "Storage choice recorded; region is still unresolved." });
+  control = restoreContextState(host.manager.getBranch());
+  assert.equal(control.values[`root/${id}`].handling, "handled");
+  assert.match(modelText(host.manager), /region is still unresolved/);
+  const raw = host.manager.getEntry(id);
+  assert.deepEqual(raw.message.details, details);
+  assert.deepEqual(host.errors, []);
+});
+
+test("spill verifies a project artifact before removing context and load rechecks the exact receipt", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "compass-spill-"));
+  try {
+    const host = await setup(undefined, undefined, root);
+    const id = host.manager.appendCustomMessageEntry("test-value", "ARTIFACT PAYLOAD", false);
+    const original = structuredClone(host.manager.getEntry(id));
+    await host.turn({ action: "spill", expectedRevision: 0, ids: [id], version: sourceVersion(host.manager, id), path: "evidence.json", purpose: "retain the selected evidence" });
+    assert.doesNotMatch(modelText(host.manager), /ARTIFACT PAYLOAD/);
+    assert.equal(JSON.parse(await readFile(path.join(root, "evidence.json"), "utf8")).content, "ARTIFACT PAYLOAD");
+    await host.turn({ action: "load", expectedRevision: 1, ids: [id], version: sourceVersion(host.manager, id) });
+    assert.match(modelText(host.manager), /ARTIFACT PAYLOAD/);
+    assert.deepEqual(host.manager.getEntry(id), original);
+    assertPaired(host.manager);
+    const before = restoreContextState(host.manager.getBranch());
+    await writeFile(path.join(root, "evidence.json"), "tampered");
+    await assert.rejects(host.tools.get("compass_context").execute("failed-load", { action: "load", expectedRevision: before.revision, ids: [id], version: sourceVersion(host.manager, id) }, undefined, undefined, host.runner.createContext()), /digest|byte length/);
+    assert.deepEqual(restoreContextState(host.manager.getBranch()), before);
+    assert.deepEqual(host.errors, []);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test("nested Code Mode mutation is blocked before returning an unexecutable queued operation", async () => {

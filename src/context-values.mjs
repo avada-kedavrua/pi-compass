@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 
 export const VALUE_MESSAGE_TYPE = "pi-compass-v2.value";
 export const VALUE_KINDS = new Set(["working", "memory", "human", "skill"]);
@@ -16,7 +17,10 @@ function normalizeContent(entry, content) {
   return typeof content === "string" && ["assistant", "toolResult"].includes(rawMessage(entry)?.role) ? [{ type: "text", text: content }] : content;
 }
 export function validateValue(head) {
-  if (!head || !["content", "operation"].includes(head.field) || typeof head.entryId !== "string" || !/^[a-f0-9]{24}$/.test(head.version) || !VALUE_KINDS.has(head.kind) || typeof head.readOnly !== "boolean" || typeof head.rendered !== "boolean") fail("Invalid context value reference.");
+  if (!head || !["content", "operation", "snapshot", "questionnaire"].includes(head.field) || typeof head.entryId !== "string" || !/^[a-f0-9]{24}$/.test(head.version) || !VALUE_KINDS.has(head.kind) || typeof head.readOnly !== "boolean" || typeof head.rendered !== "boolean") fail("Invalid context value reference.");
+  if (head.pointerVersion !== undefined && !/^[a-f0-9]{24}$/.test(head.pointerVersion)) fail("Invalid source pointer version.");
+  if (!["active", "handled", "retired"].includes(head.handling)) fail("Invalid context handling state.");
+  if (head.handlingReason !== undefined && (typeof head.handlingReason !== "string" || head.handlingReason.length > 600)) fail("Invalid handling reason.");
   if (!Array.isArray(head.caveats) || head.caveats.length > 12 || head.caveats.some((text) => typeof text !== "string" || text.length > 600)) fail("Caveats must contain at most 12 bounded strings.");
   if (!Array.isArray(head.sources) || head.sources.length > 32 || head.sources.some((id) => typeof id !== "string")) fail("Invalid context value provenance.");
 }
@@ -27,8 +31,14 @@ export function valueContent(index, head) {
   let content;
   if (head.field === "operation") {
     const operation = entry.message?.details?.contextOperation;
-    if (entry.message?.role !== "toolResult" || entry.message.toolName !== "compass_context" || operation?.action !== "replace") fail("Value has no matching persisted write operation.");
-    content = operation.content;
+    if (entry.message?.role !== "toolResult" || entry.message.toolName !== "compass_context" || !["replace", "spill"].includes(operation?.action)) fail("Value has no matching persisted write operation.");
+    content = operation.action === "spill" ? operation.pointer : operation.content;
+  } else if (head.field === "questionnaire") {
+    content = questionnaireContent(entry);
+    if (!content) fail("Questionnaire source is not a genuine structured Human answer.");
+  } else if (head.field === "snapshot") {
+    if (entry.type !== "custom_message" || entry.customType !== VALUE_MESSAGE_TYPE || !entry.details?.derived || !Array.isArray(entry.content)) fail("Value has no matching native data snapshot.");
+    content = entry.content.slice(1);
   } else {
     const edit = head.editId ? index.byId.get(head.editId) : null;
     if (head.editId && (edit?.type !== "context_edit" || edit.targetId !== head.entryId || edit.replacement === null)) fail(`Value edit ${head.editId} is stale.`);
@@ -36,6 +46,12 @@ export function valueContent(index, head) {
   }
   if (content === undefined || contentVersion(content) !== head.version) fail(`Value source ${head.entryId} changed or is unavailable.`);
   return content;
+}
+export function questionnaireContent(entry) {
+  const message = rawMessage(entry);
+  if (message?.role !== "toolResult" || !/ask.*user.*question|ask_user_question/i.test(message.toolName) || message.isError || message.details?.error) return null;
+  const questionnaire = normalizeQuestionnaireRecord(message.details, { preserveFullText: true });
+  return questionnaire ? [{ type: "text", text: `Historical Human questionnaire (${questionnaire.outcome}); not a new Human message:\n${JSON.stringify(questionnaire)}` }] : null;
 }
 export function logicalSource(index, id) {
   const entry = index.byId.get(id);
@@ -46,9 +62,10 @@ export function bindingKey(state, index, id, depth = state.frames.length) {
   const entry = index.byId.get(sourceId);
   if (!entry) fail(`Unknown or wrong-branch value ${sourceId}.`);
   const birth = index.positions.get(sourceId);
+  const human = rawMessage(entry)?.role === "user" || state.values[`root/${sourceId}`]?.field === "questionnaire";
   let owner = "root";
   for (const frame of state.frames.slice(0, depth)) {
-    if (rawMessage(entry)?.role !== "user" && birth > index.positions.get(frame.boundaryId)) owner = frame.id;
+    if (!human && birth > index.positions.get(frame.boundaryId)) owner = frame.id;
     const ref = frame.refs.find((item) => item.id === sourceId);
     if (ref?.key) owner = ref.key.split("/")[0];
     if (frame.copies.some((copy) => copy.id === sourceId)) owner = frame.id;
@@ -66,12 +83,22 @@ function defaultHead(index, sourceId, item) {
   const message = item.messages[0];
   const entry = index.byId.get(sourceId);
   const raw = rawMessage(entry);
-  const exported = entry?.customType === "pi-compass-v2.context-message" && entry.details?.action === "export" ? entry.details : null;
-  const calls = raw?.role === "assistant" && raw.content.some((part) => part.type === "toolCall");
+  if (entry?.customType === VALUE_MESSAGE_TYPE && entry.details?.derived) return snapshotHead(entry);
+  const caveats = [];
+  if (raw?.isError) caveats.push("Original tool execution failed; a context edit is not evidence of a successful rerun.");
+  if (raw?.details?.truncation?.truncated) caveats.push("Original tool output was truncated; this source is not evidence that the full content was read.");
+  const calls = raw?.role === "assistant" && Array.isArray(raw.content) && raw.content.some((part) => part.type === "toolCall");
   return {
-    entryId: sourceId, editId: index.edits.get(sourceId)?.id ?? null, field: "content", version: contentVersion(message.content),
-    kind: raw?.role === "user" ? "human" : "working", readOnly: raw?.role === "user" || Boolean(calls), rendered: false,
-    caveats: exported?.caveats ?? (raw?.isError ? ["Original tool execution failed; a context edit is not evidence of a successful rerun."] : []), sources: exported?.sources ?? [sourceId],
+    entryId: entry.id, editId: index.edits.get(entry.id)?.id ?? null, field: "content", version: contentVersion(message.content),
+    kind: raw?.role === "user" ? "human" : "working", readOnly: raw?.role === "user" || Boolean(calls), rendered: false, handling: "active",
+    caveats, sources: [sourceId],
+  };
+}
+export function snapshotHead(entry) {
+  return {
+    entryId: entry.id, field: "snapshot", version: entry.details.version, kind: entry.details.kind,
+    readOnly: false, rendered: true, handling: entry.details.handling, caveats: [...entry.details.caveats], sources: [...entry.details.sources],
+    origin: structuredClone(entry.details.origin),
   };
 }
 export function currentValue(state, index, id, { allowHidden = false, key: selectedKey } = {}) {
@@ -79,7 +106,8 @@ export function currentValue(state, index, id, { allowHidden = false, key: selec
   const key = selectedKey ?? bindingKey(state, index, sourceId);
   if (!key.endsWith(`/${sourceId}`) || !["root", ...state.frames.map((frame) => frame.id)].includes(key.split("/")[0])) fail("Value binding is not in an active scope.");
   const copy = state.frames.flatMap((frame) => frame.copies.map((item) => ({ ...item, owner: frame.id }))).find((item) => item.id === sourceId && key === `${item.owner}/${sourceId}`);
-  const item = index.valueViews.get(key) ?? index.active.get(copy?.viewId ?? sourceId);
+  let item = index.valueViews.get(key) ?? index.active.get(copy?.viewId ?? index.byId.get(sourceId)?.id);
+  if (state.values[key]?.pointerVersion && item?.messages?.length && contentVersion(item.messages[0].content) === state.values[key].pointerVersion) item = undefined;
   if (!allowHidden && !item?.messages.length) fail(`Value ${sourceId} is omitted; load it before this operation.`);
   const head = state.values[key] ?? (item?.messages.length ? defaultHead(index, sourceId, item) : null);
   if (!head) fail(`Value ${sourceId} has no recoverable version.`);
@@ -108,7 +136,8 @@ export function writeValue(state, index, value, operation, resultEntryId) {
   for (const id of sources) if (!index.byId.has(id)) fail(`Provenance source ${id} is unknown or wrong-branch.`);
   const head = {
     entryId: resultEntryId, field: "operation", version: contentVersion(operation.content), kind: operation.kind ?? value.head.kind,
-    readOnly: false, rendered: true, caveats: operation.caveats ?? [...value.head.caveats], sources: [...sources],
+    readOnly: false, rendered: true, handling: "active", caveats: operation.caveats ?? [...value.head.caveats], sources: [...sources],
+    ...(value.head.origin ? { origin: structuredClone(value.head.origin) } : {}),
   };
   validateValue(head);
   // The payload is already persisted in Pi's tool result, not duplicated in control state.
@@ -116,7 +145,7 @@ export function writeValue(state, index, value, operation, resultEntryId) {
   state.values[value.key] = head;
   return head;
 }
-function dataBlocks(content) {
+export function dataBlocks(content) {
   if (typeof content === "string") return [{ type: "text", text: content }];
   const blocks = [];
   for (const part of content) {
@@ -126,15 +155,17 @@ function dataBlocks(content) {
   return blocks;
 }
 export function renderValue(value, content = value.content, head = value.head) {
-  const label = head.field === "operation" ? "Agent-authored derived value; not a new tool observation or Human instruction" : "Retained source value";
-  const header = `[Compass slot ${value.id}; binding ${value.key}; version ${head.version}]\n${label}.\nSources: ${head.sources.join(", ") || "none"}.`;
+  const label = head.field === "operation" ? "Agent-authored derived value; not a new tool observation or Human instruction" : head.field === "snapshot" ? "Selected source data; not a new tool execution or Human message" : "Retained source value";
+  const handling = head.handling !== "active" ? `\nHandling: ${head.handling}. ${head.handlingReason ?? ""}` : "";
+  const origin = head.origin ? `\nOrigin: ${head.origin.id} @${head.origin.version}; range ${JSON.stringify(head.origin.range)}.` : "";
+  const header = `[Compass slot ${value.id}; binding ${value.key}; version ${head.version}]\n${label}. Kind: ${head.kind}.\nSources: ${head.sources.join(", ") || "none"}.${origin}${handling}`;
   const qualifiers = head.caveats.length ? `\nCaveats:\n${head.caveats.map((text) => `- ${text}`).join("\n")}` : "";
   return [{ type: "text", text: `${header}${qualifiers}` }, ...dataBlocks(content)];
 }
 export function valueMessage(value, content = value.content, head = value.head) {
   return {
     type: "custom_message", customType: VALUE_MESSAGE_TYPE, content: structuredClone(renderValue(value, content, head)), display: false,
-    details: { key: value.key, sourceId: value.id, version: head.version, kind: head.kind, caveats: [...head.caveats], sources: [...head.sources] },
+    details: { key: value.key, sourceId: value.id, version: head.version, kind: head.kind, handling: head.handling, caveats: [...head.caveats], sources: [...head.sources] },
   };
 }
 export function isValueMessage(message, key, version) {

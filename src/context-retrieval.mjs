@@ -1,164 +1,159 @@
-import { bindingKey, contentVersion, logicalSource, rawMessage, valueContent } from "./context-values.mjs";
+import { bindingKey, contentVersion, currentValue, logicalSource, rawMessage, snapshotHead, valueContent } from "./context-values.mjs";
 
-const DEFAULT_LIMIT = 8;
-const MAX_LIMIT = 32;
-const MAX_SCAN = 256;
-
+const RESERVED = new Set(["pi-compass-v2.goalrun-state", "pi-compass-v2.goalrun-anchor", "pi-compass-v2.conventions"]);
+const MAX_SCAN = 1024;
 function fail(message) { throw new Error(`${message} No context changed.`); }
-function textParts(content) {
-  if (typeof content === "string") return [{ part: 0, text: content }];
-  if (!Array.isArray(content)) return [];
-  return content.flatMap((item, part) => item?.type === "text" && typeof item.text === "string" ? [{ part, text: item.text }] : []);
-}
-function savedValue(index, state, saved) {
-  if (saved.binding) {
-    const head = state.values[saved.binding];
-    if (!head || contentVersion(head) !== saved.valueState) return null;
-    try { return { content: valueContent(index, head), head, binding: saved.binding }; } catch { return null; }
-  }
-  if (saved.editId !== null) {
-    const edit = index.byId.get(saved.editId);
-    if (edit?.type !== "context_edit" || edit.targetId !== saved.id || edit.replacement === null) return null;
-    const content = edit.replacement.content;
-    return { content, head: null, binding: null };
-  }
-  const entry = index.byId.get(saved.id);
+function readable(entry) {
   const message = rawMessage(entry);
-  return message && Object.hasOwn(message, "content") ? { content: message.content, head: null, binding: null } : null;
+  return message && ["user", "assistant", "toolResult", "custom"].includes(message.role) && !RESERVED.has(message.customType);
 }
-function activeValue(index, state, id) {
-  const key = bindingKey(state, index, id);
-  const head = state.values[key];
-  if (head) return { content: valueContent(index, head), head, binding: key };
-  const item = index.active.get(id);
-  if (item?.messages?.length) return { content: item.messages[0].content, head: null, binding: key };
-  const edit = index.edits.get(id);
-  if (edit) return edit.replacement === null ? null : { content: edit.replacement.content, head: null, binding: key };
-  const message = rawMessage(index.byId.get(id));
-  return message && Object.hasOwn(message, "content") ? { content: message.content, head: null, binding: key } : null;
+function projected(entry, content) {
+  return typeof content === "string" && ["assistant", "toolResult"].includes(rawMessage(entry)?.role) ? [{ type: "text", text: content }] : content;
 }
-function makeRecord(index, state, id, origin, recovered) {
-  const sourceId = logicalSource(index, id);
-  const entry = index.byId.get(sourceId);
-  if (!entry) return null;
-  let value;
-  if (recovered) value = savedValue(index, state, recovered);
-  else value = activeValue(index, state, sourceId);
-  if (!value) return null;
-  const head = value.head;
-  const version = head?.version ?? contentVersion(value.content);
-  const message = rawMessage(entry);
+function record(index, id, binding, origin, content, head = null, visibility = "omitted") {
+  const entry = index.byId.get(id);
+  if (!readable(entry)) return null;
   return {
-    id: sourceId,
-    binding: value.binding ?? (head ? null : bindingKey(state, index, sourceId)),
-    version,
-    content: value.content,
-    caveats: [...(head?.caveats ?? (message?.isError ? ["Original tool execution failed; content is not evidence of a successful rerun."] : []))],
-    provenance: [...(head?.sources ?? [sourceId])],
-    visibility: index.active.get(id)?.messages?.length ? "active" : "omitted",
-    origin,
-    role: message?.role ?? "custom",
-    entry,
+    id, binding, origin, content, head, visibility,
+    version: head?.version ?? contentVersion(content),
+    role: rawMessage(entry).role,
+    caveats: [...(head?.caveats ?? (rawMessage(entry).isError ? ["Original tool execution failed; a context view is not evidence of a successful rerun."] : []))],
+    provenance: [...(head?.sources ?? [id])],
   };
 }
-function rangeContent(content, range) {
-  if (!range) return content;
-  const texts = textParts(content);
-  const part = range.part ?? 0;
-  if (!Number.isInteger(part) || part < 0) fail("Range part must be a non-negative integer.");
-  const selected = texts.find((item) => item.part === part);
-  if (!selected) fail("Requested range does not select a text part; images and non-text content cannot be line-sliced.");
-  const lines = selected.text.split("\n");
-  const start = range.startLine ?? 1;
-  const end = range.endLine ?? lines.length;
-  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || end > lines.length) fail("Requested line range is stale or out of bounds.");
-  const excerpt = lines.slice(start - 1, end).join("\n");
-  if (typeof content === "string") return excerpt;
-  return content.map((item, position) => position === part ? { ...item, text: excerpt } : structuredClone(item));
+function savedRecord(index, state, saved) {
+  const id = saved.logicalId ?? logicalSource(index, saved.id);
+  const binding = saved.binding ?? bindingKey(state, index, id);
+  const head = saved.binding ? state.values[saved.binding] : null;
+  // Ref writes deliberately change the current shared head; saved.valueState is
+  // a return baseline, not a requirement that the parent value stay unchanged.
+  if (head) return record(index, id, binding, "parent", valueContent(index, head), head);
+  const entry = index.byId.get(saved.id);
+  if (!readable(entry)) return null;
+  const edit = saved.editId === null ? null : index.byId.get(saved.editId);
+  if (saved.editId !== null && (edit?.type !== "context_edit" || edit.targetId !== saved.id || !edit.replacement)) fail(`Parent edit ${saved.editId} is unavailable.`);
+  return record(index, id, binding, "parent", projected(entry, edit ? edit.replacement.content : rawMessage(entry).content));
 }
-function rangeMetadata(content, range) {
-  if (!range) return null;
-  const text = textParts(content).find((item) => item.part === (range.part ?? 0))?.text;
-  if (text === undefined) fail("Requested range does not select a text part.");
-  const count = text.split("\n").length;
-  return { part: range.part ?? 0, startLine: range.startLine ?? 1, endLine: range.endLine ?? count };
-}
-function boundedLimit(limit) {
-  if (limit === undefined) return DEFAULT_LIMIT;
-  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) fail(`Search limit must be 1..${MAX_LIMIT}.`);
-  return limit;
-}
-
-/** Lexical search over bounded candidates on the supplied active branch only. */
-export function searchSources(index, state, { query, ids, scope = "active", limit } = {}) {
-  if (typeof query !== "string" || !query.trim() || query.length > 500) fail("Search requires a non-empty lexical query of at most 500 characters.");
-  if (!["active", "parent", "history", "all"].includes(scope)) fail("Unknown source search scope.");
-  if (ids !== undefined && (!Array.isArray(ids) || ids.length > 256 || ids.some((id) => typeof id !== "string"))) fail("Search IDs must be a bounded array of source IDs.");
-  const maxResults = boundedLimit(limit);
-  const needle = query.toLocaleLowerCase();
-  const candidates = new Map();
-  const includeActive = scope === "active" || scope === "all";
-  const includeParent = scope === "parent" || scope === "all";
-  const includeHistory = scope === "history" || scope === "all";
-  if (includeActive) for (const [id, item] of index.active) {
-    if (!item.messages?.length || (ids && !ids.includes(id))) continue;
-    candidates.set(id, makeRecord(index, state, id, "active", null));
-  }
-  if (includeParent) for (const frame of state.frames) for (const saved of frame.saved) {
-    if (saved.visible || (ids && !ids.includes(saved.id))) continue;
-    if (!candidates.has(saved.id)) candidates.set(saved.id, makeRecord(index, state, saved.id, "parent", saved));
-  }
-  if (includeHistory) for (const entry of index.branch) {
-    const id = entry.id;
-    const message = rawMessage(entry);
-    if (candidates.has(id) || (ids && !ids.includes(id)) || !["user", "assistant", "toolResult", "custom"].includes(message?.role)) continue;
-    if (entry.type === "custom_message" && entry.customType?.startsWith("pi-compass-v2.")) continue;
-    candidates.set(id, makeRecord(index, state, id, "history", null));
-  }
-  const hits = [];
-  let scanned = 0;
-  for (const record of candidates.values()) {
-    if (scanned >= MAX_SCAN || hits.length >= maxResults) break;
-    if (!record) continue;
-    scanned++;
-    const match = textParts(record.content).map((part) => ({ ...part, at: part.text.toLocaleLowerCase().indexOf(needle) })).find((part) => part.at >= 0);
-    if (!match) continue;
-    const start = Math.max(0, match.at - 160);
-    const end = Math.min(match.text.length, match.at + query.length + 240);
-    const startLine = match.text.slice(0, match.at).split("\n").length;
-    const endLine = match.text.slice(0, match.at + query.length).split("\n").length;
-    hits.push({
-      id: record.id, binding: record.binding, version: record.version, visibility: record.visibility,
-      origin: record.origin, range: { part: match.part, startLine, endLine }, snippet: match.text.slice(start, end), truncated: start > 0 || end < match.text.length,
-      caveats: record.caveats, provenance: record.provenance,
-    });
-    if (hits.length >= maxResults) break;
-  }
-  return { method: "lexical", scope, query, hits, scanned, truncated: scanned < candidates.size && (hits.length >= maxResults || scanned >= MAX_SCAN) };
-}
-
-/** Resolve one exact source version, optionally selecting a line range from one text part. */
-export function resolveSource(index, state, { id, binding, version, range } = {}, scope = "active") {
-  if (typeof id !== "string" || !id || typeof version !== "string") fail("Resolve requires a source ID and exact version.");
-  if (!["active", "parent", "history", "all"].includes(scope)) fail("Unknown source resolution scope.");
-  let record = null;
+function* candidates(index, state, scope) {
   if (scope === "active" || scope === "all") {
-    if (index.active.has(id)) record = makeRecord(index, state, id, "active", null);
-  }
-  if (!record && (scope === "parent" || scope === "all")) {
-    for (const frame of [...state.frames].reverse()) {
-      const saved = frame.saved.find((item) => item.id === id && !item.visible);
-      if (saved) { record = makeRecord(index, state, id, "parent", saved); break; }
+    const known = new Set();
+    for (const key of Object.keys(state.values)) {
+      const id = key.slice(key.indexOf("/") + 1);
+      if (key !== bindingKey(state, index, id) && !state.pins?.some((pin) => pin.key === key) && !index.valueViews.has(key)) continue;
+      const value = currentValue(state, index, id, { key, allowHidden: true });
+      if (!value.message) continue;
+      known.add(value.nativeId);
+      yield record(index, id, key, "active", value.content, value.head, "active");
+    }
+    for (const [nativeId, item] of index.active) {
+      if (!item.messages.length || known.has(nativeId)) continue;
+      const id = logicalSource(index, nativeId);
+      const value = currentValue(state, index, id);
+      if (value.nativeId !== nativeId) continue;
+      yield record(index, id, value.key, "active", value.content, value.head, "active");
     }
   }
-  if (!record && (scope === "history" || scope === "all") && index.byId.has(id)) record = makeRecord(index, state, id, "history", null);
-  if (!record) fail(`Source ${id} is not recoverable in scope ${scope}.`);
-  if (record.version !== version) fail(`Source ${id} version is stale; requested ${version}, current recoverable version is ${record.version}.`);
-  if (binding !== undefined && binding !== record.binding) fail(`Source ${id} binding does not match the requested binding.`);
-  const selected = rangeContent(record.content, range);
-  return {
-    id: record.id, binding: record.binding, version: record.version, range: rangeMetadata(record.content, range),
-    content: selected, visibility: record.visibility, origin: record.origin, caveats: record.caveats,
-    provenance: record.provenance, truncated: false,
-  };
+  if (scope === "parent" || scope === "all") {
+    for (const frame of state.frames.toReversed()) for (const saved of frame.saved) {
+      // These were visible in the parent before call hid them. Pre-existing
+      // omissions remain historical, not silently promoted into parent input.
+      if (saved.visible) yield savedRecord(index, state, saved);
+    }
+  }
+  if (scope === "history" || scope === "all") {
+    for (const entry of index.branch.toReversed()) {
+      if (entry.type === "custom" && entry.customType === "pi-compass-v2.context" && entry.data.schemaVersion === state.schemaVersion) {
+        for (const [key, head] of Object.entries(entry.data.values)) {
+          const id = key.slice(key.indexOf("/") + 1);
+          yield record(index, id, key, "history", valueContent(index, head), head);
+        }
+      } else if (entry.type === "context_edit" && entry.replacement) {
+        const source = index.byId.get(entry.targetId);
+        if (readable(source)) {
+          const id = logicalSource(index, entry.targetId);
+          yield record(index, id, bindingKey(state, index, id), "history", projected(source, entry.replacement.content));
+        }
+      } else if (entry.customType === "pi-compass-v2.value" && entry.details?.derived) {
+        const id = logicalSource(index, entry.id);
+        const head = snapshotHead(entry);
+        yield record(index, id, entry.details.key, "history", valueContent(index, head), head);
+      } else if (readable(entry)) {
+        const id = logicalSource(index, entry.id);
+        // A value-view wrapper is an observation about a source, not a new raw
+        // version of that source. Its immutable head is indexed above.
+        if (id === entry.id) yield record(index, id, bindingKey(state, index, id), "history", projected(entry, rawMessage(entry).content));
+      }
+    }
+  }
+}
+function scopes(scope) {
+  if (!["active", "parent", "history", "all"].includes(scope)) fail("Unknown source scope.");
+}
+function* uniqueCandidates(index, state, scope, ids) {
+  const seen = new Set();
+  for (const candidate of candidates(index, state, scope)) {
+    if (!candidate || (ids?.size && !ids.has(candidate.id))) continue;
+    const key = `${candidate.binding}:${candidate.version}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    yield candidate;
+  }
+}
+export function selectSourceRange(content, range) {
+  if (!range) return { content: structuredClone(content), range: null };
+  const part = range.part ?? 0;
+  const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  if (!Number.isInteger(part) || part < 0 || !Array.isArray(blocks) || part >= blocks.length) fail("Range part is out of bounds.");
+  const block = blocks[part];
+  if (range.startLine === undefined && range.endLine === undefined && block.type === "image") return { content: [structuredClone(block)], range: { part } };
+  if (block.type !== "text") fail("Only text parts can be line-sliced; select an image part without line bounds.");
+  const lines = block.text.split("\n");
+  const startLine = range.startLine ?? 1;
+  const endLine = range.endLine ?? lines.length;
+  if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine || endLine > lines.length) fail("Requested line range is stale or out of bounds.");
+  const text = lines.slice(startLine - 1, endLine).join("\n");
+  return { content: typeof content === "string" ? text : [{ ...block, text }], range: { part, startLine, endLine } };
+}
+export function searchSources(index, state, { query = "", ids = [], scope = "active", limit = 8 } = {}) {
+  scopes(scope);
+  if (typeof query !== "string" || query.length > 400 || !Number.isInteger(limit) || limit < 1 || limit > 16) fail("Search requires query <=400 characters and limit 1..16.");
+  if (!Array.isArray(ids) || ids.length > 256 || ids.some((id) => typeof id !== "string")) fail("Invalid source IDs.");
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const hits = [];
+  let scanned = 0;
+  let truncated = false;
+  for (const candidate of uniqueCandidates(index, state, scope, new Set(ids))) {
+    if (scanned === MAX_SCAN || hits.length === limit) { truncated = true; break; }
+    scanned++;
+    const parts = typeof candidate.content === "string" ? [{ type: "text", text: candidate.content }] : candidate.content;
+    const part = parts.findIndex((block) => block.type === "text" && terms.every((term) => block.text.toLowerCase().includes(term)));
+    if (part < 0 && terms.length) continue;
+    const text = part < 0 ? "" : parts[part].text;
+    const at = terms.length ? text.toLowerCase().indexOf(terms[0]) : 0;
+    const from = Math.max(0, at - 80);
+    const to = Math.min(text.length, from + 600);
+    const startLine = text.slice(0, Math.max(0, at)).split("\n").length;
+    const endLine = Math.min(text.split("\n").length, startLine + 8);
+    hits.push({
+      id: candidate.id, binding: candidate.binding, version: candidate.version, role: candidate.role, kind: candidate.head?.kind,
+      visibility: candidate.visibility, origin: candidate.origin,
+      range: part < 0 ? null : { part, startLine, endLine },
+      snippet: text.slice(from, to), excerpt: text.slice(from, to), chars: text.length,
+      truncated: from > 0 || to < text.length, caveats: candidate.caveats, provenance: candidate.provenance,
+    });
+  }
+  return { method: "lexical", scope, query, hits, scanned, truncated };
+}
+export function resolveSource(index, state, { id, binding, version, range } = {}, scope = "all") {
+  scopes(scope);
+  if (typeof id !== "string" || !index.byId.has(id)) fail(`Unknown or wrong-branch source ${id}.`);
+  if (typeof version !== "string" || !/^[a-f0-9]{24}$/.test(version)) fail("Resolve requires an exact source version.");
+  const logicalId = logicalSource(index, id);
+  let found = false;
+  for (const candidate of uniqueCandidates(index, state, scope, new Set([logicalId]))) {
+    found = true;
+    if (candidate.version !== version || (binding !== undefined && candidate.binding !== binding)) continue;
+    return { ...candidate, ...selectSourceRange(candidate.content, range), truncated: false };
+  }
+  fail(found ? `Source ${id} version or binding is stale or unavailable.` : `Source ${id} is not recoverable in scope ${scope}.`);
 }

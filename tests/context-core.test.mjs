@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  CONTEXT_MESSAGE_TYPE, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, restoreContextState,
+  CONTEXT_MESSAGE_TYPE, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
 } from "../src/context-core.mjs";
 import {
-  SessionManager, appendDrafts, applyOperation, assertPaired, modelText, queueOperation, sourceVersion,
+  SessionManager, appendDrafts, applyOperation, assertPaired, contextPreview, modelText, queueOperation, sourceVersion,
   toolExchange, user, value,
 } from "./helpers/context-host.mjs";
 
@@ -34,6 +34,76 @@ test("same-session call preserves reserved state, scopes inputs, and restores ra
   assert.deepEqual(recovered.getEntry(parent), original);
   assert.equal(restoreContextState(recovered.getBranch()).frames.length, 0);
   assertPaired(recovered);
+});
+
+test("uncaptured parent ranges load as editable data copies with actionable export references", () => {
+  const manager = host();
+  const parent = user(manager, "parent first line\nrecoverable requirement\nparent last line");
+  const version = sourceVersion(manager, parent);
+  const original = structuredClone(manager.getEntry(parent));
+  applyOperation(manager, { action: "call", task: "child without implicit input" });
+  const found = searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { query: "recoverable", sourceScope: "parent" });
+  assert.equal(found.hits[0].id, parent);
+  assert.equal(found.hits[0].version, version);
+  const loaded = applyOperation(manager, { action: "load", ids: [parent], version, sourceScope: "parent", range: { startLine: 2, endLine: 2 } });
+  const data = loaded.planned.entries.find((entry) => entry.details?.action === "load");
+  assert.match(JSON.stringify(data.content), /recoverable requirement/);
+  assert.doesNotMatch(JSON.stringify(data.content), /parent first line/);
+  const id = data.details.sourceId;
+  applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "local interpretation" });
+  const returned = applyOperation(manager, { action: "return", exportIds: [id] });
+  const receipt = returned.planned.entries.findLast((entry) => entry.details?.references?.length);
+  const exported = receipt.details.references[0];
+  assert.equal(sourceVersion(manager, exported.id), exported.version);
+  assert.match(modelText(manager), /local interpretation/);
+  assert.deepEqual(manager.getEntry(parent), original);
+  assertPaired(manager);
+});
+
+test("moving a result payload keeps its complete parallel execution envelope", () => {
+  const manager = host();
+  user(manager, "parent");
+  const exchange = toolExchange(manager);
+  const id = exchange.results[0];
+  const original = structuredClone(manager.getEntry(id));
+  const version = sourceVersion(manager, id);
+  applyOperation(manager, { action: "move", ids: [id], version });
+  assert.equal(sourceVersion(manager, id), version);
+  assert.deepEqual(manager.getEntry(id), original);
+  assert.match(modelText(manager), /Context relocation pointer/);
+  assertPaired(manager);
+  const control = restoreContextState(manager.getBranch());
+  const stale = queueOperation(manager, { action: "move", ids: [id], version: "0".repeat(24) });
+  const before = manager.getEntries().length;
+  assert.throws(() => planContextBoundary({ state: control, branch: manager.getBranch(), boundary: stale }), /changed/);
+  assert.equal(manager.getEntries().length, before);
+});
+
+test("Goal-scoped retention expires without retiring explicit session data", () => {
+  const manager = host();
+  user(manager, "parent");
+  const goal = value(manager, "GOAL_SCOPED_FACT");
+  const session = value(manager, "SESSION_SCOPED_FACT");
+  applyOperation(manager, { action: "pin", ids: [goal] });
+  applyOperation(manager, { action: "pin", ids: [session], lifetime: "session" });
+  const state = restoreContextState(manager.getBranch());
+  const overlay = pinnedContextOverlay(manager.getBranch(), state, [], 2);
+  assert.match(JSON.stringify(overlay), /SESSION_SCOPED_FACT/);
+  assert.doesNotMatch(JSON.stringify(overlay), /GOAL_SCOPED_FACT/);
+  const planned = planObservationBoundary({ state, branch: manager.getBranch(), boundary: { context: contextPreview(manager), toolResults: [], toolResultEntryIds: [] }, goalVersion: 2 });
+  appendDrafts(manager, planned.entries);
+  assert.equal(planned.state.values[`root/${goal}`].handling, "retired");
+  assert.deepEqual(planned.state.pins.map((pin) => pin.id), [session]);
+});
+
+test("failed Skill reads cannot be activated as successful retained instructions", () => {
+  const manager = host();
+  manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "failed-skill", name: "read", arguments: { path: "SKILL.md" } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
+  const id = manager.appendMessage({ role: "toolResult", toolCallId: "failed-skill", toolName: "read", content: [{ type: "text", text: "Read failed" }], isError: true, timestamp: Date.now() });
+  const pending = queueOperation(manager, { action: "pin", ids: [id], kind: "skill" });
+  const before = manager.getEntries().length;
+  assert.throws(() => planContextBoundary({ state: emptyContextState(), branch: manager.getBranch(), boundary: pending }), /failed Skill read/);
+  assert.equal(manager.getEntries().length, before);
 });
 
 test("return restores an existing parent summary, not a generic frame note", () => {

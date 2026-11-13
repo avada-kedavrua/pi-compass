@@ -8,14 +8,14 @@ import { resolveSource, searchSources } from "../src/context-retrieval.mjs";
 import { loadContextArtifact, writeContextArtifact } from "../src/context-artifacts.mjs";
 
 function fixture() {
-  const parent = { id: "parent", type: "message", message: { role: "assistant", content: "raw original\nsecond line" } };
+  const parent = { id: "parent", type: "message", message: { role: "user", content: "raw original\nsecond line" } };
   const edit = { id: "edit", type: "context_edit", targetId: "parent", replacement: { content: "edited answer\nnext line" } };
-  const current = { id: "current", type: "message", message: { role: "assistant", content: "visible current" } };
+  const current = { id: "current", type: "message", message: { role: "user", content: "visible current" } };
   const branch = [parent, edit, current];
   const active = new Map([["current", { sourceEntry: current, messages: [current.message] }]]);
   const index = { branch, byId: new Map(branch.map((entry) => [entry.id, entry])), positions: new Map(branch.map((entry, i) => [entry.id, i])), active, edits: new Map([["parent", edit]]), valueViews: new Map() };
   const state = { frames: [{ id: "frame", boundaryId: "parent", saved: [
-    { id: "parent", editId: "edit", visible: false, binding: null, valueState: null, logicalId: "parent" },
+    { id: "parent", editId: "edit", visible: true, binding: null, valueState: null, logicalId: "parent" },
     { id: "current", editId: null, visible: true, binding: null, valueState: null, logicalId: "current" },
   ], refs: [], copies: [] }], values: {} };
   return { index, state };
@@ -42,7 +42,7 @@ test("parent retrieval uses the saved edit rather than the raw original", () => 
   assert.equal(found.hits[0].origin, "parent");
   assert.equal(searchSources(index, state, { query: "raw original", scope: "parent" }).hits.length, 0);
   assert.equal(searchSources(index, state, { query: "edited answer", scope: "history" }).hits.some((hit) => hit.id === "parent"), true);
-  assert.equal(searchSources(index, state, { query: "raw original", scope: "history" }).hits.some((hit) => hit.id === "parent"), false);
+  assert.equal(searchSources(index, state, { query: "raw original", scope: "history" }).hits.some((hit) => hit.id === "parent"), true, "raw immutable versions remain separately recoverable");
   const result = resolveSource(index, state, { id: "parent", version: contentVersion("edited answer\nnext line") }, "parent");
   assert.equal(result.content, "edited answer\nnext line");
 });
@@ -56,13 +56,17 @@ test("context artifacts verify readback and reject tampering without history fal
     const written = await writeContextArtifact(request);
     assert.equal(written.ok, true);
     assert.equal(written.artifact.sha256.length, 64);
-    const loaded = await loadContextArtifact({ ...request, content: undefined, caveats: undefined, provenance: undefined });
+    const loaded = await loadContextArtifact({ ...request, artifact: written.artifact, content: undefined, caveats: undefined, provenance: undefined });
     assert.deepEqual(loaded.content, content);
     const file = path.join(root, "artifacts/source.json");
     const envelope = JSON.parse(await readFile(file, "utf8"));
+    envelope.manifest.caveats = ["silently removed qualification"];
+    await writeFile(file, JSON.stringify(envelope));
+    await assert.rejects(loadContextArtifact({ ...request, artifact: written.artifact }), /digest|byte length/);
+    envelope.manifest.caveats = request.caveats;
     envelope.content[0].text = "tampered";
     await writeFile(file, JSON.stringify(envelope));
-    await assert.rejects(loadContextArtifact({ ...request, content: undefined, caveats: undefined, provenance: undefined }), /digest|manifest version/);
+    await assert.rejects(loadContextArtifact({ ...request, artifact: written.artifact, content: undefined, caveats: undefined, provenance: undefined }), /digest|byte length|version/);
     const duplicate = await writeContextArtifact(request);
     assert.equal(duplicate.ok, false);
     assert.equal(duplicate.possibleOrphan, null);

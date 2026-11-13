@@ -1,12 +1,14 @@
 import {
-  VALUE_MESSAGE_TYPE, adoptValue, bindingKey, contentVersion, copyValue, currentValue, isValueMessage, logicalSource,
+  VALUE_MESSAGE_TYPE, adoptValue, bindingKey, contentVersion, copyValue, currentValue, dataBlocks, isValueMessage, logicalSource, questionnaireContent,
   nativeValueViews, rawMessage as messageOf, releaseFrameValues, renderValue, validateValue, valueContent, valueMessage, writeValue,
 } from "./context-values.mjs";
+import { resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
+import { loadContextArtifact, writeContextArtifact } from "./context-artifacts.mjs";
 export { contentVersion } from "./context-values.mjs";
 
 export const CONTEXT_STATE_TYPE = "pi-compass-v2.context";
 export const CONTEXT_MESSAGE_TYPE = "pi-compass-v2.context-message";
-export const CONTEXT_SCHEMA_VERSION = 3;
+export const CONTEXT_SCHEMA_VERSION = 4;
 const INTENT_TYPE = `${CONTEXT_STATE_TYPE}.intent`;
 const MAX_DEPTH = 16;
 const MAX_SOURCES = 256;
@@ -20,9 +22,6 @@ function recoveryRequired(message) {
   throw new Error(`${message} Context projection may have changed; no further Compass mutation was applied. Use Pi tree navigation to return before the intent entry.`);
 }
 function object(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
-function textOf(content) {
-  return typeof content === "string" ? content : (content ?? []).filter((part) => part.type === "text").map((part) => part.text).join("\n");
-}
 function editable(entry) {
   const message = messageOf(entry);
   return Boolean(message && ["user", "assistant", "toolResult", "custom"].includes(message.role) && !RESERVED_MESSAGES.has(message.customType));
@@ -62,7 +61,7 @@ export function normalizeContextState(raw) {
     scopes.add(frame.id);
     parent = frame.id;
   }
-  for (const pin of raw.pins) if (!object(pin) || typeof pin.id !== "string" || !scopes.has(pin.scope) || !object(raw.values[pin.key])) fail("Invalid pin owner or value.");
+  for (const pin of raw.pins) if (!object(pin) || typeof pin.id !== "string" || !scopes.has(pin.scope) || !object(raw.values[pin.key]) || (pin.goalVersion !== undefined && (!Number.isSafeInteger(pin.goalVersion) || pin.goalVersion < 1))) fail("Invalid pin owner or value.");
   if (Object.keys(raw.values).length > MAX_SOURCES) fail("Too many active value bindings; retire or spill unused values.");
   for (const head of Object.values(raw.values)) validateValue(head);
   for (const watch of Object.values(raw.watches)) if (!object(watch) || !scopes.has(watch.owner)) fail("Invalid watch owner.");
@@ -119,6 +118,11 @@ function sourceIndex(branch, boundary) {
   for (const [position, entry] of branch.entries()) {
     byId.set(entry.id, entry);
     positions.set(entry.id, position);
+    if (entry.customType === VALUE_MESSAGE_TYPE && typeof entry.details?.referenceId === "string") {
+      byId.set(entry.details.referenceId, entry);
+      positions.set(entry.details.referenceId, position);
+      if (entry.details.derived) { byId.set(entry.details.sourceId, entry); positions.set(entry.details.sourceId, position); }
+    }
     const message = messageOf(entry);
     if (message?.role === "assistant") {
       const toolCalls = message.content.filter((part) => part.type === "toolCall");
@@ -291,10 +295,10 @@ function planReturn({ next, index, boundary, operation }) {
       if (copy) copy.viewKey = saved.binding;
     }
   }
-  for (const id of operation.exportIds ?? []) {
+  for (const [number, id] of (operation.exportIds ?? []).entries()) {
     const value = currentValue(next, index, id);
     ensureContent(value.content);
-    entries.push(nativeMessage(renderValue(value), { frame: frame.id, action: "export", source: value.id, caveats: value.head.caveats, sources: [...new Set([...value.head.sources, value.head.entryId])] }));
+    entries.push(sourceDataDraft(next, operation, { ...value, caveats: value.head.caveats, provenance: [...new Set([...value.head.sources, value.head.entryId])] }, "export", number, frame.parent));
   }
   if (operation.result !== undefined && operation.result !== "") {
     ensureText(operation.result, "Return value");
@@ -322,6 +326,8 @@ function planPins({ next, index, operation }) {
     source(index, id);
     const value = currentValue(next, index, id, { key: operation.binding, allowHidden: operation.action === "unpin" });
     if (operation.action === "pin") {
+      if (operation.kind === "skill" && index.byId.get(value.head.entryId)?.message?.isError) fail("A failed Skill read cannot be activated; load a verified source first.");
+      if (operation.kind === "skill" && index.byId.get(value.head.entryId)?.message?.details?.truncation?.truncated) fail("A truncated Skill read cannot be activated as complete; recover its remaining content first.");
       const scopes = ["root", ...next.frames.map((frame) => frame.id)];
       if (scopes.indexOf(scope) < scopes.indexOf(value.key.split("/")[0])) fail("A local value cannot outlive its binding; explicitly export it before pinning it in a parent scope.");
       const head = adoptValue(next, value);
@@ -331,13 +337,30 @@ function planPins({ next, index, operation }) {
       // This gives outgoing requests a complete source/version/caveat envelope;
       // it does not claim a new observation or rewrite the original Pi record.
       head.rendered = true;
+      head.handling = "active";
+      delete head.handlingReason;
       validateValue(head);
       entries.push(...writeView(next, value, head, value.content));
-      if (!next.pins.some((pin) => pin.key === value.key && pin.scope === scope)) next.pins.push({ id: value.id, key: value.key, scope });
+      next.pins = next.pins.filter((pin) => pin.key !== value.key || pin.scope !== scope);
+      next.pins.push({ id: value.id, key: value.key, scope, ...(operation.lifetime === "session" ? {} : { goalVersion: operation.goalVersion ?? 1 }) });
     } else next.pins = next.pins.filter((pin) => pin.key !== value.key || pin.scope !== scope);
   }
   if (next.pins.length > MAX_PINS) fail("At most 64 sources may be pinned.");
   return entries;
+}
+function planHandling({ next, index, operation }) {
+  ensureIds(operation.ids);
+  if (operation.ids.length !== 1 || !["active", "handled", "retired"].includes(operation.handling)) fail("Mark requires one source and an explicit handling state.");
+  ensureText(operation.reason, "Handling rationale", 600);
+  const value = currentValue(next, index, operation.ids[0], { key: operation.binding, allowHidden: true });
+  ensureVersion(operation.version);
+  if (value.version !== operation.version) fail("Handling source version is stale.");
+  const head = adoptValue(next, value);
+  head.handling = operation.handling;
+  head.handlingReason = operation.reason;
+  head.rendered = true;
+  if (operation.handling === "retired") next.pins = next.pins.filter((pin) => pin.key !== value.key);
+  return value.message ? writeView(next, value, head, value.content) : [];
 }
 function assertWritableValue(state, value) {
   const frame = state.frames.at(-1);
@@ -373,7 +396,7 @@ function planEdits({ next, index, operation, boundary }) {
   for (const nativeId of ids) {
     const id = logicalSource(index, nativeId);
     const value = currentValue(next, index, id);
-    if (value.head.readOnly && messageOf(source(index, id)).role === "user") fail("Human messages cannot be dropped.");
+    if (value.head.readOnly && (value.head.kind === "human" || messageOf(source(index, id)).role === "user")) fail("Human messages cannot be dropped.");
     if (next.pins.some((pin) => pin.key === value.key)) fail(`Pinned source ${id} must be explicitly unpinned first.`);
     const borrowed = next.frames.at(-1)?.refs.some((ref) => ref.id === id);
     if (borrowed) fail(`Referenced outer slot ${id} cannot be dropped.`);
@@ -385,6 +408,98 @@ function planEdits({ next, index, operation, boundary }) {
   for (const value of selected) {
     const owner = next.frames.find((frame) => frame.id === value.key.split("/")[0]);
     if (owner) owner.copies = owner.copies.filter((copy) => copy.id !== value.id);
+  }
+  return entries;
+}
+function sourceDataDraft(state, operation, selected, action, number = 0, owner = state.frames.at(-1)?.id ?? "root") {
+  const content = dataBlocks(selected.content);
+  if (!content.length) fail("Selection has no displayable source data; select a text or image part.");
+  const id = `${operation.id}:${action}:${number}`;
+  const head = {
+    entryId: id, field: "snapshot", version: contentVersion(content), kind: "memory", readOnly: false, rendered: true, handling: "active",
+    caveats: [...selected.caveats], sources: [...selected.provenance],
+    origin: { id: selected.id, version: selected.version, range: selected.range ?? null },
+  };
+  const draft = valueMessage({ id, key: `${owner}/${id}`, head }, content);
+  Object.assign(draft.details, { action, derived: true, referenceId: id, origin: head.origin });
+  return draft;
+}
+export async function prepareContextOperation({ state, branch, boundary, operation, projectRoot }) {
+  if (!["spill", "load"].includes(operation.action)) return { operation };
+  ensureIds(operation.ids);
+  if (operation.ids.length !== 1) fail("Artifact operations require exactly one versioned source.");
+  const index = sourceIndex(branch, boundary);
+  const selected = resolveSource(index, state, { id: operation.ids[0], binding: operation.binding, version: operation.version }, operation.sourceScope ?? "all");
+  if (operation.action === "spill") {
+    if (operation.range) fail("Load a range as a separate data copy before spilling it; do not remove an unselected remainder.");
+    const value = currentValue(state, index, selected.id, { key: selected.binding });
+    assertWritableValue(state, value);
+    if (value.head.readOnly) fail("Spill a loaded data copy, not an original Human instruction or executed call.");
+    const written = await writeContextArtifact({ projectRoot, relativePath: operation.path, source: selected.id, binding: selected.binding, version: selected.version, range: null, purpose: operation.purpose, caveats: selected.caveats, provenance: selected.provenance, content: selected.content });
+    if (!written.ok) fail(`${written.error}${written.possibleOrphan ? ` Artifact may remain at ${written.possibleOrphan.path}; no filesystem rollback was attempted.` : ""}`);
+    const artifact = written.artifact;
+    const pointer = `Context artifact ${artifact.path}; source ${selected.id} @${selected.version}; SHA-256 ${artifact.sha256}; ${artifact.bytes} bytes. Purpose: ${artifact.purpose}. Use compass_context load to verify and recover; availability is not a successful Goal check.`;
+    return { operation: { ...operation, artifact, pointer } };
+  }
+  const reference = selected.head?.field === "operation" ? index.byId.get(selected.head.entryId)?.message?.details?.contextOperation : null;
+  if (reference?.action !== "spill") return { operation };
+  const artifact = reference.artifact;
+  const loaded = await loadContextArtifact({ projectRoot, relativePath: artifact.path, artifact, source: artifact.source, binding: artifact.binding, version: artifact.version, range: artifact.range, purpose: artifact.purpose });
+  const content = dataBlocks(selectSourceRange(loaded.content, operation.range).content);
+  return {
+    operation: { ...operation, recovery: { artifact, payloadVersion: contentVersion(content) } },
+    content: [{ type: "text", text: "Verified artifact data queued for a native context copy; this is not a new Human instruction or acceptance result." }, ...content],
+  };
+}
+function planLoad({ next, index, operation, boundary }) {
+  ensureIds(operation.ids);
+  if (operation.ids.length !== 1) fail("Load requires exactly one versioned source.");
+  let selected = resolveSource(index, next, { id: operation.ids[0], binding: operation.binding, version: operation.version, range: operation.recovery ? undefined : operation.range }, operation.sourceScope ?? "all");
+  if (operation.recovery) {
+    const original = index.byId.get(selected.head?.entryId)?.message?.details?.contextOperation;
+    if (original?.action !== "spill" || contentVersion(original.artifact) !== contentVersion(operation.recovery.artifact)) fail("Artifact receipt changed before native load commit.");
+    const content = boundary.toolResults[0].content.slice(1);
+    if (contentVersion(content) !== operation.recovery.payloadVersion) fail("Verified artifact payload changed before commit.");
+    selected = { ...selected, content, version: original.artifact.version, caveats: original.artifact.caveats, provenance: original.artifact.provenance };
+  }
+  const draft = sourceDataDraft(next, operation, selected, "load");
+  return [...(operation.recovery ? [nativeEdit(boundary.toolResultEntryIds[0], [{ type: "text", text: `Verified artifact payload follows as ${draft.details.sourceId} @${draft.details.version}.` }])] : []), draft];
+}
+function planSpill({ next, index, operation, boundary }) {
+  ensureIds(operation.ids);
+  if (operation.ids.length !== 1 || !operation.artifact || typeof operation.pointer !== "string") fail("A verified artifact receipt is required before source removal.");
+  const value = currentValue(next, index, operation.ids[0], { key: operation.binding });
+  assertWritableValue(next, value);
+  if (value.head.readOnly || value.version !== operation.version || operation.artifact.version !== value.version || operation.artifact.source !== value.id) fail("Spill source changed or is read-only; the artifact may remain, but context was not removed.");
+  const head = {
+    entryId: boundary.toolResultEntryIds[0], field: "operation", version: contentVersion(operation.pointer), kind: "memory",
+    readOnly: false, rendered: true, handling: "active", caveats: [...value.head.caveats], sources: [...value.head.sources],
+  };
+  next.values[value.key] = head;
+  return writeView(next, value, head, operation.pointer);
+}
+function planMove({ next, index, operation }) {
+  ensureIds(operation.ids);
+  if (!operation.ids.length) fail("Select versioned source values to move to the append end.");
+  if (operation.range) fail("Load an exact range as a separate data value before moving it; a whole source cannot be silently split.");
+  const versions = new Map((operation.versions ?? []).map((item) => [item.id, item.version]));
+  const entries = [];
+  for (const id of operation.ids) {
+    const value = currentValue(next, index, id, { key: operation.binding });
+    assertWritableValue(next, value);
+    if (value.head.readOnly) fail("Move a loaded data copy, not an original Human instruction or executed call.");
+    const expected = operation.ids.length === 1 ? operation.version ?? versions.get(id) : versions.get(id);
+    ensureVersion(expected);
+    if (value.version !== expected) fail(`Source ${id} changed since selection.`);
+    const head = adoptValue(next, value);
+    head.rendered = true;
+    const protectedView = next.pins.some((pin) => pin.id === value.id && pin.key !== value.key);
+    if (!protectedView) {
+      const pointer = value.message.role === "toolResult" ? [{ type: "text", text: `Context relocation pointer, not original tool output: source ${value.id} @${value.version}; complete payload follows as retained data.` }] : null;
+      if (pointer) head.pointerVersion = contentVersion(pointer);
+      entries.push(nativeEdit(value.nativeId, pointer));
+    }
+    entries.push(valueMessage(value, value.content, head));
   }
   return entries;
 }
@@ -409,10 +524,15 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
     case "return": entries = planReturn(args); break;
     case "pin": case "unpin": entries = planPins(args); break;
     case "replace": case "drop": entries = planEdits(args); break;
+    case "load": entries = planLoad(args); break;
+    case "move": entries = planMove(args); break;
+    case "spill": entries = planSpill(args); break;
+    case "mark": entries = planHandling(args); break;
     default: fail(`Unknown context action ${operation.action}.`);
   }
   next.revision += 1;
-  if (!["call", "return"].includes(operation.action)) entries.push(nativeMessage(`Context ${operation.action} applied; revision ${next.revision}. Sources: ${(operation.ids ?? []).join(", ")}.`, { action: operation.action, revision: next.revision }));
+  const references = entries.filter((entry) => entry.type === "custom_message" && entry.customType === VALUE_MESSAGE_TYPE && entry.details.derived).map((entry) => ({ id: entry.details.sourceId, binding: entry.details.key, version: entry.details.version }));
+  if (!["call", "return"].includes(operation.action) || references.length) entries.push(nativeMessage(`Context ${operation.action} applied; revision ${next.revision}. Sources: ${(operation.ids ?? []).join(", ")}.${references.length ? ` Values: ${JSON.stringify(references)}` : ""}`, { action: operation.action, revision: next.revision, references }));
   return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: ["call", "return"].includes(operation.action) && boundary.outcome === "completed" };
 }
 
@@ -452,8 +572,8 @@ export function releaseWatchMessages(input, text) {
  * transcript. It is intentionally a custom/user-context message so text and image
  * blocks use Pi's normal provider conversion without granting source data system authority.
  */
-export function pinnedContextOverlay(branch, state, messages = []) {
-  const normalized = normalizeContextState(state);
+export function pinnedContextOverlay(branch, state, messages = [], goalVersion) {
+  const normalized = retentionForGoal(state, goalVersion);
   if (!normalized.pins.length) return [];
   const index = { byId: new Map(branch.map((entry) => [entry.id, entry])) };
   const present = new Set(messages.filter((message) => message.role !== "system" && message.content !== undefined).map((message) => contentVersion(message.content)));
@@ -475,6 +595,49 @@ export function pinnedContextOverlay(branch, state, messages = []) {
   return overlays;
 }
 
+export function retentionForGoal(input, goalVersion) {
+  const next = normalizeContextState(input);
+  if (Number.isSafeInteger(goalVersion)) next.pins = next.pins.filter((pin) => pin.goalVersion === undefined || pin.goalVersion === goalVersion);
+  return next;
+}
+
+/** Keep genuine structured answers by immutable source reference, not by copying a child exchange. */
+export function planObservationBoundary({ state: input, branch, boundary, goalVersion = 1 }) {
+  const next = normalizeContextState(input);
+  const expired = next.pins.filter((pin) => pin.goalVersion !== undefined && pin.goalVersion !== goalVersion);
+  if (!expired.length && !(boundary.toolResults ?? []).some((result) => /ask.*user.*question|ask_user_question/i.test(result.toolName))) return null;
+  const index = sourceIndex(branch, boundary);
+  const entries = [];
+  next.pins = next.pins.filter((pin) => !expired.includes(pin));
+  for (const key of new Set(expired.map((pin) => pin.key))) {
+    if (next.pins.some((pin) => pin.key === key)) continue;
+    const id = key.slice(key.indexOf("/") + 1);
+    const value = currentValue(next, index, id, { key, allowHidden: true });
+    const head = next.values[key];
+    head.handling = "retired";
+    head.handlingReason = "The owning Goal version ended.";
+    if (value.message) entries.push(...writeView(next, value, head, value.content));
+  }
+  for (const id of boundary.toolResultEntryIds ?? []) {
+    const entry = index.byId.get(id);
+    const content = questionnaireContent(entry);
+    const key = `root/${id}`;
+    if (!content || next.values[key]) continue;
+    const pointer = [{ type: "text", text: `Historical Human answer ${id} is retained as structured data below; this pointer is not a new decision.` }];
+    const head = {
+      entryId: id, field: "questionnaire", version: contentVersion(content), kind: "human", readOnly: true, rendered: true,
+      handling: "active", caveats: [], sources: [id], pointerVersion: contentVersion(pointer),
+    };
+    next.values[key] = head;
+    next.pins.push({ id, key, scope: "root", goalVersion });
+    entries.push(nativeEdit(id, pointer), valueMessage({ id, key, head, content }));
+  }
+  if (!entries.length && !expired.length) return null;
+  next.revision += 1;
+  entries.push(nativeMessage(`Context observations retained; revision ${next.revision}. Human handling remains explicit.`, { action: "observation", revision: next.revision }));
+  return { state: next, entries: transitionEntries(next, branch, boundary, { id: `${branch.at(-1)?.id ?? "root"}:observation` }, entries) };
+}
+
 /** Materialize the same qualified snapshots at an existing native boundary, without another request. */
 export function planRetentionBoundary({ state: input, branch, boundary }) {
   const next = normalizeContextState(input);
@@ -487,28 +650,11 @@ export function planRetentionBoundary({ state: input, branch, boundary }) {
   return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: false };
 }
 
-/** Search remains lexical until M3 adds explicit historical loading and semantic ranking. */
-export function searchContext(branch, boundary, state, { query = "", ids = [], limit = 8 } = {}) {
-  ensureIds(ids);
-  if (typeof query !== "string" || query.length > 400 || !Number.isInteger(limit) || limit < 1 || limit > 16) fail("Search requires query <=400 characters and limit 1..16.");
-  const index = sourceIndex(branch, boundary);
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-  const selected = new Set(ids);
-  const seen = new Set();
-  const hits = [];
-  for (const item of [...index.active.values()].reverse()) {
-    if (!item.messages.length) continue;
-    const id = logicalSource(index, item.sourceEntry.id);
-    if (selected.size && !selected.has(id)) continue;
-    const value = currentValue(state, index, id);
-    if (seen.has(value.key)) continue;
-    seen.add(value.key);
-    const text = textOf(value.content);
-    const lower = text.toLowerCase();
-    if (!terms.every((term) => lower.includes(term))) continue;
-    const start = terms.length ? Math.max(0, lower.indexOf(terms[0]) - 80) : 0;
-    hits.push({ id, binding: value.key, role: value.message.role, kind: value.head.kind, version: value.version, chars: text.length, pinned: state.pins.some((pin) => pin.key === value.key), caveats: value.head.caveats, sources: value.head.sources, excerpt: text.slice(start, start + 600) });
-    if (hits.length === limit) break;
-  }
-  return { revision: state.revision, frame: state.frames.at(-1)?.id ?? "root", hits };
+/** On-demand lexical recovery; no cross-session store or sibling-branch traversal. */
+export function searchContext(branch, boundary, state, options = {}) {
+  const result = searchSources(sourceIndex(branch, boundary), state, { ...options, scope: options.sourceScope ?? options.scope ?? "active" });
+  return {
+    revision: state.revision, frame: state.frames.at(-1)?.id ?? "root", ...result,
+    hits: result.hits.map((hit) => ({ ...hit, sources: hit.provenance, kind: state.values[hit.binding]?.kind ?? hit.kind ?? (hit.role === "user" ? "human" : "working"), pinned: state.pins.some((pin) => pin.key === hit.binding) })),
+  };
 }

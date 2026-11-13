@@ -75,7 +75,9 @@ import {
   pinnedContextOverlay,
   planContextBoundary,
   planRetentionBoundary,
+  planObservationBoundary,
   planWatchBoundary,
+  prepareContextOperation,
   releaseWatchMessages,
   restoreContextState,
   searchContext,
@@ -1161,14 +1163,21 @@ function contextOperationSchema() {
   const version = Type.String({ pattern: "^[a-f0-9]{24}$", maxLength: 24, description: "Value version returned by search or a mutation receipt; edits fail closed if it changed." });
   const binding = Type.String({ maxLength: 129, description: "Optional exact scoped binding from search; defaults to the current lexical binding." });
   return Type.Object({
-    action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "replace", "drop"] }),
-    expectedRevision: Type.Integer({ minimum: 0, description: "Context revision from the latest compass_context result." }),
+    action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "replace", "drop", "load", "move", "spill", "mark"] }),
+    expectedRevision: Type.Integer({ minimum: 0, description: "Context revision from the latest committed native context receipt or compass_state cursor." }),
     task: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "Required for call: the local procedure and objective." })),
     capture: Type.Optional(Type.Array(Type.Object({ id: sourceId, mode: Type.String({ enum: ["ref", "copy"] }), version, binding: Type.Optional(binding) }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true })),
     exportIds: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Sources explicitly returned to the parent frame; default none." })),
-    ids: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Sources for pin/unpin/replace/drop." })),
+    ids: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Exact source IDs for retrieval, retention, movement, spill or edits." })),
     version: Type.Optional(version),
     binding: Type.Optional(binding),
+    sourceScope: Type.Optional(Type.String({ enum: ["active", "parent", "history", "all"], description: "Source recovery scope; active branch only, never sibling sessions." })),
+    path: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Explicit project-relative artifact path for spill; no overwrite or symlink traversal." })),
+    handling: Type.Optional(Type.String({ enum: ["active", "handled", "retired"] })),
+    reason: Type.Optional(Type.String({ minLength: 1, maxLength: 600, description: "Handling/retirement rationale; retired values are unpinned." })),
+    lifetime: Type.Optional(Type.String({ enum: ["goal", "session"], description: "Retention lifetime, default current Goal. Frame ownership still ends on return." })),
+    purpose: Type.Optional(Type.String({ minLength: 1, maxLength: 1000, description: "Why this spill artifact is needed." })),
+    range: Type.Optional(Type.Object({ part: Type.Optional(Type.Integer({ minimum: 0 })), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }, { additionalProperties: false, description: "Exact part/line selection bound to the full source version. Images support part selection without line bounds." })),
     scope: Type.Optional(Type.String({ maxLength: 64, description: "Pin ownership: root or an active frame ID; defaults to the current frame." })),
     kind: Type.Optional(Type.String({ enum: ["working", "memory", "human", "skill"], description: "Value classification, not proof or an authorization grant." })),
     caveats: Type.Optional(Type.Array(Type.String({ maxLength: 600 }), { maxItems: 12, description: "Material qualifications; omitted writes preserve existing caveats." })),
@@ -1183,10 +1192,10 @@ function contextOperationSchema() {
 function registerContextTool(pi: any) {
   return registerOnce(pi, "compass_context", {
     label: "Context Frames",
-    description: "Manage same-session attention frames without starting another Pi session. call enters a local task with explicit ref/copy capture; return restores the parent view with explicit exports. search returns stable source IDs and versions. replace/drop use optimistic version checks and preserve Human messages/tool exchanges.",
+    description: "Manage same-session attention frames without starting another Pi session. call enters a local task with explicit ref/copy capture; return restores the parent view with explicit exports. search recovers active/parent/history sources and versioned ranges. load creates an explicit data copy or verifies a spill receipt; move relocates whole working values without replaying calls. spill verifies a project artifact before pointer replacement. mark updates handling; retirement unpins. replace/drop preserve Human originals/tool exchanges.",
     promptSnippet: "Use same-session context frames only when isolating attention reduces total work; capture and export are explicit and default to none.",
     promptGuidelines: [
-      "This changes the next native context projection, not Pi's append-only transcript or the filesystem.",
+      "Frames/edits change attention, not Pi's append-only transcript or environment. Spill writes an explicit artifact; no filesystem rollback occurs.",
       "Use search only when needed. Pass stable source IDs and versions; never infer them from message positions.",
       "A ref is shared and survives interruption; a copy is private and forks on write. Human originals and executed calls are read-only; explicit private copies are data.",
       "A frame cannot return while it owns active pi-await watches; cancel or explicitly transfer them first.",
@@ -1206,12 +1215,13 @@ function registerContextTool(pi: any) {
           const result = searchContext(branch, { context: contextBoundaryPreview(ctx) }, contextState, params);
           return readResult(JSON.stringify(result), { contextRevision: contextState.revision, hits: result.hits.length });
         }
-        if (!["call", "return", "pin", "unpin", "replace", "drop"].includes(action)) {
+        if (!["call", "return", "pin", "unpin", "replace", "drop", "load", "move", "spill", "mark"].includes(action)) {
           throw new Error(`Unknown context action ${action}. No context changed.`);
         }
-        const operation = { ...params, callId: toolCallId };
+        const prepared = await prepareContextOperation({ state: contextState, branch: ctx?.sessionManager?.getBranch?.() ?? [], boundary: { context: contextBoundaryPreview(ctx) }, operation: { ...params, callId: toolCallId, goalVersion: state.goal.version }, projectRoot: contextCwd(ctx) });
+        const operation = prepared.operation;
         return {
-          content: [{ type: "text", text: `Context action ${action} queued for the native turn boundary; no new session or Agent Loop will be created.` }],
+          content: prepared.content ?? [{ type: "text", text: `Context action ${action} queued for the native turn boundary; no new session or Agent Loop will be created.${operation.artifact ? ` Artifact verified at ${operation.artifact.path}; if native commit fails, it remains on disk.` : ""}` }],
           details: { contextOperation: operation, contextRevision: contextState.revision },
         };
       });
@@ -2208,7 +2218,7 @@ export default function (pi: any) {
         if (messages.length !== event.messages.length) return { messages };
         return;
       }
-      const overlays = pinnedContextOverlay(branch, committed, messages);
+      const overlays = pinnedContextOverlay(branch, committed, messages, state.goal.version);
       const output = [...messages, ...overlays];
       if (messages.length !== event.messages.length || overlays.length) return { messages: output };
     } catch (error) {
@@ -2246,7 +2256,7 @@ export default function (pi: any) {
           customType: CONTEXT_MESSAGE_TYPE,
           content: `Context operation rejected: ${message}`,
           display: false,
-          details: { contextError: true },
+          details: { contextError: true, status: "rejected", stateChanged: false, contextRevision: contextState.revision },
         }],
         continue: false,
       };
@@ -2260,8 +2270,14 @@ export default function (pi: any) {
       const branch = ctx?.sessionManager?.getBranch?.() ?? [];
       const proposed = (event.entries ?? []).findLast((entry: any) => entry.type === "custom" && entry.customType === CONTEXT_STATE_TYPE);
       const input = proposed ? normalizeContextState(proposed.data) : restoreContext(ctx);
-      const planned = planRetentionBoundary({ state: input, branch, boundary: event });
-      if (planned) return { entries: [...(event.entries ?? []), ...planned.entries] };
+      const observed = planObservationBoundary({ state: input, branch, boundary: event, goalVersion: state.goal.version });
+      const prefix = [...(event.entries ?? []), ...(observed?.entries ?? [])];
+      // Only our appended data snapshots are synthesized here. Native view edits
+      // remain Pi-owned; the following presence check never attributes other content.
+      const snapshots = (observed?.entries ?? []).filter((entry: any) => entry.type === "custom_message" && entry.customType === "pi-compass-v2.value").map((entry: any) => ({ ...entry, role: "custom", timestamp: 0 }));
+      const preview = { ...event, entries: prefix, context: { ...event.context, contextMessages: [...event.context.contextMessages, ...snapshots] } };
+      const planned = planRetentionBoundary({ state: observed?.state ?? input, branch, boundary: preview });
+      if (observed || planned) return { entries: [...prefix, ...(planned?.entries ?? [])] };
     } catch (error) {
       ctx?.abort?.();
       throw error;
