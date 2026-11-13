@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { emptyDagState, readyTasks, createOrRevisePlan, taskAssessmentBinding, taskAssessmentIsCurrent } from "./dag-core.mjs";
 import { approvalIsCurrent, clearDagApprovalAnswer, createDagApprovalRequest, dagApprovalBinding, matchesDagApprovalQuestion } from "./dag-approval.mjs";
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
@@ -286,10 +286,11 @@ function normalizeRouteSet(value, fallbackGoalVersion = 1) {
       authorized: value.exploration.authorized === true,
       scope: clip(value.exploration.scope, 500),
       budget: Number.isInteger(value.exploration.budget) && value.exploration.budget > 0 ? value.exploration.budget : 0,
-      routeIds: Array.isArray(value.exploration.routeIds) ? value.exploration.routeIds.filter((id) => routeIds.has(id)).slice(0, 12) : [],
+      routeIds: Array.isArray(value.exploration.routeIds) ? value.exploration.routeIds.filter((id) => routeIds.has(id)).slice(0, 3) : [],
       sourceEntryId: clip(value.exploration.sourceEntryId, 128),
       authorizedAt: typeof value.exploration.authorizedAt === "string" ? value.exploration.authorizedAt.slice(0, 64) : null,
-    } : { authorized: false, scope: "", budget: 0, routeIds: [], sourceEntryId: "", authorizedAt: null },
+      proposalBinding: clip(value.exploration.proposalBinding, 128),
+    } : { authorized: false, scope: "", budget: 0, routeIds: [], sourceEntryId: "", authorizedAt: null, proposalBinding: "" },
     competitorRuns,
     comparison: value.comparison && typeof value.comparison === "object" ? {
       status: ["unverified", "inconclusive", "accepted"].includes(value.comparison.status) ? value.comparison.status : "unverified",
@@ -308,13 +309,15 @@ function normalizeRouteCriteriaResults(value) {
   }));
 }
 
-function routeSetBinding(routeSet) {
+function routeSetBinding(routeSet, goal = "") {
   return createHash("sha256").update(JSON.stringify({
     id: routeSet.id,
     goalVersion: routeSet.goalVersion,
+    goal,
     baselineRef: routeSet.baselineRef,
     acceptanceCriteria: routeSet.acceptanceCriteria,
-    routes: routeSet.routes.map((route) => ({ routeId: route.routeId, summary: route.summary, status: route.status })),
+    routes: routeSet.routes.map((route) => ({ ...route })),
+    exploration: Object.fromEntries(Object.entries(routeSet.exploration).filter(([key]) => key !== "proposalBinding")),
   })).digest("hex");
 }
 function canonicalDirective(value) {
@@ -2185,16 +2188,70 @@ function routeInput(stateValue, input) {
   return state;
 }
 
-function routeOptionQuestion(routeSet) {
+function routeOptionQuestion(state, includeExploration = false) {
+  const routeSet = state.routeSet;
+  const routePreview = (route) => [
+    `Current Goal v${state.goal.version}: ${state.goal.current}`,
+    `RouteSet ${routeSet.id}; baseline=${routeSet.baselineRef}`,
+    `Route ${route.routeId}: ${route.summary}`,
+    `Rationale: ${route.rationale || "not specified"}`,
+    `Assumptions: ${route.assumptions.join("; ") || "none specified"}`,
+    `Dependencies: ${route.dependencies.join("; ") || "none specified"}`,
+    `Expected cost: ${route.expectedCost}; expected latency: ${route.expectedLatency}`,
+    `Risks: ${route.risks.join("; ") || "none specified"}`,
+    `Shared acceptance criteria:\n${routeSet.acceptanceCriteria.map((item) => `- ${item.id}: ${item.text}`).join("\n")}`,
+  ].join("\n");
   return {
-    question: "Which route should Compass use for this Goal, or should explicitly authorized parallel exploration compare alternatives?",
+    question: "Which route should Compass use for this Goal?",
     header: "Route selection",
     multiSelect: false,
     options: [
-      ...routeSet.routes.map((route) => ({ label: route.routeId, description: route.summary })),
-      { label: "parallel_exploration", description: "Authorize parallel route exploration only after you provide an explicit scope and competitor budget." },
+      ...routeSet.routes.map((route) => ({ label: route.routeId, description: route.summary, preview: routePreview(route) })),
+      ...(includeExploration ? [{
+        label: "parallel_exploration",
+        description: "Authorize exactly the proposed parallel exploration.",
+        preview: [
+          `Current Goal v${state.goal.version}: ${state.goal.current}`,
+          `RouteSet ${routeSet.id}; baseline=${routeSet.baselineRef}`,
+          `Alternatives (proposed routes marked [included]):\n${routeSet.routes.map((route) => `- ${routeSet.exploration.routeIds.includes(route.routeId) ? "[included] " : "[not included] "}${route.routeId}: ${route.summary}; rationale=${route.rationale || "not specified"}; assumptions=${route.assumptions.join("; ") || "none"}; dependencies=${route.dependencies.join("; ") || "none"}; cost=${route.expectedCost}; latency=${route.expectedLatency}; risks=${route.risks.join("; ") || "none"}`).join("\n")}`,
+          `Shared acceptance criteria:\n${routeSet.acceptanceCriteria.map((item) => `- ${item.id}: ${item.text}`).join("\n")}`,
+          `Proposed scope: ${routeSet.exploration.scope}`,
+          `Maximum competitor runs: ${routeSet.exploration.budget}`,
+        ].join("\n"),
+      }] : []),
     ],
   };
+}
+
+function sameJsonValue(left, right) {
+  if (left === right) return true;
+  if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => sameJsonValue(value, right[index]));
+  }
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length && leftKeys.every((key, index) =>
+    key === rightKeys[index] && sameJsonValue(left[key], right[key]));
+}
+
+function renewRouteSelectionRequest(state, includeExploration = false) {
+  const routeSet = state.routeSet;
+  const request = {
+    id: randomUUID(),
+    binding: "",
+    goalVersion: state.goal.version,
+    status: "awaiting_questionnaire",
+    sourceEntryId: "",
+    toolCallId: "",
+    questionnaire: null,
+    createdAt: timestamp(),
+  };
+  routeSet.selectionRequest = request;
+  request.questionnaire = routeOptionQuestion(state, includeExploration);
+  request.binding = routeSetBinding(routeSet, state.goal.current);
+  return request;
 }
 
 export function createRouteSet(stateValue, input = {}) {
@@ -2215,7 +2272,7 @@ export function createRouteSet(stateValue, input = {}) {
     if (!item || typeof item !== "object") throw new Error(`acceptanceCriteria[${index}] must be a string or object. No state changed.`);
     return { id: nonEmpty(item.id, `acceptanceCriteria[${index}].id`, 32), text: nonEmpty(item.text, `acceptanceCriteria[${index}].text`, 300) };
   });
-  if (!Array.isArray(input.routes) || input.routes.length < 2 || input.routes.length > 12) throw new Error("routes must contain 2..12 alternatives. No state changed.");
+  if (!Array.isArray(input.routes) || input.routes.length < 2 || input.routes.length > 3) throw new Error("routes must contain 2..3 alternatives so the Human questionnaire stays within Pi's four-option limit. No state changed.");
   const ids = new Set();
   const routes = input.routes.map((route, index) => {
     if (!route || typeof route !== "object") throw new Error(`routes[${index}] must be an object. No state changed.`);
@@ -2248,23 +2305,13 @@ export function createRouteSet(stateValue, input = {}) {
     selectedRouteId: null,
     winningRouteId: null,
     stateVersion: 1,
-    selectionRequest: {
-      id: `${id}-select`,
-      binding: "",
-      goalVersion: state.goal.version,
-      status: "awaiting_questionnaire",
-      sourceEntryId: "",
-      toolCallId: "",
-      questionnaire: null,
-      createdAt: timestamp(),
-    },
-    exploration: { authorized: false, scope: "", budget: 0, routeIds: [], sourceEntryId: "", authorizedAt: null },
+    selectionRequest: null,
+    exploration: { authorized: false, scope: "", budget: 0, routeIds: [], sourceEntryId: "", authorizedAt: null, proposalBinding: "" },
     competitorRuns: [],
     comparison: { status: "unverified", summary: "", caveats: [] },
   };
-  routeSet.selectionRequest.questionnaire = routeOptionQuestion(routeSet);
-  routeSet.selectionRequest.binding = routeSetBinding(routeSet);
   state.routeSet = routeSet;
+  renewRouteSelectionRequest(state);
   appendEvent(state, "route_set_created", { summary: `RouteSet ${id} created with ${routes.length} alternatives.`, ref: id });
   return { state, routeSet };
 }
@@ -2272,10 +2319,11 @@ export function createRouteSet(stateValue, input = {}) {
 export function bindRouteSetQuestionnaire(stateValue, input, sourceEntryId, toolCallId = "") {
   const state = routeInput(stateValue, input);
   const request = state.routeSet.selectionRequest;
-  if (!request || !["awaiting_questionnaire", "presented"].includes(request.status)) return { state, bound: false };
+  if (!request || request.status !== "awaiting_questionnaire") return { state, bound: false };
   if (typeof sourceEntryId !== "string" || !sourceEntryId.trim()) return { state, bound: false };
   const provided = input?.questionnaire ?? input;
-  if (JSON.stringify(provided) !== JSON.stringify(request.questionnaire)) return { state, bound: false };
+  if (!sameJsonValue(provided, { questions: [request.questionnaire] })
+    || request.binding !== routeSetBinding(state.routeSet, state.goal.current)) return { state, bound: false };
   request.sourceEntryId = sourceEntryId.slice(0, 128);
   request.toolCallId = typeof toolCallId === "string" ? toolCallId.slice(0, 128) : "";
   request.status = "presented";
@@ -2286,22 +2334,31 @@ export function recordRouteSelection(stateValue, input = {}) {
   const state = routeInput(stateValue, input);
   const request = state.routeSet.selectionRequest;
   if (!request || request.status !== "presented" || request.id !== input.selectionRequestId || request.sourceEntryId !== input.sourceEntryId) throw new Error("Route selection questionnaire identity is stale or was not presented. No state changed.");
+  if (request.binding !== routeSetBinding(state.routeSet, state.goal.current)) throw new Error("Route selection proposal changed after presentation. No state changed.");
   const questionnaire = input.questionnaire;
   const answer = questionnaire?.answers?.length === 1 ? questionnaire.answers[0] : null;
-  if (!answer || questionnaire.outcome !== "answered" || questionnaire.unanswered?.length || answer.kind !== "option" || answer.answer !== answer.selected?.[0]) throw new Error("Route selection requires one clear structured Human answer. No state changed.");
+  const expectedQuestion = request.questionnaire.question;
+  if (!answer || questionnaire.outcome !== "answered" || questionnaire.unanswered?.length
+    || questionnaire.globalNote?.trim() || answer.questionIndex !== 0 || answer.question !== expectedQuestion
+    || answer.kind !== "option" || answer.notes?.trim()
+    || !Array.isArray(answer.selected) || answer.selected.length !== 1 || answer.answer !== answer.selected[0]) {
+    throw new Error("Route selection requires one clear, note-free, correlated structured Human answer. No state changed.");
+  }
   const selected = answer.answer;
   const route = state.routeSet.routes.find((item) => item.routeId === selected);
   if (selected === "parallel_exploration") {
-    const scope = nonEmpty(input.exploration?.scope, "exploration.scope", 500);
-    const budget = input.exploration?.budget;
-    if (!Number.isInteger(budget) || budget < 2 || budget > 24) throw new Error("exploration.budget must be an integer from 2 to 24. No state changed.");
-    const routeIds = input.exploration?.routeIds ?? state.routeSet.routes.map((item) => item.routeId);
-    if (!Array.isArray(routeIds) || routeIds.length < 2 || routeIds.some((id) => !state.routeSet.routes.some((item) => item.routeId === id))) throw new Error("exploration.routeIds must name at least two exact RouteSet routes. No state changed.");
-    state.routeSet.exploration = { authorized: true, scope, budget, routeIds: [...new Set(routeIds)], sourceEntryId: input.sourceEntryId.slice(0, 128), authorizedAt: timestamp() };
+    const proposal = state.routeSet.exploration;
+    if (proposal.authorized || !proposal.scope || !proposal.budget || proposal.routeIds.length < 2
+      || proposal.proposalBinding !== routeSetBinding(state.routeSet, state.goal.current)) {
+      throw new Error("No current scoped and budgeted exploration proposal is available for Human authorization. No state changed.");
+    }
+    proposal.authorized = true;
+    proposal.sourceEntryId = input.sourceEntryId.slice(0, 128);
+    proposal.authorizedAt = timestamp();
     request.status = "answered";
     state.routeSet.stateVersion += 1;
-    appendEvent(state, "route_exploration_authorized", { summary: `Human authorized parallel exploration for ${state.routeSet.id}.`, ref: state.routeSet.id });
-    return { state, selected: null, exploration: state.routeSet.exploration };
+    appendEvent(state, "route_exploration_authorized", { summary: `Human authorized the exact exploration proposal for ${state.routeSet.id}.`, ref: state.routeSet.id });
+    return { state, selected: null, exploration: proposal };
   }
   if (!route) throw new Error(`Unknown or stale route identity "${selected}". No state changed.`);
   bindSelectedRoute(state, route);
@@ -2311,20 +2368,34 @@ export function recordRouteSelection(stateValue, input = {}) {
   return { state, selected: route.routeId, exploration: state.routeSet.exploration };
 }
 
-export function authorizeRouteExploration(stateValue, input = {}) {
+export function proposeRouteExploration(stateValue, input = {}) {
   const state = routeInput(stateValue, input);
-  const sourceDecisionId = nonEmpty(input.sourceDecisionId, "sourceDecisionId", 32);
-  const decision = state.humanDecisions.find((item) => item.id === sourceDecisionId && item.goalVersion === state.goal.version);
-  if (!decision) throw new Error("Parallel exploration requires an exact current-Goal Human decision identity. No state changed.");
+  if (state.routeSet.competitorRuns.some((run) => ["registered", "running", "unknown", "cancel_requested", "cancel_acknowledged"].includes(run.status))) {
+    throw new Error("Cannot replace an exploration proposal while a competitor run is unresolved. No state changed.");
+  }
   const scope = nonEmpty(input.scope, "scope", 500);
   const budget = input.budget;
   if (!Number.isInteger(budget) || budget < 2 || budget > 24) throw new Error("budget must be an integer from 2 to 24. No state changed.");
-  const routeIds = input.routeIds ?? state.routeSet.routes.map((item) => item.routeId);
-  if (!Array.isArray(routeIds) || routeIds.length < 2 || routeIds.some((id) => !state.routeSet.routes.some((item) => item.routeId === id))) throw new Error("routeIds must name at least two exact RouteSet routes. No state changed.");
-  state.routeSet.exploration = { authorized: true, scope, budget, routeIds: [...new Set(routeIds)], sourceEntryId: decision.sourceEntryId, authorizedAt: timestamp() };
+  const routeIds = input.routeIds;
+  if (!Array.isArray(routeIds) || routeIds.length < 2 || routeIds.length > 3
+    || new Set(routeIds).size !== routeIds.length
+    || routeIds.some((id) => !state.routeSet.routes.some((item) => item.routeId === id))) {
+    throw new Error("routeIds must name 2..3 distinct exact RouteSet routes. No state changed.");
+  }
+  state.routeSet.exploration = {
+    authorized: false,
+    scope,
+    budget,
+    routeIds: [...routeIds],
+    sourceEntryId: "",
+    authorizedAt: null,
+    proposalBinding: "",
+  };
+  renewRouteSelectionRequest(state, true);
+  state.routeSet.exploration.proposalBinding = routeSetBinding(state.routeSet, state.goal.current);
   state.routeSet.stateVersion += 1;
-  appendEvent(state, "route_exploration_authorized", { summary: `Human decision ${sourceDecisionId} authorized parallel exploration.`, ref: state.routeSet.id });
-  return { state, exploration: state.routeSet.exploration };
+  appendEvent(state, "route_exploration_proposed", { summary: `A scoped exploration proposal was prepared for ${state.routeSet.id}; Human authorization is pending.`, ref: state.routeSet.id });
+  return { state, exploration: state.routeSet.exploration, selectionRequest: state.routeSet.selectionRequest };
 }
 
 export function registerCompetitorRun(stateValue, input = {}) {
@@ -2389,9 +2460,6 @@ function routeSetComparison(state) {
 
 function bindSelectedRoute(state, route) {
   const plan = state.plan;
-  if (plan.tasks.length && plan.routeId && plan.routeId !== route.routeId) {
-    throw new Error(`The current DAG belongs to route ${plan.routeId}; revise the DAG before switching routes. No state changed.`);
-  }
   if (plan.tasks.length && plan.routeId !== route.routeId
     && plan.execution && ["dispatching", "running", "unknown"].includes(plan.execution.status)) {
     throw new Error("Reconcile the unresolved DAG execution before binding a route. No state changed.");
@@ -2415,6 +2483,9 @@ export function selectRoute(stateValue, input = {}) {
   const state = routeInput(stateValue, input);
   const route = state.routeSet.routes.find((item) => item.routeId === input.routeId);
   if (!route) throw new Error(`Unknown or stale route identity "${input.routeId}". No state changed.`);
+  if (state.routeSet.selectedRouteId !== route.routeId && route.acceptanceGate !== "passed") {
+    throw new Error("A route can be selected directly only if it was already Human-selected or passed the shared acceptance gate. Use its correlated Human questionnaire to switch. No state changed.");
+  }
   bindSelectedRoute(state, route);
   if (route.acceptanceGate === "passed") {
     state.routeSet.winningRouteId = route.routeId;
