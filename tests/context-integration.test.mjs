@@ -124,6 +124,47 @@ test("a later handler cannot silently change committed control metadata", async 
   assert.ok(host.errors.some((error) => /changed|persisted/.test(error.error)));
 });
 
+test("request-side pin overlay restores omitted text and image values after native compaction", async () => {
+  const host = await setup();
+  const imageValue = host.manager.appendCustomMessageEntry("test-value", [
+    { type: "text", text: "Pinned evidence" },
+    { type: "image", mimeType: "image/png", data: "aW1hZ2U=" },
+  ], false);
+  await host.turn({ action: "pin", expectedRevision: 0, ids: [imageValue], kind: "memory", caveats: ["Retain the original evidence."] });
+  const before = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  assert.equal(before.filter((message) => message.customType === "pi-compass-v2.value").length, 0, "visible pins need no overlay");
+  host.manager.appendCompaction("Native summary omitted the pinned evidence.", null, 0, {}, true);
+  const after = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  const overlays = after.filter((message) => message.customType === "pi-compass-v2.value");
+  assert.equal(overlays.length, 1);
+  assert.deepEqual(overlays[0].content.slice(-1), [{ type: "image", mimeType: "image/png", data: "aW1hZ2U=" }]);
+  assert.match(JSON.stringify(overlays[0].content), /Retain the original evidence/);
+  assert.deepEqual(host.errors, []);
+});
+
+test("request-side pin overlay is deduplicated when an equivalent retained view is already present", async () => {
+  const host = await setup();
+  const id = user(host.manager, "Pinned Human requirement");
+  await host.turn({ action: "pin", expectedRevision: 0, ids: [id], caveats: ["Keep this requirement."] });
+  const first = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  assert.equal(first.filter((message) => message.customType === "pi-compass-v2.value").length, 0);
+  host.manager.appendCompaction("Summary", null, 0, {}, true);
+  const second = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
+  const third = await host.runner.emitContext(second);
+  assert.equal(second.filter((message) => message.customType === "pi-compass-v2.value").length, 1);
+  assert.equal(third.filter((message) => message.customType === "pi-compass-v2.value").length, 1, "the same request overlay is not duplicated by composition");
+});
+
+test("missing native projection aborts request-side pin restoration instead of silently omitting the pin", async () => {
+  const host = await setup();
+  const id = user(host.manager, "Pinned requirement");
+  await host.turn({ action: "pin", expectedRevision: 0, ids: [id] });
+  host.manager.buildSessionProjection = undefined;
+  await host.runner.emitContext([{ role: "user", content: "Continue", timestamp: Date.now() }]);
+  assert.equal(host.aborted(), true);
+  assert.ok(host.errors.some((error) => /projection is unavailable/.test(error.error)));
+});
+
 test("nested Code Mode mutation is blocked before returning an unexecutable queued operation", async () => {
   const host = await setup();
   const result = await host.runner.emitToolCall({

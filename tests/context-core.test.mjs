@@ -103,9 +103,9 @@ test("editing a captured copy does not modify its enclosing value", () => {
   const manager = host();
   const input = value(manager, "outer value");
   applyOperation(manager, { action: "call", task: "private", capture: [capture(manager, input, "copy")] });
-  const local = manager.getBranch().find((entry) => entry.type === "custom_message" && entry.details?.mode === "copy");
-  assert.ok(local);
-  applyOperation(manager, { action: "replace", ids: [local.id], version: sourceVersion(manager, local.id), content: "private changed value" });
+  assert.ok(!manager.getBranch().some((entry) => entry.customType === "pi-compass-v2.value"), "unchanged generic copies do not duplicate a value body");
+  applyOperation(manager, { action: "replace", ids: [input], version: sourceVersion(manager, input), content: "private changed value" });
+  assert.ok(manager.getBranch().some((entry) => entry.customType === "pi-compass-v2.value"), "the private data view is created on first write");
   assert.match(modelText(manager), /private changed value/);
   applyOperation(manager, { action: "return" });
   assert.match(modelText(manager), /outer value/);

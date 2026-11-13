@@ -67,6 +67,7 @@ import {
   CONTEXT_MESSAGE_TYPE,
   CONTEXT_STATE_TYPE,
   emptyContextState,
+  pinnedContextOverlay,
   planContextBoundary,
   planWatchBoundary,
   releaseWatchMessages,
@@ -1122,15 +1123,21 @@ function restoreContext(ctx: any) {
 }
 function contextOperationSchema() {
   const sourceId = Type.String({ minLength: 1, maxLength: 64, description: "Stable source entry ID returned by compass_context search; never use a message index." });
-  const version = Type.String({ pattern: "^[a-f0-9]{24}$", maxLength: 24, description: "Source version returned by search; edits fail closed if it changed." });
+  const version = Type.String({ pattern: "^[a-f0-9]{24}$", maxLength: 24, description: "Value version returned by search or a mutation receipt; edits fail closed if it changed." });
+  const binding = Type.String({ maxLength: 129, description: "Optional exact scoped binding from search; defaults to the current lexical binding." });
   return Type.Object({
     action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "replace", "drop"] }),
     expectedRevision: Type.Integer({ minimum: 0, description: "Context revision from the latest compass_context result." }),
     task: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "Required for call: the local procedure and objective." })),
-    capture: Type.Optional(Type.Array(Type.Object({ id: sourceId, mode: Type.String({ enum: ["ref", "copy"] }), version }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true })),
+    capture: Type.Optional(Type.Array(Type.Object({ id: sourceId, mode: Type.String({ enum: ["ref", "copy"] }), version, binding: Type.Optional(binding) }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true })),
     exportIds: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Sources explicitly returned to the parent frame; default none." })),
     ids: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Sources for pin/unpin/replace/drop." })),
     version: Type.Optional(version),
+    binding: Type.Optional(binding),
+    scope: Type.Optional(Type.String({ maxLength: 64, description: "Pin ownership: root or an active frame ID; defaults to the current frame." })),
+    kind: Type.Optional(Type.String({ enum: ["working", "memory", "human", "skill"], description: "Value classification, not proof or an authorization grant." })),
+    caveats: Type.Optional(Type.Array(Type.String({ maxLength: 600 }), { maxItems: 12, description: "Material qualifications; omitted writes preserve existing caveats." })),
+    sources: Type.Optional(Type.Array(sourceId, { maxItems: 32, uniqueItems: true, description: "Existing branch-local evidence source IDs for derived replacements." })),
     versions: Type.Optional(Type.Array(Type.Object({ id: sourceId, version }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true, description: "Required for action=drop: the observed version of every selected source." })),
     content: Type.Optional(Type.String({ minLength: 1, maxLength: 8000, description: "Replacement content for action=replace." })),
     result: Type.Optional(Type.String({ maxLength: 8000, description: "Optional bounded return value for action=return." })),
@@ -1146,7 +1153,7 @@ function registerContextTool(pi: any) {
     promptGuidelines: [
       "This changes the next native context projection, not Pi's append-only transcript or the filesystem.",
       "Use search only when needed. Pass stable source IDs and versions; never infer them from message positions.",
-      "A ref is a shared logical slot and survives frame failure/interruption; a copy is local. Do not edit or drop Human messages.",
+      "A ref is shared and survives interruption; a copy is private and forks on write. Human originals and executed calls are read-only; explicit private copies are data.",
       "A frame cannot return while it owns active pi-await watches; cancel or explicitly transfer them first.",
     ],
     parameters: contextOperationSchema(),
@@ -2111,12 +2118,31 @@ export default function (pi: any) {
     // Do not rebuild request history or append a volatile full-state anchor.
   });
 
-  pi.on("context_with_system", async (event: any) => {
+  pi.on("context_with_system", async (event: any, ctx: any) => {
     if (!Array.isArray(event?.messages)) return;
     // Older Compass state messages are internal persistence, not instructions.
     // Preserve Pi's original system/tool patches instead of folding them into the head.
     const messages = event.messages.filter((message: any) => !(message?.role === "custom" && [STATE_MESSAGE_TYPE, ANCHOR_MESSAGE_TYPE, "pi-compass-v2.conventions"].includes(message?.customType)));
-    if (messages.length !== event.messages.length) return { messages };
+    try {
+      const branch = ctx?.sessionManager?.getBranch?.();
+      if (!Array.isArray(branch)) throw new Error("Native branch is unavailable; retained pins cannot be restored for this request.");
+      const committed = restoreContextState(branch);
+      if (!committed.pins.length) {
+        if (messages.length !== event.messages.length) return { messages };
+        return;
+      }
+      const projection = ctx?.sessionManager?.buildSessionProjection?.();
+      if (!projection?.entries) throw new Error("Native projection is unavailable; retained pins cannot be restored for this request.");
+      const overlays = pinnedContextOverlay(branch, projection, committed, messages);
+      const output = [...messages, ...overlays];
+      if (messages.length !== event.messages.length || overlays.length) return { messages: output };
+    } catch (error) {
+      // Request-only retention is fail-closed: do not silently send a request
+      // that omits a required pin. The public abort path is the only supported
+      // lifecycle control; the handler error remains visible to the host.
+      ctx?.abort?.();
+      throw error;
+    }
   });
 
   // Native context edits are committed at turn_end, including an aborted turn.

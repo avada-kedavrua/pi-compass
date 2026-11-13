@@ -80,6 +80,31 @@ Local M1 evidence (scoped independent review confirmed): six targeted regression
 
 Exit: protocol integrity, scoped retention and source identity are checked on representative text/image/tool messages, not just isolated user strings. Semantic adequacy remains the Agent's judgment and Human acceptance.
 
+### Recorded Pi compaction gap and request-side retention proposal
+
+**Observed host:** the installed `@earendil-works/pi-coding-agent` is **1.5.2** (`package.json`, rechecked locally). This is a version-specific source/API finding, independently source-reviewed, not a live-provider test. No Pi source or installed-runtime modification is authorized by this discussion.
+
+Two guarantees must be distinguished:
+
+- **Canonical restoration:** pins are restored into Pi's durable projection immediately after compaction, before any next request. Stock 1.5.2 exposes no general actionable boundary at that point. `turn_end` can precede threshold compaction; `agent_before_settle` can follow an overflow continuation. `session_compact` is a notification, and non-triggering `sendMessage` calls can queue until a later turn boundary. A string summary cannot retain native image blocks; retaining an old suffix is not selective retention.
+- **Request-side restoration:** existing `context` / `context_with_system` hooks can supplement the outgoing request without changing the durable projection. Request transforms run after request preparation, including request-time virtual-model compaction. This route does **not** require the missing canonical boundary, but it must not be advertised as canonical restoration.
+
+**Desired native capability, if pursued later:** an awaited post-compaction boundary using Pi's existing validated draft machinery. It must support text/image `custom_message` drafts after successful manual, threshold (including virtual-model request preparation) and overflow compaction; commit and rebuild the canonical projection before any request; preserve Pi-owned system/tool/AGENTS state; add no otherwise-unneeded continuation; and surface failed restoration before sending a request without the required pins. No released minimum version containing this capability has been established; do not invent a version requirement.
+
+**Human's proposed near-term direction:** after compaction, inject pinned content through system context on stock Pi. Record and evaluate this rather than treating a Pi fork as the only possible route.
+
+**Implemented request-side retention slice (local, not full M2):** Compass now derives missing scoped pins from committed value state plus raw active-branch entries during `context_with_system`. It injects a clearly labeled custom/user-context message, preserving text and image blocks, source/version/kind/caveats/provenance, and deduplicating an equivalent overlay already supplied by another handler. Pin annotations remain control metadata; Compass does not rewrite an original observation to add labels. Installed-runner regressions cover visible deduplication, native-compaction omission, image retention, and composition. This is request-side retention only; native durable projection, Skill retention, movement/reordering and full M2 remain incomplete.
+
+**Recommended refinement (proposal, not implemented or accepted):**
+
+1. Treat pins as scoped retained context, not automatically as system-authority instructions. Preserve original authorship, stable source/version, caveats, handling state and retirement. Raw tool/file content must not acquire system authority merely because it is pinned.
+2. Keep Pi's original system/tool/AGENTS messages untouched. If an explanatory system rule is needed, keep it small and stable; carry actual retained text/images as clearly identified context data using provider-supported message content.
+3. At request assembly, restore only required missing pin versions from committed state and immutable native source references. Do not rely solely on an in-memory "compaction happened" flag; cover reload, branch/frame changes and retries. Do not match cloned source messages by guessed position/text. Exact outgoing presence/deduplication and extension composition still need proof; a native-projection match alone does not prove another hook kept the content in the outgoing request.
+4. A later existing actionable boundary may materialize missing snapshots into native context, without forcing a provider turn. Until then this is explicitly a request overlay, derived from the same source/value authority, not another transcript or pin store.
+5. Account for overlay size: canonical token displays/compaction estimates may omit request-only content. Check actual serialized request size, text/image preservation, scope/retirement, protocol closure, prefix stability and provider limits. No cache-hit or instruction-compliance guarantee follows merely from injecting content.
+
+Evidence in the installed Pi 1.5.2 package: `docs/extensions.md` sections `context` / `context_with_system`; `dist/core/agent-session.js` methods `_installAgentRequestProjection`, `_installAgentNextTurnRefresh`, `compact`, `_runAutoCompaction`, `sendCustomMessage`; `dist/core/extensions/types.d.ts` (`SessionCompactEvent` and its handler); `node_modules/@earendil-works/pi-agent-core/dist/agent-loop.js` functions `runLoop` and `streamAssistantResponse`. These distinguish pre-request transforms from durable boundary commits. This note completes no M2 checkbox.
+
 ## M3 — retrieval, spill and repeated-result optimization
 
 - [ ] Search both the active view and recoverable parent/branch-local history on demand; return bounded snippets, stable IDs, versions, provenance and useful ranges.

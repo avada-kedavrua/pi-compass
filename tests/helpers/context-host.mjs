@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { piRoot } from "../../scripts/register-pi-host-typebox.mjs";
-import { contentVersion, planContextBoundary, restoreContextState } from "../../src/context-core.mjs";
+import { planContextBoundary, restoreContextState, searchContext } from "../../src/context-core.mjs";
 
 export const { SessionManager } = await import(new URL("dist/core/session-manager.js", pathToFileURL(`${piRoot}/`)));
 let nextCall = 0;
@@ -59,9 +59,9 @@ export function applyOperation(manager, operation, options) {
 }
 
 export function sourceVersion(manager, id) {
-  const entry = manager.buildSessionProjection().entries.find((item) => item.sourceEntry.id === id);
-  assert.ok(entry?.messages.length, `source ${id} must be visible`);
-  return contentVersion(entry.messages[0].content);
+  const result = searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { ids: [id] });
+  assert.ok(result.hits.length, `source ${id} must be visible`);
+  return result.hits[0].version;
 }
 export function modelText(manager) { return JSON.stringify(manager.buildSessionProjection().messages); }
 export function user(manager, content) { return manager.appendMessage({ role: "user", content, timestamp: Date.now() }); }
