@@ -21,6 +21,28 @@ function fixture() {
   return { index, state };
 }
 
+test("history filters IDs and deduplicates retained heads before reading repeated payloads", () => {
+  const { index, state } = fixture();
+  state.schemaVersion = 4;
+  state.frames = [];
+  index.active.clear();
+  const reads = { selected: 0, unrelated: 0 };
+  const values = {};
+  for (const id of Object.keys(reads)) {
+    const content = `${id}: ${"payload".repeat(100)}`;
+    const entry = { id, type: "message", message: { role: "user", get content() { reads[id]++; return content; } } };
+    index.branch.push(entry);
+    values[`root/${id}`] = { entryId: id, field: "content", version: contentVersion(content), kind: "human", readOnly: true, rendered: false, handling: "active", caveats: [], sources: [id] };
+  }
+  for (let i = 0; i < 256; i++) index.branch.push({ id: `state-${i}`, type: "custom", customType: "pi-compass-v2.context", data: { schemaVersion: 4, values } });
+  index.byId = new Map(index.branch.map((entry) => [entry.id, entry]));
+  index.positions = new Map(index.branch.map((entry, i) => [entry.id, i]));
+  const result = searchSources(index, state, { query: "absent", ids: ["selected"], scope: "history" });
+  assert.equal(result.scanned, 1);
+  assert.equal(reads.unrelated, 0, "unselected payloads must not be dereferenced");
+  assert.ok(reads.selected <= 2, `dereferenced one retained payload ${reads.selected} times`);
+});
+
 test("searchSources returns bounded lexical hits and resolves an exact line range", () => {
   const { index, state } = fixture();
   const found = searchSources(index, state, { query: "visible", scope: "active" });

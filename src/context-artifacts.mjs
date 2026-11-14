@@ -45,7 +45,16 @@ async function verifiedRead(request, descriptor) {
     try {
       const stat = await handle.stat();
       if (!stat.isFile() || stat.size !== descriptor.bytes) throw new Error("Artifact byte length or file type changed.");
-      return await handle.readFile();
+      // A writer may grow the file after stat. Bound both allocation and I/O
+      // by the receipt, plus one byte to distinguish growth from exact EOF.
+      const bytes = Buffer.allocUnsafe(descriptor.bytes + 1);
+      let length = 0;
+      while (length < bytes.length) {
+        const { bytesRead } = await handle.read(bytes, length, bytes.length - length, length);
+        if (!bytesRead) break;
+        length += bytesRead;
+      }
+      return bytes.subarray(0, length);
     } finally { await handle.close(); }
   });
   if (bytes.byteLength !== descriptor.bytes || sha256(bytes) !== descriptor.sha256) throw new Error("Artifact digest or byte length does not verify.");

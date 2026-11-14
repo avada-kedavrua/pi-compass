@@ -45,11 +45,13 @@ function savedRecord(index, state, saved) {
   if (saved.editId !== null && (edit?.type !== "context_edit" || edit.targetId !== saved.id || !edit.replacement)) fail(`Parent edit ${saved.editId} is unavailable.`);
   return record(index, id, binding, "parent", projected(entry, edit ? edit.replacement.content : rawMessage(entry).content), null, "omitted", edit?.id ?? null);
 }
-function* candidates(index, state, scope) {
+function* candidates(index, state, scope, ids) {
+  const selected = (id) => !ids?.size || ids.has(id);
   if (scope === "active" || scope === "all") {
     const known = new Set();
     for (const key of Object.keys(state.values)) {
       const id = key.slice(key.indexOf("/") + 1);
+      if (!selected(id)) continue;
       if (key !== bindingKey(state, index, id) && !state.pins?.some((pin) => pin.key === key) && !index.valueViews.has(key)) continue;
       const value = currentValue(state, index, id, { key, allowHidden: true });
       if (!value.message) continue;
@@ -59,6 +61,7 @@ function* candidates(index, state, scope) {
     for (const [nativeId, item] of index.active) {
       if (!item.messages.length || known.has(nativeId)) continue;
       const id = logicalSource(index, nativeId);
+      if (!selected(id)) continue;
       const value = currentValue(state, index, id, { allowHidden: true });
       if (value.nativeId !== nativeId) continue;
       yield record(index, id, value.key, "active", value.content, value.head, "active");
@@ -68,31 +71,37 @@ function* candidates(index, state, scope) {
     for (const frame of state.frames.toReversed()) for (const saved of frame.saved) {
       // These were visible in the parent before call hid them. Pre-existing
       // omissions remain historical, not silently promoted into parent input.
-      if (saved.visible) yield savedRecord(index, state, saved);
+      if (saved.visible && selected(saved.logicalId ?? logicalSource(index, saved.id))) yield savedRecord(index, state, saved);
     }
   }
   if (scope === "history" || scope === "all") {
-    for (const entry of index.branch.toReversed()) {
+    const seenHeads = new Set();
+    for (let position = index.branch.length - 1; position >= 0; position--) {
+      const entry = index.branch[position];
       if (entry.type === "custom" && entry.customType === "pi-compass-v2.context" && entry.data.schemaVersion === state.schemaVersion) {
         for (const [key, head] of Object.entries(entry.data.values)) {
           const id = key.slice(key.indexOf("/") + 1);
+          const identity = `${key}:${head.version}`;
+          if (!selected(id) || seenHeads.has(identity)) continue;
+          seenHeads.add(identity);
           yield record(index, id, key, "history", valueContent(index, head), head);
         }
       } else if (entry.type === "context_edit" && entry.replacement) {
         const source = index.byId.get(entry.targetId);
         if (readable(source)) {
           const id = logicalSource(index, entry.targetId);
-          yield record(index, id, bindingKey(state, index, id), "history", projected(source, entry.replacement.content), null, "omitted", entry.id);
+          if (selected(id)) yield record(index, id, bindingKey(state, index, id), "history", projected(source, entry.replacement.content), null, "omitted", entry.id);
         }
       } else if (entry.customType === "pi-compass-v2.value" && entry.details?.derived) {
         const id = logicalSource(index, entry.id);
+        if (!selected(id)) continue;
         const head = snapshotHead(entry);
         yield record(index, id, entry.details.key, "history", valueContent(index, head), head);
       } else if (readable(entry)) {
         const id = logicalSource(index, entry.id);
         // A value-view wrapper is an observation about a source, not a new raw
         // version of that source. Its immutable head is indexed above.
-        if (id === entry.id) yield record(index, id, bindingKey(state, index, id), "history", projected(entry, rawMessage(entry).content));
+        if (id === entry.id && selected(id)) yield record(index, id, bindingKey(state, index, id), "history", projected(entry, rawMessage(entry).content));
       }
     }
   }
@@ -102,8 +111,8 @@ function scopes(scope) {
 }
 function* uniqueCandidates(index, state, scope, ids) {
   const seen = new Set();
-  for (const candidate of candidates(index, state, scope)) {
-    if (!candidate || (ids?.size && !ids.has(candidate.id))) continue;
+  for (const candidate of candidates(index, state, scope, ids)) {
+    if (!candidate) continue;
     const key = `${candidate.binding}:${candidate.version}`;
     if (seen.has(key)) continue;
     seen.add(key);

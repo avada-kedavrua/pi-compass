@@ -36,17 +36,32 @@ test("an inner ref can update an outer private copy without updating its source"
 });
 
 test("copy-on-write does not overwrite a simultaneously visible parent pin", () => {
+  for (const create of [value, user]) {
+    const manager = host();
+    const id = create(manager, "original pinned value");
+    applyOperation(manager, { action: "pin", ids: [id], caveats: ["Preserve the original qualification."] });
+    applyOperation(manager, { action: "call", task: "private", capture: [capture(manager, id, "copy")] });
+    applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "private value" });
+    assert.match(modelText(manager), /original pinned value/);
+    assert.match(modelText(manager), /private value/);
+    assert.deepEqual(search(manager, id).caveats, ["Preserve the original qualification."]);
+    applyOperation(manager, { action: "return" });
+    assert.doesNotMatch(modelText(manager), /private value/);
+    assert.equal(search(manager, id).excerpt, "original pinned value");
+  }
+});
+
+test("drop rejects an expired private binding instead of deleting the root value", () => {
   const manager = host();
-  const id = value(manager, "original pinned value");
-  applyOperation(manager, { action: "pin", ids: [id], caveats: ["Preserve the original qualification."] });
+  const id = value(manager, "keep root value");
   applyOperation(manager, { action: "call", task: "private", capture: [capture(manager, id, "copy")] });
-  applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "private value" });
-  assert.match(modelText(manager), /original pinned value/);
-  assert.match(modelText(manager), /private value/);
-  assert.deepEqual(search(manager, id).caveats, ["Preserve the original qualification."]);
+  const selected = search(manager, id);
   applyOperation(manager, { action: "return" });
-  assert.doesNotMatch(modelText(manager), /private value/);
-  assert.equal(search(manager, id).excerpt, "original pinned value");
+  const boundary = queueOperation(manager, { action: "drop", ids: [id], binding: selected.binding, versions: [{ id, version: selected.version }] });
+  const before = manager.getEntries().length;
+  assert.throws(() => planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary }), /binding is not in an active scope/);
+  assert.equal(manager.getEntries().length, before);
+  assert.match(modelText(manager), /keep root value/);
 });
 
 test("derived writes and exports retain structured caveats and provenance", () => {

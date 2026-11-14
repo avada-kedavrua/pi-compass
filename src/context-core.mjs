@@ -242,8 +242,9 @@ function planCall({ next, index, boundary, operation, turnIds }) {
     adoptValue(next, value);
     if (item.mode === "ref") { refs.push({ id: value.id, key: value.key, version: value.version }); inputs.push(value.nativeId); }
     else {
-      const reuse = ["user", "custom"].includes(value.message.role);
       const key = copyValue(next, value, operation.id);
+      const reuse = ["user", "custom"].includes(value.message.role)
+        && (!value.head.rendered || next.values[key].kind === value.head.kind);
       copies.push({ id: value.id, version: value.version, viewId: reuse ? value.nativeId : null, viewKey: value.viewKey, key, materialize: !reuse });
       if (reuse) inputs.push(value.nativeId);
     }
@@ -398,16 +399,18 @@ function planEdits({ next, index, operation, boundary }) {
   }
   const selected = operation.ids.map((id) => {
     source(index, id);
-    const value = currentValue(next, index, id);
+    const value = currentValue(next, index, id, { key: operation.binding });
     assertWritableValue(next, value);
     return value;
   });
+  const byNativeId = new Map(selected.map((value) => [value.nativeId, value]));
   const versions = new Map((operation.versions ?? []).map((item) => [item.id, item.version]));
   const ids = exchangeClosure(index, selected.map((value) => value.nativeId));
   const entries = [];
   for (const nativeId of ids) {
     const id = logicalSource(index, nativeId);
-    const value = currentValue(next, index, id);
+    const value = byNativeId.get(nativeId) ?? currentValue(next, index, id);
+    assertWritableValue(next, value);
     if (value.head.readOnly && (value.head.kind === "human" || messageOf(source(index, id)).role === "user")) fail("Human messages cannot be dropped.");
     if (next.pins.some((pin) => pin.key === value.key)) fail(`Pinned source ${id} must be explicitly unpinned first.`);
     const borrowed = next.frames.at(-1)?.refs.some((ref) => ref.id === id);

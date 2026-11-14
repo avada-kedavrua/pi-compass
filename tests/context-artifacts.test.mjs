@@ -6,7 +6,46 @@ import { mkdtemp, mkdir, rename, symlink, access, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { contentVersion } from "../src/context-values.mjs";
-import { writeContextArtifact } from "../src/context-artifacts.mjs";
+import { loadContextArtifact, writeContextArtifact } from "../src/context-artifacts.mjs";
+
+test("artifact growth after stat cannot exceed the receipt-sized read budget", { skip: process.platform !== "linux" }, async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "compass-artifact-growth-"));
+  let consumed = 0;
+  try {
+    const content = "bounded source";
+    const request = { projectRoot: root, relativePath: "source.json", source: "source", binding: "root/source", version: contentVersion(content), content, purpose: "retain source" };
+    const written = await writeContextArtifact(request);
+    assert.equal(written.ok, true);
+    const originalOpen = fs.promises.open;
+    t.mock.method(fs.promises, "open", async (...args) => {
+      const handle = await originalOpen(...args);
+      if (!(args[1] & fs.constants.O_DIRECTORY)) {
+        const stat = handle.stat.bind(handle);
+        handle.stat = async () => {
+          const observed = await stat();
+          await fs.promises.appendFile(path.join(root, "source.json"), "x".repeat(128 * 1024));
+          return observed;
+        };
+        for (const name of ["read", "readFile"]) {
+          const read = handle[name].bind(handle);
+          handle[name] = async (...input) => {
+            const result = await read(...input);
+            consumed += result.bytesRead ?? result.byteLength;
+            return result;
+          };
+        }
+      }
+      return handle;
+    });
+    syncBuiltinESMExports();
+    await assert.rejects(loadContextArtifact({ ...request, artifact: written.artifact }), /byte length|digest/);
+    assert.ok(consumed <= written.artifact.bytes + 1, `read ${consumed} bytes for a ${written.artifact.bytes}-byte receipt`);
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 // Deterministic race at the actual file-open boundary, not a probabilistic loop.
 test("an ancestor replaced by a symlink cannot redirect artifact creation", { skip: process.platform !== "linux" }, async (t) => {
