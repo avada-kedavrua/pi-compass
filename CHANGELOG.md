@@ -10,6 +10,7 @@
 - Keep RouteSet alternatives separate from DAG tasks. Scope/budget proposals require exact Human authorization; shared-criteria acceptance gates route selection and exact-identity competitor cancellation. Reject out-of-order cancellation, late-result races and undocumented native terminal statuses. Native pi-await arm identities own watch liveness, repeat/lost/terminal behavior and explicit frame transfer.
 - Unify binding syntax and verify logical value identity against immutable native content/snapshot/write records, independently of provenance. Remove unused Goal/DAG continuity projections, duplicate DAG notes/state, the global write guard and dead retry/scheduler wrappers. GoalRun remains the authoritative decision/checkpoint store; unsupported GoalRun v7/context v4 snapshots fail without migration.
 - Package one progressively loaded Compass Skill and verify installed discovery outside the checkout. Publish the current [requirement checklist and local verification](docs/architecture-v0.10.0.md#final-local-evidence), [measurements](docs/measurements-v0.10.0.md) and [Human acceptance handoff](handoff.md). Local installed-host checks are not live Pi/provider acceptance or provider-cache/cost evidence.
+- Expose a compact committed `contextFrame` summary in `compass_state`: Human can see whether a native frame is active, its depth and identity without duplicating frame contents or adding a second state source.
 
 ## 0.9.1 (2026-10-31)
 

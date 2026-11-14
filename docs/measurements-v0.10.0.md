@@ -6,7 +6,7 @@ These are bounded local measurements, not provider, token-cache, or semantic-qua
 node scripts/measure-context.mjs
 ```
 
-Observed output for implementation `e68f439` (Node 22.22.1 / Pi 1.5.2):
+Observed output for implementation `b465a44` (Node 22.22.1 / Pi 1.5.2):
 
 | Measure | Result |
 |---|---:|

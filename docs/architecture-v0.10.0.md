@@ -183,7 +183,7 @@ Exit: unauthorized exploration and premature cancellation are rejected; accepted
 
 ## Final local evidence
 
-Implementation `e68f439` ([release identity](../RELEASE-MANIFEST.json)). Counts below describe the retained behavioral tests after removal of four tests dedicated to the unused DAG continuity API; GoalRun decision/checkpoint coverage remains.
+Implementation `b465a44` ([release identity](../RELEASE-MANIFEST.json)). Counts below describe the retained behavioral tests after removal of four tests dedicated to the unused DAG continuity API; GoalRun decision/checkpoint coverage remains.
 
 | Check | Observed result |
 |---|---:|
