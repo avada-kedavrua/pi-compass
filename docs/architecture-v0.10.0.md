@@ -1,6 +1,6 @@
 # Compass v0.10.0 — requirements, milestones and delivery gates
 
-Status: v0.10 local candidate. M0–M7 local delivery gates are complete, with explicit native reuse/unsupported decisions below. Verified implementation `b2d2a24` is pushed to `origin/chatgpt-only`; final local results are recorded below. Human live Pi/provider acceptance remains open; local tests and scoped source reviews are not that acceptance.
+Status: v0.10 local candidate. M0–M7 local delivery gates are complete, with explicit native reuse/unsupported decisions below. Verified implementation `4813315` is pushed to `origin/chatgpt-only`; final local results are recorded below. Human live Pi/provider acceptance remains open; local tests and scoped source reviews are not that acceptance.
 
 ## Source of requirements
 
@@ -178,21 +178,21 @@ Exit: unauthorized exploration and premature cancellation are rejected; accepted
 - [x] Measure representative local transition/search memory and CPU costs plus request/context sizes. Collect native usage evidence where available; do not invent provider/cache/cost measurements.
 - [x] Run targeted/full/core/non-extension checks, static preflight, installed host import/API checks and independent high-risk source review; resolve reproduced findings. Verify actual package/Skill discovery from an unrelated target directory, not just source-project auto-discovery. Active interactive Pi registry/provider acceptance remains Human-only.
 - [x] Reconcile requirements: implemented context/retention/retrieval/movement/spill, native composition, DAG and RouteSet gates; reuse native execution/waits/review and parent semantic judgment; unsupported recursive child Compass is explicitly fail-closed, not advertised as implemented. Human-only live evidence stays separate.
-- [x] Commit and push coherent implementation milestones; `3dc2a8c..b2d2a24` push and remote hooks passed. README/handoff provide a short real-session test guide; local configuration is not included in delivery commits.
+- [x] Commit and push coherent implementation milestones; `3dc2a8c..4813315` push and remote hooks passed. README/handoff provide a short real-session test guide; local configuration is not included in delivery commits.
 - [ ] Human performs actual Compass/provider acceptance and provides a feedback path. This is the only remaining verification ownership transferred to Human, not development TODOs.
 
 ## Final local evidence
 
-Implementation `b2d2a24`, after the final context/native integration:
+Implementation `4813315`, after the final context/native integration:
 
 | Check | Observed result |
 |---|---:|
-| `npm test` | 278/278, 0 skipped; 4.644 s |
-| `npm run test:core` | 100/100; 0.163 s |
-| `npm run test:non-extension` | 136/136; 0.348 s |
+| `npm test` | 288/288, 0 skipped; 4.644 s |
+| `npm run test:core` | 107/107; 0.163 s |
+| `npm run test:non-extension` | 143/143; 0.348 s |
 | `npm run preflight` / `node scripts/preflight.mjs --static-only` | PASS; expected source/target overlap warning |
 | `node scripts/check-subagents-contract.mjs` | 36/36 against installed pi-subagents 0.88.1 |
-| Context/retention/artifact installed-adapter regressions | 66/66 |
+| Context/retention/artifact installed-adapter regressions | 69/69 |
 | Native package Skill discovery outside checkout | 1/1; one progressive Skill, no provider |
 | `git diff --check` | PASS |
 

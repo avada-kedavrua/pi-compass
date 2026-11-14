@@ -6,25 +6,25 @@ These are bounded local measurements, not provider, token-cache, or semantic-qua
 node scripts/measure-context.mjs
 ```
 
-Observed output for implementation `af308da` (Node 22.22.1 / Pi 1.5.2):
+Observed output for implementation `4813315` (Node 22.22.1 / Pi 1.5.2):
 
 | Measure | Result |
 |---|---:|
 | Branch entries | 1,000 |
-| Bounded lexical retrieval median / returned hits | 0.451 ms / 8 |
-| Full lexical miss median / scanned sources | 3.808 ms / 1,000 |
+| Bounded lexical retrieval median / returned hits | 0.469 ms / 8 |
+| Full lexical miss median / scanned sources | 4.124 ms / 1,000 |
 | Retrieval truncation | true (bounded result) |
-| Watch-state transition median | 0.071 ms |
-| Frame-call planning median / active window | 0.573 ms / 128 sources |
+| Watch-state transition median | 0.084 ms |
+| Frame-call planning median / active window | 0.723 ms / 128 sources |
 | Frame-call projection edits / draft JSON | 130 / 22,557 bytes |
 | Frame-call control-state JSON | 13,375 bytes |
-| Missing-pin request overlay median | 0.173 ms |
+| Missing-pin request overlay median | 0.184 ms |
 | Compacted native / outgoing JSON | 137 / 629 bytes |
 | Retained overlay increment | 492 bytes |
 | Projected context JSON | 100,911 bytes |
 | Control-state JSON | 79 bytes before the watch transition |
-| Process RSS at sample end | 74,518,528 bytes |
-| Process heap used at sample end | 10,949,824 bytes |
+| Process RSS at sample end | 73,863,168 bytes |
+| Process heap used at sample end | 10,968,936 bytes |
 
 The frame sample uses a synthetic native parent summary and a bounded 128-source active tail: frame capture is limited to 256 active sources, so an unbounded 1,000-source call is deliberately rejected. It measures production draft planning and serialized edit/control overhead, not persistence latency or provider cache hits. Earlier-view edits may invalidate a provider's cached suffix; native system/tool prefixes are not rewritten.
 

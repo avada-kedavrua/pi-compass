@@ -2,13 +2,13 @@
 
 ## Delivery
 
-Local M0–M7 development and requirement reconciliation are complete for the declared supported boundaries. Implementation `b2d2a24` is pushed to `origin/chatgpt-only`. This is a **local candidate**, not a claim of live Pi/provider acceptance.
+Local M0–M7 development and requirement reconciliation are complete for the declared supported boundaries. Implementation `4813315` is pushed to `origin/chatgpt-only`. This is a **local candidate**, not a claim of live Pi/provider acceptance.
 
 The canonical [milestone checklist](docs/architecture-v0.10.0.md) records implemented behavior, native reuse/unsupported decisions and verification. [README](README.md) provides installation and a short real-session guide; [tool contract](docs/tool-contract.md) explains the current surface.
 
 ## Local evidence
 
-For implementation `b2d2a24`: full tests **278/278**, core **100/100**, non-extension **136/136**; static/installed-host preflight and the installed pi-subagents structural contract **36/36** passed. Context/retention/artifact regressions passed **66/66**. Scoped independent reviews cleared the identified high-risk findings after repairs. These are source/installed-adapter checks, not a live AgentSession/provider cycle or a clean whole-project typecheck.
+For implementation `4813315`: full tests **288/288**, core **107/107**, non-extension **143/143**; static/installed-host preflight and the installed pi-subagents structural contract **36/36** passed. Context/retention/artifact regressions passed **69/69**. Scoped independent reviews cleared the identified high-risk findings after repairs. These are source/installed-adapter checks, not a live AgentSession/provider cycle or a clean whole-project typecheck.
 
 The inspected baseline is Pi **1.5.2**, Node **22.22.1**, pi-subagents **0.88.1**. The release manifest owns the declared native identity. Local CPU, draft/control sizes, request-overlay bytes and process memory are measured separately in [measurements](docs/measurements-v0.10.0.md); no provider/cache/token or semantic-quality win is inferred.
 
