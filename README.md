@@ -26,7 +26,7 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 - Pi: `>=1.5.2` for the current `context_with_system` integration.
 - Node.js: `>=22.16.0`.
 - TypeBox is supplied by Pi as a peer dependency; Compass must not install a package-local copy.
-- pi-subagents and ask-user-questions must be installed and enabled by the Human's Pi configuration when those capabilities are used.
+- pi-subagents, pi-await and ask-user-questions must be installed and enabled by the Human's Pi configuration when those capabilities are used.
 
 ## Install
 
@@ -43,7 +43,7 @@ npm run preflight
 node scripts/measure-context.mjs
 ```
 
-The current local milestone checks are recorded in the changelog and architecture document. `docs/measurements-v0.10.0.md` contains one bounded synthetic local measurement; it is not provider or token evidence.
+See the canonical [local verification results](docs/architecture-v0.10.0.md#final-local-evidence) and [bounded local measurements](docs/measurements-v0.10.0.md). These are not live provider or token evidence.
 
 ## Human acceptance
 

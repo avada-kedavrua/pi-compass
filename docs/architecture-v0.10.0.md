@@ -1,6 +1,6 @@
 # Compass v0.10.0 — requirements, milestones and delivery gates
 
-Status: v0.10 local candidate. M0–M7 local delivery gates are complete, with explicit native reuse/unsupported decisions below. Verified implementation `4813315` is pushed to `origin/chatgpt-only`; final local results are recorded below. Human live Pi/provider acceptance remains open; local tests and scoped source reviews are not that acceptance.
+Status: v0.10 local candidate. M0–M7 local delivery gates are complete, with explicit native reuse/unsupported decisions below. Implementation snapshot and final local checks are recorded in [Final local evidence](#final-local-evidence). Human live Pi/provider acceptance remains open; local tests and scoped source reviews are not that acceptance.
 
 ## Source of requirements
 
@@ -178,25 +178,25 @@ Exit: unauthorized exploration and premature cancellation are rejected; accepted
 - [x] Measure representative local transition/search memory and CPU costs plus request/context sizes. Collect native usage evidence where available; do not invent provider/cache/cost measurements.
 - [x] Run targeted/full/core/non-extension checks, static preflight, installed host import/API checks and independent high-risk source review; resolve reproduced findings. Verify actual package/Skill discovery from an unrelated target directory, not just source-project auto-discovery. Active interactive Pi registry/provider acceptance remains Human-only.
 - [x] Reconcile requirements: implemented context/retention/retrieval/movement/spill, native composition, DAG and RouteSet gates; reuse native execution/waits/review and parent semantic judgment; unsupported recursive child Compass is explicitly fail-closed, not advertised as implemented. Human-only live evidence stays separate.
-- [x] Commit and push coherent implementation milestones; `3dc2a8c..4813315` push and remote hooks passed. README/handoff provide a short real-session test guide; local configuration is not included in delivery commits.
+- [x] Version-control and publish coherent implementation milestones. README/handoff provide a short real-session test guide; local configuration is not included in delivery commits.
 - [ ] Human performs actual Compass/provider acceptance and provides a feedback path. This is the only remaining verification ownership transferred to Human, not development TODOs.
 
 ## Final local evidence
 
-Implementation `4813315`, after the final context/native integration:
+Implementation `e68f439` ([release identity](../RELEASE-MANIFEST.json)). Counts below describe the retained behavioral tests after removal of four tests dedicated to the unused DAG continuity API; GoalRun decision/checkpoint coverage remains.
 
 | Check | Observed result |
 |---|---:|
-| `npm test` | 288/288, 0 skipped; 4.644 s |
-| `npm run test:core` | 107/107; 0.163 s |
-| `npm run test:non-extension` | 143/143; 0.348 s |
+| `npm test` | 287/287, 0 skipped; 3.761 s |
+| `npm run test:core` | 103/103; 0.120 s |
+| `npm run test:non-extension` | 139/139; 0.272 s |
 | `npm run preflight` / `node scripts/preflight.mjs --static-only` | PASS; expected source/target overlap warning |
 | `node scripts/check-subagents-contract.mjs` | 36/36 against installed pi-subagents 0.88.1 |
-| Context/retention/artifact installed-adapter regressions | 69/69 |
+| Context/retention/artifact installed-adapter regressions | 74/74 |
 | Native package Skill discovery outside checkout | 1/1; one progressive Skill, no provider |
 | `git diff --check` | PASS |
 
-Independent scoped reviews cleared persistence/approval, branch and scheduler generation recovery, nested watch ownership, route questionnaire/proposal correlation, artifact symlink-redirection protection, retrieval edit lineage/read completeness, Skill activation, spill range provenance, conflicting read evidence and whole-companion coalescing. The repeated-read regression checks one covered payload and a net serialized-context reduction for a representative large read; a partial comparison cannot remove an uncovered remainder. The repaired scheduler regression emitted four requests instead of two before repair; the artifact race created an outside file before repair. Source identities, not text equality alone, control edits and eligibility. Auxiliary diagnostics remain inconclusive for some files and include a pre-existing dictionary-`any` rule finding; this is not a clean whole-project typecheck claim.
+Independent scoped reviews cleared persistence/approval, branch and scheduler generation recovery, nested watch ownership, route questionnaire/proposal correlation, artifact root/ancestor replacement protection, retrieval edit lineage/read completeness, Skill activation, spill range provenance, conflicting read evidence and whole-companion coalescing. The final binding review cleared shared syntax validation and immutable-record identity checks, keeping logical binding identity separate from payload entry IDs and provenance. Dead Goal/DAG continuity projections, duplicate DAG notes/state and the unused retry wrapper were removed; active GoalRun decisions/checkpoints remain authoritative. The repeated-read regression checks one covered payload and a net serialized-context reduction for a representative large read; a partial comparison cannot remove an uncovered remainder. The repaired scheduler regression emitted four requests instead of two before repair; the artifact race created an outside file before repair. Source identities, not text equality alone, control edits and eligibility. Auxiliary diagnostics remain inconclusive for some files and include a pre-existing dictionary-`any` rule finding; this is not a clean whole-project typecheck claim.
 
 Native API/installed projection/runner checks do not establish a real AgentSession/provider cycle. See [measurements](./measurements-v0.10.0.md) for bounded local CPU/memory/draft/request-size data and [handoff](../handoff.md) for Human acceptance and feedback. No provider/cache/token or semantic-quality improvement is claimed from these checks.
 
