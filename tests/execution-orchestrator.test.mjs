@@ -20,7 +20,7 @@ import {
 import { emptyDagState, createOrRevisePlan, taskAssessmentBinding, updateTasks } from "../src/dag-core.mjs";
 import { bindDagApprovalQuestionnaire, captureHumanDecision } from "../src/goal-run.mjs";
 import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
-import { emptyGoalRunState, captureHumanPrompt, normalizeGoalRunState, recordExecutionDrift, recordExecutionEvent, buildGoalAnchor, transitionTasks, revisePlanState } from "../src/goal-run.mjs";
+import { emptyGoalRunState, captureHumanPrompt, normalizeGoalRunState, recordExecutionDrift, recordExecutionEvent, transitionTasks, revisePlanState } from "../src/goal-run.mjs";
 
 const task = (id, overrides = {}) => ({
   id,
@@ -324,8 +324,6 @@ test("runtime drift records a compact warning once and the next Goal anchor expl
   const second = recordExecutionDrift(first.state, { tool: "edit", target: "/tmp/project/src/a.ts", reason: "No writable task is in progress." });
   assert.equal(first.changed, true);
   assert.equal(second.changed, false);
-  assert.match(buildGoalAnchor(first.state), /Execution drift detected/);
-  assert.match(buildGoalAnchor(first.state), /reconcile the DAG/);
   const started = transitionTasks(first.state, "start", [{ id: "a" }], updateTasks).state;
   assert.equal(started.plan.executionDrift, null, "an explicit task lifecycle update clears the pending drift nudge");
 });

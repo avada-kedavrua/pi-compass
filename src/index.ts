@@ -1969,7 +1969,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
     names.push(registerOnce(pi, "compass_goal_read", {
       label: "Read Goal Details",
       description: "On-demand full original Goal, current Goal, retained hard constraints, and recent Human updates. The normal context contains a compact projection. Repeated reads of an unchanged Goal add no new evidence.",
-      promptSnippet: "Read Goal details only when the compact anchor is insufficient; reuse the result unless Goal version/source changes or compaction removes required details.",
+      promptSnippet: "Read Goal details only when the compact compass_state is insufficient; reuse the result unless Goal version/source changes or compaction removes required details.",
       parameters: Type.Object({}, { additionalProperties: false }),
       async execute(_id: string, _params: any, ...rest: any[]) {
         const ctx = getContext(rest);
@@ -2346,7 +2346,7 @@ export default function (pi: any) {
       }
       restoreContext(ctx);
       ensureCurrentLoadout(pi, ctx);
-      // Do not rebuild request history or append a volatile full-state anchor.
+      // Do not rebuild request history or append a volatile full-state state message.
     } catch (error) {
       needsRestore = true;
       ctx?.abort?.();

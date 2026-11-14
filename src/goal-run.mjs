@@ -26,6 +26,10 @@ const QUESTIONNAIRE_ERRORS = new Set([
   "duplicate_question", "duplicate_option_label", "reserved_label", "session_load_failed",
   "stale_module_cache",
 ]);
+const CANCELLATION_TERMINAL_STATUSES = new Set([
+  "completed", "failed", "timed_out", "cancelled", "interrupted", "tool_budget_exhausted",
+  "structured_output_failed", "acceptance_failed", "unavailable_context", "duplicate_node",
+]);
 
 export function emptyGoalRunState() {
   return {
@@ -1591,7 +1595,6 @@ function sourceTextForUpdate(state, update) {
   const exact = update.messageId
     ? state.captureLedger.find((item) => item.messageId === update.messageId)
     : null;
-  const prefix = String(update.text ?? "").slice(0, Math.min(160, String(update.text ?? "").length));
   return exact?.text ?? update.sourceText ?? update.text ?? "";
 }
 
@@ -1618,182 +1621,6 @@ function unresolvedAcceptanceRange(state) {
     if (missing.length) return { range: `AC${start}-AC${end}`, missing };
   }
   return null;
-}
-
-export function buildGoalAnchor(stateValue, maxChars = 2200, runtime = null) {
-  const state = normalizeGoalRunState(stateValue);
-  if (!state.goal.original) return "";
-  const version = state.goal.version ?? 1;
-  const original = state.goal.original;
-  const current = state.goal.current || original;
-  const sameAsOriginal = current === original;
-  const acceptance = acceptanceStatus(state);
-  const outcome = goalOutcomeStatus(state);
-  const acceptanceRangeMismatch = unresolvedAcceptanceRange(state);
-  const lines = ["[Compass GoalRun v6 — compact continuity projection; facts from runtime, route choice belongs to Agent]"];
-  if (sameAsOriginal) {
-    lines.push(`Original Goal preview (${original.length} stored chars): ${clip(original.replace(/\s+/g, " "), 360)}${original.length > 360 ? " [preview truncated; retrieve Goal details for the retained original text when needed]" : ""}${state.goal.originalTruncated ? " [original prompt exceeded the storage limit; inspect the original Human message for omitted details]" : ""}`);
-    lines.push(`Current Goal v${version}: same as Original Goal.`);
-  } else {
-    lines.push(`Current Goal v${version}: ${clip(current.replace(/\s+/g, " "), 400)}${current.length > 400 ? " [preview truncated; retrieve Goal details if omitted scope matters]" : ""}`);
-    lines.push(`Original Goal preview: ${clip(original.replace(/\s+/g, " "), 180)}${original.length > 180 ? " [truncated]" : ""}`);
-  }
-  lines.push(`Goal outcome: ${outcome.status}; evidence=${outcome.evidenceLevel}; independently verified by Compass=no.`);
-  lines.push(`Acceptance: ${acceptance.status} (${acceptance.passed}/${acceptance.total} reported pass; ${acceptance.failed} failed; ${acceptance.blocked} blocked; ${acceptance.unverified} unverified). A reported pass is not an independent verifier result.`);
-  if (acceptanceRangeMismatch) {
-    const missing = acceptanceRangeMismatch.missing.length
-      ? ` Missing IDs: ${acceptanceRangeMismatch.missing.slice(0, 6).join(", ")}${acceptanceRangeMismatch.missing.length > 6 ? ", …" : ""}.`
-      : " The referenced range could not be reconciled.";
-    lines.push(`Acceptance reference warning: source mentions ${acceptanceRangeMismatch.range}, but current criteria do not cover that range.${missing} Retrieve authoritative criteria or ask Human; do not infer definitions.`);
-  }
-
-  const allCurrentDirectives = state.sessionDirectives.filter((item) => item.goalVersion === version)
-    .filter((item) => item.text !== original && item.text !== current);
-  const rankedDirectives = prioritizedCurrentDirectives(state, MAX_HARD_SESSION_DIRECTIVES + MAX_SESSION_DIRECTIVES);
-  // Explicit Restrictions/Constraints clauses are a distinct class: preserve
-  // their source order and surface all of them before later hard-sounding
-  // instructions. Otherwise a ranking heuristic can hide a pinned boundary.
-  const pinnedDirectives = allCurrentDirectives.filter((item) => item.pinned === true);
-  const pinnedIds = new Set(pinnedDirectives.map((item) => item.id));
-  const otherHardDirectives = rankedDirectives.filter((item) => !pinnedIds.has(item.id) && (item.hard === true || isHardDirective(item.text)));
-  const hardDirectives = [...pinnedDirectives, ...otherHardDirectives];
-  const hardIds = new Set(hardDirectives.map((item) => item.id));
-  const softDirectives = rankedDirectives.filter((item) => !hardIds.has(item.id));
-  const hardShownLimit = maxChars >= 2000 ? 12 : 6;
-  const hardShown = hardDirectives.slice(0, hardShownLimit);
-  if (hardShown.length) {
-    lines.push("Hard Human constraints (pinned/high-priority; full retained text is available in Goal details):");
-    for (const item of hardShown) lines.push(`- ${item.id}: ${clip(item.text.replace(/\s+/g, " "), 72)}`);
-    if (hardDirectives.length > hardShown.length) {
-      lines.push(`- ${hardDirectives.length - hardShown.length} additional hard constraint(s) retained; inspect details only if the planned action may conflict.`);
-    }
-  }
-
-  const plan = state.plan;
-  if (plan?.goal && Array.isArray(plan.tasks) && plan.tasks.length) {
-    const tasks = plan.tasks;
-    const done = tasks.filter((task) => task.status === "done").length;
-    const inProgress = tasks.filter((task) => task.status === "in_progress").map((task) => task.id);
-    const blocked = tasks.filter((task) => task.status === "blocked").map((task) => task.id);
-    const ready = readyTasks(plan).map((task) => task.id);
-    lines.push(`DAG r${plan.revision}/s${plan.stateVersion ?? 0}: ${done}/${tasks.length} done; ready=${ready.slice(0, 6).join(",") || "-"}; in-progress=${inProgress.slice(0, 4).join(",") || "-"}; blocked=${blocked.slice(0, 4).join(",") || "-"}.`);
-    const subagentReady = tasks.filter((task) => task.status === "pending" && task.executor === "subagent" && String(task.writeScope || "").toLowerCase() === "read-only" && String(task.dispatchReason || "").trim().length >= 12 && task.dependsOn.every((dep) => tasks.find((candidate) => candidate.id === dep)?.status === "done"));
-    const subagentNeedsRationale = tasks.filter((task) => task.status === "pending" && task.executor === "subagent" && String(task.writeScope || "").toLowerCase() === "read-only" && String(task.dispatchReason || "").trim().length < 12);
-    const codeReady = tasks.filter((task) => task.status === "pending" && task.executor === "code" && task.dependsOn.every((dep) => tasks.find((candidate) => candidate.id === dep)?.status === "done"));
-    const parentReady = tasks.filter((task) => task.status === "pending" && task.executor === "parent" && task.dependsOn.every((dep) => tasks.find((candidate) => candidate.id === dep)?.status === "done"));
-    if (subagentReady.length) lines.push(`Execution routing: ${subagentReady.length} ready read-only Subagent task(s) (${subagentReady.slice(0, 4).map((task) => `${task.id}/${task.agent || "scout"}`).join(", ")}). Compass auto-dispatches only when dispatchReason justifies a separate semantic context; deterministic work stays in Code Mode and tightly coupled reasoning stays with the parent.`);
-    if (subagentNeedsRationale.length) lines.push(`Subagent dispatch is gated for ${subagentNeedsRationale.map((task) => task.id).slice(0, 6).join(", ")}: add dispatchReason explaining why a separate semantic call is worth the cost, or change executor to parent/code. No child is dispatched until justified.`);
-    const childEvidence = tasks.filter((task) => task.executor === "subagent" && task.status === "done" && task.evidence).slice(-4);
-    if (childEvidence.length) lines.push(`Child-reported findings (task evidence, not independent Goal acceptance): ${childEvidence.map((task) => `${task.id}=${clip(task.evidence, 180)}`).join("; ")}.`);
-    if (codeReady.length) lines.push(`Code Mode tasks ready: ${codeReady.slice(0, 4).map((task) => task.id).join(", ")}; the parent Agent executes deterministic/batched native-tool operations through Code Mode, then records evidence with compass_task(action=done). Code Mode is not a semantic Subagent and does not imply child delegation.`);
-    if (parentReady.length) lines.push(`Parent-owned tasks ready: ${parentReady.slice(0, 4).map((task) => task.id).join(", ")}; execute in the parent session and record evidence with compass_task(action=done).`);
-    if (plan.executionDrift) lines.push(`Execution drift detected at ${clip(plan.executionDrift.at || "unknown time", 28)}: ${clip(plan.executionDrift.reason || "write outside an active task", 140)}. This warning was generated by the runtime, not by the Agent. Before further writes, reconcile the DAG and start/revise the appropriate task. Compass warns rather than blocking all writes.`);
-    if (plan.execution && ["dispatching", "running", "unknown"].includes(plan.execution.status)) {
-      const resultSummary = (plan.execution.results || []).slice(0, 4).map((item) => `${item.id}:${item.status}${item.runId ? `@${clip(item.runId, 18)}` : ""}${item.fallbackAttempted ? "(DeepSeek fallback)" : ""}`).join(", ");
-      lines.push(`Subagent batch ${plan.execution.status}: tasks=${(plan.execution.taskIds || []).join(",")}; request=${clip(plan.execution.requestId || "unknown", 36)}; results=${resultSummary || "-"}. Reconcile this batch before dispatching another; do not duplicate it.`);
-      if (plan.execution.error) lines.push(`Subagent execution warning: ${clip(plan.execution.error, 180)}.`);
-    } else if (plan.execution && plan.execution.status === "failed" && plan.execution.error) {
-      lines.push(`Subagent auto-dispatch unavailable: ${clip(plan.execution.error, 200)}. Tasks remain pending when no child was confirmed. Respect the user's tool preference; enable Subagents or revise the executor to parent/code before retrying.`);
-    } else if (plan.execution?.status === "completed" && Array.isArray(plan.execution.results) && plan.execution.results.length) {
-      const results = plan.execution.results.slice(0, 4).map((item) => `${item.id}:${item.status}@${clip(item.model, 28)}${item.fallbackAttempted ? "(fallback)" : ""}`).join(", ");
-      const latestCostComplete = plan.execution.results.every((item) => Number.isFinite(item.usage?.cost) && (!item.fallbackAttempted || Number.isFinite(item.primaryUsage?.cost)));
-      const latestCost = plan.execution.results.reduce((sum, item) => sum + (Number.isFinite(item.usage?.cost) ? item.usage.cost : 0) + (item.fallbackAttempted && Number.isFinite(item.primaryUsage?.cost) ? item.primaryUsage.cost : 0), 0);
-      const latestWallRaw = Date.parse(plan.execution.completedAt || "") - Date.parse(plan.execution.startedAt || "");
-      const latestWall = Number.isFinite(latestWallRaw) ? Math.max(0, latestWallRaw) : 0;
-      lines.push(`Latest Subagent batch completed: ${results}${plan.execution.results.length > 4 ? `, +${plan.execution.results.length - 4} more` : ""}; ${latestCostComplete ? `reported child cost=$${latestCost.toFixed(4)}` : `reported child cost incomplete (known subtotal=$${latestCost.toFixed(4)})`}; batch wall=${Math.round(latestWall / 1000)}s.`);
-      if (plan.execution.policy?.mode) lines.push(`Scheduling policy: ${plan.execution.policy.mode}; ${clip(plan.execution.policy.reason || "No policy reason recorded.", 220)}.`);
-      const history = Array.isArray(plan.executionHistory) ? plan.executionHistory.slice(-8) : [];
-      if (history.length) {
-        const observedCostComplete = history.every((item) => Number.isFinite(item.totalCost));
-        const observedDurationComplete = history.every((item) => Number.isFinite(item.sumDurationMs));
-        const observedSavingsComplete = history.every((item) => Number.isFinite(item.estimatedParallelSavingsMs));
-        const observedCost = history.reduce((sum, item) => sum + (Number.isFinite(item.totalCost) ? item.totalCost : 0), 0);
-        const observedChildMs = history.reduce((sum, item) => sum + (Number.isFinite(item.sumDurationMs) ? item.sumDurationMs : 0), 0);
-        const observedWallMs = history.reduce((sum, item) => sum + (Number.isFinite(item.wallDurationMs) ? item.wallDurationMs : 0), 0);
-        const estimatedNetSavedMs = history.reduce((sum, item) => sum + (Number.isFinite(item.estimatedParallelSavingsMs) ? item.estimatedParallelSavingsMs : 0), 0);
-        const metricsComplete = history.every((item) => item.metricsComplete === true);
-        lines.push(`Observed Subagent metrics over ${history.length} recent batch(es): ${observedCostComplete ? `cost=$${observedCost.toFixed(4)}` : `cost incomplete (known subtotal=$${observedCost.toFixed(4)})`}; ${observedDurationComplete ? `summed child duration=${Math.round(observedChildMs / 1000)}s` : `summed child duration incomplete (known subtotal=${Math.round(observedChildMs / 1000)}s)`}; batch wall=${Math.round(observedWallMs / 1000)}s; ${observedSavingsComplete ? `estimated net wait saved=${Math.round(estimatedNetSavedMs / 1000)}s` : `estimated net wait saved incomplete (known subtotal=${Math.round(estimatedNetSavedMs / 1000)}s)`}; usage completeness=${metricsComplete ? "complete" : "partial"}. This is an observed scheduling estimate, not a counterfactual parent-only cost comparison.`);
-      }
-    }
-    if (blocked.length) lines.push(`Unresolved task blockers: ${blocked.slice(0, 3).map((id) => { const task = tasks.find((item) => item.id === id); return `${id} ${clip(task?.reason || task?.title || "blocked", 64)}`; }).join("; ")}.`);
-    if (blocked.length && acceptance.status === "reported_satisfied") lines.push(`Outcome caveat: acceptance is Agent-reported satisfied, but task(s) remain blocked (${blocked.join(", ")}); explain the blocker before claiming the overall Goal outcome is achieved.`);
-    if (done === tasks.length && acceptance.status !== "reported_satisfied") lines.push("All DAG tasks are done, but Goal acceptance is not reported satisfied. Do not equate task closure with Goal completion.");
-    const change = plan.planHistory?.at(-1);
-    if (change) lines.push(`Latest plan change r${change.revision}: ${clip(change.summary, 80)}; reason=${clip(change.reason || "not recorded", 60)}.`);
-  } else {
-    const subagentsUnavailable = runtime?.subagents && runtime.subagents.active === false && [true, false].includes(runtime.subagents.registered);
-    lines.push(subagentsUnavailable
-      ? `No DAG is active. Native Subagents are ${runtime.subagents.registered === true ? "registered but inactive in the Pi/user toolset" : "not registered"}; Compass will not force-enable them.`
-      : "No DAG is active. Native tool activation belongs to Pi and its extensions; a DAG is optional.");
-    if (state.autoActivation?.capability === "planning" && state.autoActivation?.trigger === "explicit_goal_complexity") {
-      lines.push(`Planning tools were surfaced because of ${clip(state.autoActivation.reason || "an explicit multi-part Goal", 80)}; no DAG was created. Use them only if they reduce coordination cost.`);
-    }
-  }
-  if (state.routeSet) {
-    const routeStatus = routeSetStatus(state);
-    lines.push(`RouteSet ${routeStatus.id} v${routeStatus.goalVersion}: alternatives=${routeStatus.routes.map((item) => `${item.routeId}:${item.status}/${item.acceptanceGate}`).join(", ")}; selected=${routeStatus.selectedRouteId || "-"}; accepted=${routeStatus.winningRouteId || "-"}.`);
-    if (routeStatus.exploration.authorized) lines.push(`Parallel exploration authorized: scope=${clip(routeStatus.exploration.scope, 120)}; budget=${routeStatus.exploration.budget}; competitors=${routeStatus.competitorRuns.length}.`);
-    if (routeStatus.comparison.status !== "unverified") lines.push(`Route comparison: ${routeStatus.comparison.status}; ${clip(routeStatus.comparison.summary, 180)}${routeStatus.comparison.caveats.length ? ` Caveats: ${routeStatus.comparison.caveats.slice(0, 2).join("; ")}` : ""}`);
-  }
-
-  const optional = [];
-  const subagentsUnavailable = runtime?.subagents && runtime.subagents.active === false && [true, false].includes(runtime.subagents.registered);
-  if (subagentsUnavailable && Boolean(plan?.tasks?.length)) {
-    optional.push(`Native Subagents ${runtime.subagents.registered === true ? "are registered but inactive in the Pi/user toolset" : "are not registered"}; Compass will not force-enable them.`);
-  }
-  const pending = explicitGoalChangeUpdates(state).at(-1);
-  if (pending) optional.push(`Pending scope change ${pending.id}: ${clip(pending.summary, 130)}${pending.proposedGoal ? `; proposed: ${clip(pending.proposedGoal, 150)}` : ""}. Review before applying.`);
-  if (shouldSurfaceIssueReview(state)) {
-    const failures = state.trace.failures.filter((item) => item.goalVersion === version).slice(-3);
-    const signature = failures.at(-1);
-    if (signature) optional.push(`Repeated failure pattern (observation, not diagnosis): ${signature.tool} at ${clip(signature.at, 24)} — ${clip(signature.error, 150)}. Compare prior attempts/evidence before choosing a retry or route change.`);
-  }
-  const activeDecision = [...state.decisions].reverse().find((item) => item.goalVersion === version && !item.supersededBy);
-  if (activeDecision) optional.push(`Latest active decision ${activeDecision.id}: ${clip(activeDecision.summary, 100)}; rationale=${clip(activeDecision.rationale || "?", 60)}${activeDecision.supersedesDecisionIds?.length ? `; supersedes ${activeDecision.supersedesDecisionIds.join(",")}` : ""}.`);
-  const checkpoint = [...state.checkpoints].reverse().find((item) => item.goalVersion === version);
-  if (checkpoint) optional.push(`Latest checkpoint ${checkpoint.id}: ${clip(checkpoint.summary, 80)}; ref=${clip(checkpoint.ref || "none", 70)}${checkpoint.evidence ? `; evidence=${clip(checkpoint.evidence, 70)}` : ""}.`);
-  if (state.goal.sourceUpdateId) {
-    const sourceUpdate = state.goal.updates.find((item) => item.id === state.goal.sourceUpdateId);
-    if (sourceUpdate) optional.push(`Current Goal source ${sourceUpdate.id}: ${clip(sourceUpdate.summary || sourceUpdate.text.replace(/\s+/g, " "), 150)}; full retained source is in Goal details${state.goal.sourceUpdateTruncated ? " (source truncated at storage limit)" : ""}.`);
-  }
-  const criteria = state.goal.criteria.filter((item) => item.goalVersion === version);
-  if (criteria.length) {
-    const prioritized = [...criteria].sort((a, b) => {
-      const rank = (item) => ({ failed: 0, blocked: 1, inconclusive: 2, unverified: 3, reported_pass: 4 }[item.status] ?? 5);
-      return rank(a) - rank(b);
-    }).slice(0, 3);
-    optional.push(`Criteria: ${prioritized.map((item) => `${item.id}[${item.status}] ${clip(item.text, 84)}`).join("; ")}${criteria.length > prioritized.length ? `; +${criteria.length - prioritized.length} more` : ""}.`);
-  }
-  const decisions = state.humanDecisions.filter((item) => item.goalVersion === version).slice(-2);
-  if (decisions.length) optional.push(`Human decisions: ${decisions.map((item) => `${item.id}: ${clip(item.summary, 95)}`).join(" | ")}.`);
-  const directiveTexts = new Set(allCurrentDirectives.map((item) => item.text.replace(/\s+/g, " ").trim()));
-  const updates = state.goal.updates.filter((item) => item.goalVersion === version)
-    .filter((item) => item.text !== original && item.text !== current && !directiveTexts.has(item.text.replace(/\s+/g, " ").trim()))
-    .map((item) => ({ ...item, anchorSummary: item.directiveCount > 0 ? item.nonDirectiveSummary : item.summary }))
-    .filter((item) => Boolean(item.anchorSummary))
-    .slice(-2).reverse();
-  if (updates.length) optional.push(`Recent Human updates: ${updates.map((item) => `${item.id}: ${clip(item.anchorSummary, 110)}`).join(" | ")}`);
-  if (state.autoActivation?.capability === "planning" && !state.plan.tasks.length && state.autoActivation?.trigger !== "explicit_goal_complexity") {
-    optional.push(`Planning was surfaced: ${clip(state.autoActivation.reason || "cross-file write signal", 90)}; no DAG was created. Use it only if it reduces coordination cost.`);
-  }
-  for (const item of softDirectives.slice(0, 4)) {
-    optional.push(`Human preference ${item.id}: ${clip(item.text.replace(/\s+/g, " "), 88)}${(item.reaffirmations ?? 1) > 1 ? ` (${item.reaffirmations}x)` : ""}.`);
-  }
-  const finalLine = "Compass is advisory: no tool blacklist or universal step sequence. Choose tools/routes freely within Human constraints; validate at risk-appropriate milestones. Use state deltas/details only when they add information beyond this projection.";
-  const mandatoryText = lines.join("\n");
-  const budget = Math.max(0, maxChars - mandatoryText.length - finalLine.length - 80);
-  let optionalUsed = 0;
-  let omitted = 0;
-  for (const line of optional) {
-    const cost = line.length + 1;
-    if (optionalUsed + cost <= budget) {
-      lines.push(line);
-      optionalUsed += cost;
-    } else omitted += 1;
-  }
-  if (omitted) lines.push(`Omitted ${omitted} secondary item(s); retrieve focused details only when relevant.`);
-  lines.push(finalLine);
-  return lines.join("\n");
 }
 
 export function buildGoalDetails(stateValue, maxChars = 26000) {
@@ -2335,12 +2162,12 @@ export function bindRouteSetQuestionnaire(stateValue, input, sourceEntryId, tool
   const state = routeInput(stateValue, input);
   const request = state.routeSet.selectionRequest;
   if (!request || request.status !== "awaiting_questionnaire") return { state, bound: false };
-  if (typeof sourceEntryId !== "string" || !sourceEntryId.trim()) return { state, bound: false };
+  if (typeof sourceEntryId !== "string" || !sourceEntryId.trim() || typeof toolCallId !== "string" || !toolCallId.trim()) return { state, bound: false };
   const provided = input?.questionnaire ?? input;
   if (!sameJsonValue(provided, { questions: [request.questionnaire] })
     || request.binding !== routeSetBinding(state.routeSet, state.goal.current)) return { state, bound: false };
   request.sourceEntryId = sourceEntryId.slice(0, 128);
-  request.toolCallId = typeof toolCallId === "string" ? toolCallId.slice(0, 128) : "";
+  request.toolCallId = toolCallId.slice(0, 128);
   request.status = "presented";
   return { state, bound: true, requestId: request.id };
 }
@@ -2437,7 +2264,7 @@ export function recordCompetitorResult(stateValue, input = {}) {
   const state = routeInput(stateValue, input);
   const run = state.routeSet.competitorRuns.find((item) => item.runId === input.runId && item.routeId === input.routeId);
   if (!run || run.goalVersion !== state.goal.version || run.baselineRef !== state.routeSet.baselineRef || run.correlationId !== input.correlationId) throw new Error("Competitor identity, Goal version, baseline, or correlation is stale. No state changed.");
-  if (["cancelled", "failed"].includes(run.status)) throw new Error(`Competitor ${run.runId} is already terminal. No state changed.`);
+  if (["cancel_requested", "cancel_acknowledged"].includes(run.status) || run.cancellation) throw new Error(`Competitor ${run.runId} is already terminal or cancellation is in progress. No state changed.`);
   const criteria = input.criteria;
   if (!Array.isArray(criteria) || criteria.length !== state.routeSet.acceptanceCriteria.length) throw new Error("Competitor result must report every shared acceptance criterion. No state changed.");
   const expected = new Set(state.routeSet.acceptanceCriteria.map((item) => item.id));
@@ -2518,6 +2345,7 @@ export function updateCompetitorCancellation(stateValue, input = {}) {
   const run = state.routeSet.competitorRuns.find((item) => item.runId === input.runId && item.routeId === input.routeId);
   if (!run || run.goalVersion !== state.goal.version || run.baselineRef !== state.routeSet.baselineRef || run.correlationId !== input.correlationId) throw new Error("Competitor identity, Goal version, baseline, or correlation is stale. No state changed.");
   if (input.action === "request") {
+    if (run.cancellation?.phase === "unknown") throw new Error(`Competitor ${run.runId} has unknown cancellation termination; reconcile native identity before requesting again. No state changed.`);
     const winner = state.routeSet.routes.find((route) => route.routeId === state.routeSet.winningRouteId);
     if (!winner || winner.acceptanceGate !== "passed" || state.routeSet.selectedRouteId !== winner.routeId || state.routeSet.comparison.status !== "accepted") throw new Error("Competitor cancellation is acceptance-gated; no current accepted winning route exists. No state changed.");
     if (run.routeId === winner.routeId) throw new Error("The accepted route cannot be cancelled as a competitor. No state changed.");
@@ -2530,13 +2358,15 @@ export function updateCompetitorCancellation(stateValue, input = {}) {
     if (!cancellation || cancellation.requestId !== input.requestId) throw new Error("Cancellation request identity is stale or unknown. No state changed.");
     if (input.action === "ack") {
       if (cancellation.phase !== "requested") throw new Error("Cancellation acknowledgement is out of order. No state changed.");
+      if (run.result) throw new Error(`Competitor ${run.runId} already has terminal result evidence. No state changed.`);
       cancellation.phase = "acknowledged";
       cancellation.acknowledgedAt = timestamp();
       run.status = "cancel_acknowledged";
     } else if (input.action === "terminal") {
       if (!["requested", "acknowledged"].includes(cancellation.phase)) throw new Error("Cancellation terminal acknowledgement is out of order. No state changed.");
+      if (run.result) throw new Error(`Competitor ${run.runId} already has terminal result evidence. No state changed.`);
       const terminalStatus = nonEmpty(input.terminalStatus, "terminalStatus", 32);
-      if (!new Set(["completed", "failed", "timed_out", "cancelled", "interrupted", "tool_budget_exhausted", "structured_output_failed", "acceptance_failed", "invalid_request", "unavailable_context", "duplicate_node"]).has(terminalStatus)) {
+      if (!CANCELLATION_TERMINAL_STATUSES.has(terminalStatus)) {
         throw new Error(`terminalStatus "${terminalStatus}" is not a documented native terminal outcome. No state changed.`);
       }
       cancellation.phase = "terminal";
@@ -2544,6 +2374,7 @@ export function updateCompetitorCancellation(stateValue, input = {}) {
       cancellation.terminalStatus = terminalStatus;
       run.status = terminalStatus === "cancelled" ? "cancelled" : terminalStatus === "completed" ? "completed" : "failed";
     } else if (input.action === "unknown") {
+      if (!["requested", "acknowledged"].includes(cancellation.phase)) throw new Error("Unknown cancellation acknowledgement is out of order. No state changed.");
       cancellation.phase = "unknown";
       cancellation.terminalAt = timestamp();
       cancellation.terminalStatus = "unknown";
@@ -2623,9 +2454,9 @@ export function bindDagApprovalQuestionnaire(stateValue, input, sourceEntryId, t
   const state = normalizeGoalRunState(stateValue);
   const request = state.plan.approvalRequest;
   if (!request || request.status !== "awaiting_questionnaire" || !matchesDagApprovalQuestion(request, input)) return { state, bound: false };
-  if (typeof sourceEntryId !== "string" || !sourceEntryId.trim()) return { state, bound: false };
+  if (typeof sourceEntryId !== "string" || !sourceEntryId.trim() || typeof toolCallId !== "string" || !toolCallId.trim()) return { state, bound: false };
   request.sourceEntryId = sourceEntryId.slice(0, 128);
-  request.toolCallId = typeof toolCallId === "string" ? toolCallId.slice(0, 128) : "";
+  request.toolCallId = toolCallId.slice(0, 128);
   request.status = "presented";
   return { state, bound: true, requestId: request.id };
 }

@@ -45,8 +45,10 @@ export function dagApprovalBinding(state) {
       .map((item) => ({ id: item.id, text: item.text, hard: item.hard === true, pinned: item.pinned === true })),
     decisions: {
       human: (state?.humanDecisions ?? [])
-        .filter((item) => item.goalVersion === version && item.sourceEntryId !== state?.plan?.approvalRequest?.sourceEntryId)
-        .map((item) => ({ id: item.id, sourceEntryId: item.sourceEntryId ?? "", text: item.text, questionnaire: item.questionnaire ?? null })),
+        .filter((item) => item.goalVersion === version
+          && !(item.sourceEntryId === state?.plan?.approvalRequest?.sourceEntryId
+            && item.sourceCallId === state?.plan?.approvalRequest?.toolCallId))
+        .map((item) => ({ id: item.id, sourceEntryId: item.sourceEntryId ?? "", sourceCallId: item.sourceCallId ?? "", text: item.text, questionnaire: item.questionnaire ?? null })),
       goal: (state?.decisions ?? [])
         .filter((item) => item.goalVersion === version)
         .map((item) => ({ id: item.id, summary: item.summary, rationale: item.rationale, evidence: item.evidence, affectedTaskIds: item.affectedTaskIds ?? [], supersededBy: item.supersededBy ?? null })),
@@ -110,9 +112,11 @@ export function approvalIsCurrent(state) {
     && request.status === "answered"
     && request.id === approval.requestId
     && request.sourceEntryId
+    && request.toolCallId
+    && approval.sourceEntryId === request.sourceEntryId
+    && approval.sourceCallId === request.toolCallId
     && request.binding === dagApprovalBinding(state)
     && approval.binding === request.binding
-    && approval.sourceEntryId === request.sourceEntryId
     && approval.goalVersion === (state.goal?.version ?? 1));
 }
 

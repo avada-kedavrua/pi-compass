@@ -11,7 +11,7 @@ test("GoalRun v7 module exports the complete runtime contract", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   assert.equal(goalRun.GOAL_RUN_RELEASE, manifest.version);
   const required = [
-    "applyGoalChange", "dismissGoalChangeCandidate", "availableCapabilities", "acceptanceStatus", "goalOutcomeStatus", "planningActivationSignal", "buildGoalAnchor",
+    "applyGoalChange", "dismissGoalChangeCandidate", "availableCapabilities", "acceptanceStatus", "goalOutcomeStatus", "planningActivationSignal",
     "buildGoalDetails", "buildIssueReview", "buildRecentEvents", "buildStateSnapshot", "stripConventionSections", "triageIssue", "defineAcceptanceCriteria",
     "recordAcceptanceResult", "shouldSurfaceIssueReview", "captureHumanPrompt",
     "captureHumanDecision", "recordHumanQuestionnaireFailure", "emptyGoalRunState",

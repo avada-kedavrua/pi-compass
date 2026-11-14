@@ -91,7 +91,7 @@ if (release?.name === manifest?.name && release?.version === manifest?.version &
 const goalRunPath = path.join(packageRoot, "src", "goal-run.mjs");
 const requiredGoalRunExports = [
   "GOAL_RUN_API_VERSION", "GOAL_RUN_RELEASE", "applyGoalChange", "dismissGoalChangeCandidate", "availableCapabilities", "acceptanceStatus", "goalOutcomeStatus", "planningActivationSignal",
-  "buildGoalAnchor", "buildGoalDetails", "buildIssueReview", "buildRecentEvents", "buildStateSnapshot", "stripConventionSections", "triageIssue",
+  "buildGoalDetails", "buildIssueReview", "buildRecentEvents", "buildStateSnapshot", "stripConventionSections", "triageIssue",
   "defineAcceptanceCriteria", "recordAcceptanceResult", "shouldSurfaceIssueReview",
   "captureHumanPrompt", "captureHumanDecision", "recordHumanQuestionnaireFailure", "emptyGoalRunState",
   "explicitGoalChangeUpdates", "hasUsefulTrace",
