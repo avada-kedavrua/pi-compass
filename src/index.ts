@@ -1241,7 +1241,7 @@ function contextOperationSchema() {
     lifetime: Type.Optional(Type.String({ enum: ["goal", "session"], description: "Retention lifetime, default current Goal. Frame ownership still ends on return." })),
     purpose: Type.Optional(Type.String({ minLength: 1, maxLength: 1000, description: "Why this spill artifact is needed." })),
     range: Type.Optional(range),
-    verifiedAgainst: Type.Optional(selection),
+    verifiedAgainst: Type.Optional(Type.Object({ id: sourceId, version, binding: Type.Optional(binding) }, { additionalProperties: false, description: "Complete later read payload used to verify coalescing; a selected range cannot authorize removing an uncovered remainder." })),
     compare: Type.Optional(Type.Array(selection, { maxItems: 16, description: "For search: compare persisted successful read calls/ranges; changed or unknown file revision stays qualified. Similarity is advisory, never an edit." })),
     rankedSources: Type.Optional(Type.Array(selection, { maxItems: 16, description: "For search: Agent-selected source ordering; runtime verifies IDs, versions and ranges, not semantic scores." })),
     scope: Type.Optional(Type.String({ maxLength: 64, description: "Pin ownership, or transfer destination: root or an active frame ID; defaults to the current frame for pins." })),

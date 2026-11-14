@@ -534,6 +534,7 @@ function verifyMoveComparison(index, state, operation) {
   const sourceId = operation.ids[0];
   const sourceVersion = operation.version;
   const comparison = operation.verifiedAgainst;
+  if (comparison.range !== undefined) fail("Verified coalescing requires the complete comparison read payload; use search compare for selected-range analysis without removing its remainder.");
   ensureIds([comparison.id]);
   const sourceObservation = readOnlyObservation(index, sourceId);
   const comparedObservation = readOnlyObservation(index, comparison.id);
@@ -541,13 +542,13 @@ function verifyMoveComparison(index, state, operation) {
   ensureVersion(sourceVersion);
   ensureVersion(comparison.version);
   if (sourceVersion !== sourceObservation.payloadVersion || comparison.version !== comparedObservation.payloadVersion) fail("Read relocation source or comparison payload version is stale.");
-  resolveSource(index, state, { ...comparison, range: undefined }, operation.sourceScope ?? "all");
+  resolveSource(index, state, comparison, operation.sourceScope ?? "all");
   if (sourceObservation.path !== comparedObservation.path) fail("Read relocation sources do not identify the same canonical path.");
   exchangeClosure(index, [sourceId]);
   exchangeClosure(index, [comparison.id]);
   const candidates = new Map([
     [sourceId, { id: sourceId, version: sourceObservation.payloadVersion }],
-    [comparison.id, { id: comparison.id, version: comparedObservation.payloadVersion, ...(comparison.range !== undefined ? { range: comparison.range } : {}) }],
+    [comparison.id, { id: comparison.id, version: comparedObservation.payloadVersion }],
   ]);
   let afterSource = false;
   let scannedAfterSource = 0;
@@ -578,7 +579,7 @@ function verifyMoveComparison(index, state, operation) {
   if (report.changed.length) fail(`Read relocation rejected: changed-file or payload evidence conflicts (${report.changed[0].reason}).`);
   fail("Read relocation requires an exact repeated range or a revision-verified covered subset; no source information was changed.");
 }
-function planMove({ next, index, operation, boundary }) {
+function planMove({ next, index, operation, boundary, moveComparison }) {
   ensureIds(operation.ids);
   if (!operation.ids.length) fail("Select versioned source values to move to the append end.");
   if (operation.range) {
@@ -613,6 +614,13 @@ function planMove({ next, index, operation, boundary }) {
   }
   const versions = new Map((operation.versions ?? []).map((item) => [item.id, item.version]));
   const entries = [];
+  let companion = null;
+  if (moveComparison) {
+    companion = currentValue(next, index, operation.verifiedAgainst.id, { key: operation.verifiedAgainst.binding });
+    assertWritableValue(next, companion);
+    if (companion.message?.role !== "toolResult" || companion.nativeId !== companion.id || companion.version !== operation.verifiedAgainst.version) fail("The comparison must be the exact visible original read result, not an edited or private view.");
+    if (next.pins.some((pin) => pin.id === companion.id || pin.id === operation.ids[0])) fail("Explicitly unpin both covered sources before verified read coalescing.");
+  }
   for (const id of operation.ids) {
     const value = currentValue(next, index, id, { key: operation.binding });
     assertWritableValue(next, value);
@@ -628,6 +636,11 @@ function planMove({ next, index, operation, boundary }) {
     if (value.version !== expected) fail(`Source ${id} changed since selection.`);
     const head = adoptValue(next, value);
     head.rendered = true;
+    if (companion) {
+      if (!head.sources.includes(companion.id)) head.sources.push(companion.id);
+      if (moveComparison.kind === "subset") head.caveats = [...new Set([...head.caveats, `Earlier superset retained; only lines ${moveComparison.range.startLine}-${moveComparison.range.endLine} were refreshed. Outside-subset data remains unrefreshed.`])];
+      validateValue(head);
+    }
     const protectedView = next.pins.some((pin) => pin.id === value.id && pin.key !== value.key);
     if (!protectedView) {
       const pointer = value.message.role === "toolResult" ? [{ type: "text", text: `Context relocation pointer, not original tool output: source ${value.id} @${value.version}; complete payload follows as retained data.` }] : null;
@@ -635,6 +648,13 @@ function planMove({ next, index, operation, boundary }) {
       entries.push(nativeEdit(value.nativeId, pointer));
     }
     entries.push(valueMessage(value, value.content, head));
+  }
+  if (companion) {
+    const head = adoptValue(next, companion);
+    const pointer = [{ type: "text", text: `Covered read pointer, not original tool output: source ${companion.id} @${companion.version}; verified ${moveComparison.kind} payload follows as source ${operation.ids[0]} @${operation.version}. The raw read exchange is unchanged.` }];
+    head.rendered = true;
+    head.pointerVersion = contentVersion(pointer);
+    entries.push(nativeEdit(companion.nativeId, pointer));
   }
   return entries;
 }
@@ -679,9 +699,9 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
     const movedRole = movedEntry ? messageOf(movedEntry)?.role : null;
     const comparison = args.moveComparison;
     const comparisonText = comparison?.kind === "exact"
-      ? ` Verified exact repeat of ${comparison.firstId} and ${comparison.secondId} at ${comparison.path}; the earlier payload was relocated.`
+      ? ` Verified exact repeat of ${comparison.firstId} and ${comparison.secondId} at ${comparison.path}; the earlier payload was relocated and the covered companion became a qualified pointer.`
       : comparison?.kind === "subset"
-        ? ` Verified subset of ${comparison.path} on file revision ${comparison.fileRevision}; the full prior superset was relocated and content outside lines ${comparison.range.startLine}-${comparison.range.endLine} remains unrefreshed.`
+        ? ` Verified subset of ${comparison.path} on file revision ${comparison.fileRevision}; the full prior superset was relocated, the covered subset became a qualified pointer, and content outside lines ${comparison.range.startLine}-${comparison.range.endLine} remains unrefreshed.`
         : "";
     const change = operation.action !== "move" ? "" : operation.range
       ? movedRole === "toolResult"
@@ -690,7 +710,7 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
       : movedRole === "toolResult"
         ? " The complete verified read payload was relocated to the append end; its original call/result pair remains present with a projection pointer."
         : " The selected working value was moved to the append end.";
-    entries.push(nativeMessage(`Context ${operation.action} applied; revision ${next.revision}. Sources: ${(operation.ids ?? []).join(", ")}.${change}${comparisonText}${references.length ? ` Values: ${JSON.stringify(references)}` : ""}`, { action: operation.action, revision: next.revision, references, ...(operation.action === "move" ? { sourceIds: [...(operation.ids ?? [])], range: operation.range ?? null, rawExchangePreserved: movedRole === "toolResult", rawSourcePreserved: movedRole !== "toolResult", ...(comparison ? { relocationComparison: comparison } : {}) } : {}) }));
+    entries.push(nativeMessage(`Context ${operation.action} applied; revision ${next.revision}. Sources: ${(operation.ids ?? []).join(", ")}.${change}${comparisonText}${references.length ? ` Values: ${JSON.stringify(references)}` : ""}`, { action: operation.action, revision: next.revision, references, ...(operation.action === "move" ? { sourceIds: [...(operation.ids ?? [])], range: operation.range ?? null, rawExchangePreserved: movedRole === "toolResult", rawSourcePreserved: movedRole !== "toolResult", ...(comparison ? { relocationComparison: comparison, coalescedSourceIds: [operation.verifiedAgainst.id] } : {}) } : {}) }));
   }
   return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: ["call", "return"].includes(operation.action) && boundary.outcome === "completed" };
 }

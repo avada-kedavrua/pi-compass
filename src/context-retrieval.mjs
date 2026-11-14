@@ -59,7 +59,7 @@ function* candidates(index, state, scope) {
     for (const [nativeId, item] of index.active) {
       if (!item.messages.length || known.has(nativeId)) continue;
       const id = logicalSource(index, nativeId);
-      const value = currentValue(state, index, id);
+      const value = currentValue(state, index, id, { allowHidden: true });
       if (value.nativeId !== nativeId) continue;
       yield record(index, id, value.key, "active", value.content, value.head, "active");
     }

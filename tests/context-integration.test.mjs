@@ -115,21 +115,34 @@ test("tool schema and installed boundary carry verified range moves and Agent-ra
 
 test("verified repeat relocation crosses the native tool schema and keeps both read exchanges", async () => {
   const host = await setup();
+  const payload = `one\n${"two ".repeat(8000)}\nthree`;
   const read = (callId) => {
     host.manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: "notes.txt" } }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
-    return host.manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text: "one\ntwo\nthree" }], isError: false, timestamp: Date.now() });
+    return host.manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text: payload }], isError: false, timestamp: Date.now() });
   };
   const first = read("first-read");
   const second = read("second-read");
   const prior = structuredClone(host.manager.getEntry(first));
+  const compared = structuredClone(host.manager.getEntry(second));
+  const beforeBytes = Buffer.byteLength(modelText(host.manager));
   const version = sourceVersion(host.manager, first);
   assert.ok(host.tools.get("compass_context").parameters.properties.verifiedAgainst);
   const search = await host.tools.get("compass_context").execute("compare", { action: "search", expectedRevision: 0, compare: [{ id: first, version }, { id: second, version }] }, undefined, undefined, host.runner.createContext());
   assert.equal(JSON.parse(search.content[0].text).repetition.exact[0].relocateId, first);
   await host.turn({ action: "move", expectedRevision: 0, ids: [first], version, verifiedAgainst: { id: second, version } });
   assert.deepEqual(host.manager.getEntry(first), prior);
+  assert.deepEqual(host.manager.getEntry(second), compared);
+  assert.equal(modelText(host.manager).split(JSON.stringify(payload).slice(1, -1)).length - 1, 1, "verified relocation keeps one covered payload, not a new duplicate");
+  assert.ok(Buffer.byteLength(modelText(host.manager)) < beforeBytes, "coalescing reduces serialized context for the representative large read");
   assert.match(modelText(host.manager), /Verified exact repeat/);
   assert.match(modelText(host.manager), /one/);
+  const history = await host.tools.get("compass_context").execute("recover-covered", { action: "search", expectedRevision: 1, sourceScope: "history", ids: [second], query: "two" }, undefined, undefined, host.runner.createContext());
+  assert.equal(JSON.parse(history.content[0].text).hits[0].version, version);
+  const pinned = read("pinned-read");
+  await host.turn({ action: "pin", expectedRevision: 1, ids: [pinned] });
+  await host.turn({ action: "move", expectedRevision: 2, ids: [first], version, verifiedAgainst: { id: pinned, version } });
+  assert.equal(restoreContextState(host.manager.getBranch()).revision, 2, "coalescing cannot consume a pinned companion");
+  assert.match(modelText(host.manager), /Pinned source.*explicitly unpinned/);
   assertPaired(host.manager);
   assert.deepEqual(host.errors, []);
 });

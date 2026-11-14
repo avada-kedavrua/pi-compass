@@ -166,10 +166,20 @@ test("cross-read repeat checks use persisted call identity, exact payloads, and 
   applyOperation(manager, { action: "move", ids: [superset], version: sourceVersion(manager, superset), verifiedAgainst: { id: subset, version: sourceVersion(manager, subset) } });
   assert.deepEqual(manager.getEntry(superset), originalSuperset, "explicit relocation changes only the future projection");
   assert.match(modelText(manager), /full prior superset was relocated/);
+  assert.equal(modelText(manager).split(JSON.stringify("two\nthree").slice(1, -1)).length - 1, 1, "covered subset is not duplicated beside the preserved superset");
+  assert.match(restoreContextState(manager.getBranch()).values[`root/${superset}`].caveats.join(" "), /Outside-subset data remains unrefreshed/);
   assertPaired(manager);
   const revisedSubset = addRead("revised-subset", { offset: 2, limit: 2, revision: "file-v2" }, "two\nthree");
   const revisionChanged = compare([{ id: superset, version: sourceVersion(manager, superset) }, { id: revisedSubset, version: sourceVersion(manager, revisedSubset) }]);
   assert.match(revisionChanged.changed[0].reason, /file revision changed/);
+
+  const small = addRead("small-selected", { path: "src/selection.txt", offset: 2, limit: 2, revision: "v1" }, "two\nthree");
+  const wider = addRead("wider-selected", { path: "src/selection.txt", offset: 1, limit: 4, revision: "v1" }, "one\ntwo\nthree\nfour");
+  const partialComparison = queueOperation(manager, { action: "move", ids: [small], version: sourceVersion(manager, small), verifiedAgainst: { id: wider, version: sourceVersion(manager, wider), range: { part: 0, startLine: 2, endLine: 3 } } });
+  const beforePartialComparison = manager.getEntries().length;
+  assert.throws(() => planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: partialComparison }), /complete comparison read payload/);
+  assert.equal(manager.getEntries().length, beforePartialComparison, "a partial match cannot remove the companion's uncovered lines");
+  assert.equal(manager.buildSessionProjection().messages.find((message) => message.role === "toolResult" && message.toolCallId === "wider-selected").content[0].text, "one\ntwo\nthree\nfour");
 
   const noRevision = addRead("no-revision", { offset: 2, limit: 2 }, "two\nthree");
   const unknown = compare([{ id: superset, version: sourceVersion(manager, superset) }, { id: noRevision, version: sourceVersion(manager, noRevision) }]);
