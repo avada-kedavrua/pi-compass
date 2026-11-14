@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { open, realpath } from "node:fs/promises";
+import { open, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { contentVersion } from "./context-values.mjs";
 
@@ -19,8 +19,11 @@ async function withArtifactTarget(projectRoot, relativePath, fn) {
   const directories = [];
   const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
   try {
+    const rootIdentity = await stat(root);
     directories.push(await open(root, flags));
-    if (await realpath(`/proc/self/fd/${directories[0].fd}`) !== root) throw new Error("Artifact root changed during resolution.");
+    const openedRootIdentity = await directories[0].stat();
+    if (openedRootIdentity.dev !== rootIdentity.dev || openedRootIdentity.ino !== rootIdentity.ino
+      || await realpath(`/proc/self/fd/${directories[0].fd}`) !== root) throw new Error("Artifact root changed during resolution.");
     for (const segment of segments.slice(0, -1)) {
       directories.push(await open(`/proc/self/fd/${directories.at(-1).fd}/${segment}`, flags));
     }

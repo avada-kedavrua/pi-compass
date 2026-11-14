@@ -95,6 +95,8 @@ test("delegation request uses the public structured event contract and a bounded
   assert.equal(request.context, "fresh");
   assert.equal(request.model, PRIMARY_MODEL);
   assert.equal(request.thinking, "high");
+  const trimmed = buildSubagentDelegationRequest({ task: task("trimmed-model"), goal: "Inspect", cwd: "/tmp/project", ownerRunId: "wave", requestId: "trimmed", model: ` ${PRIMARY_MODEL} ` });
+  assert.equal(trimmed.model, PRIMARY_MODEL);
   assert.equal(request.result.kind, "structured");
   assert.deepEqual(request.result.schema, TASK_RESULT_SCHEMA);
   assert.match(request.task, /Current Goal: Map the API health path/);
@@ -108,6 +110,14 @@ test("delegation request uses the public structured event contract and a bounded
     ownerRunId: "wave",
     requestId: "request",
   }), /not explicitly routed to a read-only Subagent/);
+  assert.throws(() => buildSubagentDelegationRequest({
+    task: task("unknown-model"),
+    goal: "Inspect",
+    cwd: "/tmp/project",
+    ownerRunId: "wave",
+    requestId: "request",
+    model: "unknown/provider",
+  }), /supported delegated model/);
 });
 
 test("provider diagnostics and explicit account exhaustion drive one DeepSeek fallback without treating vague quota text as proof", () => {
@@ -155,6 +165,8 @@ test("structured terminal responses are correlated by request, owner, and node i
   assert.equal(parsed.usage.cost, 0.012);
   assert.equal(parsed.providerDiagnostics.lastError.kind, "rate_limited");
   assert.equal(parsed.providerDiagnostics.retry.phase, "backoff");
+  assert.equal(parseSubagentDelegationResponse({ ...response, model: "unknown/provider" }, { requestId: "req-a", ownerRunId: "wave-a", nodeId: "api", model: PRIMARY_MODEL }), null);
+  assert.equal(parseSubagentDelegationResponse({ ...response, model: REVIEW_MODEL }, { requestId: "req-a", ownerRunId: "wave-a", nodeId: "api", model: PRIMARY_MODEL }), null);
   assert.equal(parseSubagentDelegationResponse(response, { requestId: "other", ownerRunId: "wave-a", nodeId: "api" }), null);
   assert.equal(parseSubagentDelegationResponse(response, { requestId: "req-a", ownerRunId: "other", nodeId: "api" }), null);
   assert.equal(parseSubagentDelegationResponse(response, { requestId: "req-a", ownerRunId: "wave-a", nodeId: "other" }), null);

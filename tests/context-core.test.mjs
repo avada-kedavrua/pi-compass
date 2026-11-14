@@ -18,6 +18,15 @@ function host() {
 }
 function capture(manager, id, mode = "ref") { return { id, mode, version: sourceVersion(manager, id) }; }
 
+test("context normalization rejects missing and non-canonical reference bindings", () => {
+  const missing = emptyContextState();
+  missing.frames = [{ id: "frame-1", parent: "root", boundaryId: "boundary", summaryId: null, saved: [], refs: [{ id: "source", version: "a".repeat(24) }], copies: [] }];
+  assert.throws(() => normalizeContextState(missing), /reference capture binding/);
+  const nonCanonical = structuredClone(missing);
+  nonCanonical.frames[0].refs[0].key = "root/other/source";
+  assert.throws(() => normalizeContextState(nonCanonical), /reference capture binding/);
+});
+
 test("same-session call preserves reserved state, scopes inputs, and restores raw parent records", () => {
   const manager = host();
   const parent = user(manager, "PARENT PRIVATE CONTEXT");

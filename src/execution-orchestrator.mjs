@@ -20,10 +20,18 @@ const RECOGNIZED_THINKING = new Set(["off", "minimal", "low", "medium", "high", 
 // Pi-subagents may report the effective thinking level as `provider/id:high`.
 // Preserve the observed string in execution history, but validate the underlying
 // exact model identity plus a *recognized* suffix; no prefix/substring matching.
-export function isSupportedDelegatedModel(value, allowed = [PRIMARY_MODEL, REVIEW_MODEL, FALLBACK_MODEL]) {
-  if (typeof value !== "string") return false;
+function delegatedModelBase(value, allowed = [PRIMARY_MODEL, REVIEW_MODEL, FALLBACK_MODEL]) {
+  if (typeof value !== "string") return null;
   const model = value.trim();
-  return allowed.some((id) => model === id || (model.startsWith(`${id}:`) && RECOGNIZED_THINKING.has(model.slice(id.length + 1))));
+  return allowed.find((id) => model === id || (model.startsWith(`${id}:`) && RECOGNIZED_THINKING.has(model.slice(id.length + 1)))) ?? null;
+}
+export function isSupportedDelegatedModel(value, allowed = [PRIMARY_MODEL, REVIEW_MODEL, FALLBACK_MODEL]) {
+  return delegatedModelBase(value, allowed) !== null;
+}
+function modelMatchesExpected(observed, expected) {
+  const observedBase = delegatedModelBase(observed);
+  const expectedBase = delegatedModelBase(expected);
+  return observedBase !== null && (expectedBase === null || observedBase === expectedBase);
 }
 export const DEFAULT_THINKING = "high";
 export const DEFAULT_TIMEOUT_MS = 600_000;
@@ -192,7 +200,8 @@ export function buildSubagentDelegationRequest({
   }
   if (!String(cwd ?? "").trim()) throw new Error("A non-empty working directory is required.");
   if (!String(ownerRunId ?? "").trim() || !String(requestId ?? "").trim()) throw new Error("ownerRunId and requestId are required.");
-  if (!String(model ?? "").trim()) throw new Error("A model ID is required.");
+  const normalizedModel = String(model ?? "").trim();
+  if (!isSupportedDelegatedModel(normalizedModel)) throw new Error("A supported delegated model ID is required.");
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("timeoutMs must be a positive safe integer.");
 
   return {
@@ -203,7 +212,7 @@ export function buildSubagentDelegationRequest({
     task: buildTaskPrompt({ goal, task, constraints }),
     context: "fresh",
     cwd,
-    model,
+    model: normalizedModel,
     thinking,
     timeoutMs,
     // This is a read-only investigation budget, not a write-safety boundary.
@@ -270,7 +279,11 @@ export function parseSubagentDelegationResponse(value, expected = {}) {
 
   const status = boundedString(value.status, 40);
   const error = boundedString(value.error, 600);
-  const model = boundedString(value.model, 160) || boundedString(expected.model, 160) || "unknown";
+  const reportedModel = boundedString(value.model, 160);
+  const expectedModel = boundedString(expected.model, 160);
+  if ((reportedModel && !modelMatchesExpected(reportedModel, expectedModel))
+    || (expectedModel && !isSupportedDelegatedModel(expectedModel))) return null;
+  const model = reportedModel || expectedModel || "unknown";
   const progress = value.__compassProgress && typeof value.__compassProgress === "object" ? value.__compassProgress : null;
   const observedTools = Array.isArray(progress?.tools)
     ? [...new Set(progress.tools.filter((item) => typeof item === "string" && item.trim()).slice(0, 12).map((item) => item.trim().slice(0, 80)))]

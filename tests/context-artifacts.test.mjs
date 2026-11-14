@@ -47,6 +47,37 @@ test("artifact growth after stat cannot exceed the receipt-sized read budget", {
   }
 });
 
+test("a project root replaced at its pathname cannot redirect artifact creation", { skip: process.platform !== "linux" }, async (t) => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), "compass-artifact-root-race-"));
+  const root = path.join(parent, "project");
+  const held = path.join(parent, "held");
+  await mkdir(root);
+  const originalOpen = fs.promises.open;
+  let swapped = false;
+  t.mock.method(fs.promises, "open", async (file, flags, mode) => {
+    if ((flags & fs.constants.O_DIRECTORY) && !swapped) {
+      swapped = true;
+      await rename(root, held);
+      await mkdir(root);
+    }
+    return originalOpen(file, flags, mode);
+  });
+  syncBuiltinESMExports();
+  try {
+    const content = "qualified source";
+    const result = await writeContextArtifact({ projectRoot: root, relativePath: "source.json", source: "source", binding: "root/source", version: contentVersion(content), content, purpose: "retain source" });
+    assert.equal(swapped, true);
+    assert.equal(result.ok, false, "replacement root must fail identity verification");
+    assert.equal(result.possibleOrphan, null);
+    await assert.rejects(access(path.join(held, "source.json")), { code: "ENOENT" });
+    await assert.rejects(access(path.join(root, "source.json")), { code: "ENOENT" });
+  } finally {
+    t.mock.restoreAll();
+    syncBuiltinESMExports();
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
 // Deterministic race at the actual file-open boundary, not a probabilistic loop.
 test("an ancestor replaced by a symlink cannot redirect artifact creation", { skip: process.platform !== "linux" }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "compass-artifact-race-"));

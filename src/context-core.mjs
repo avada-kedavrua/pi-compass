@@ -38,6 +38,13 @@ function ensureContent(content) {
 function ensureVersion(version) {
   if (typeof version !== "string" || !/^[a-f0-9]{24}$/.test(version)) fail("A current source version is required.");
 }
+function ensureBinding(key, scopes, label, sourceId = null) {
+  if (typeof key !== "string" || key.length < 3 || key.length > 129) fail(`Invalid ${label} binding.`);
+  const separator = key.indexOf("/");
+  const remainder = separator < 0 ? "" : key.slice(separator + 1);
+  if (separator < 1 || !scopes.has(key.slice(0, separator)) || !remainder || remainder.includes("/")
+    || (sourceId !== null && remainder !== sourceId)) fail(`Invalid ${label} binding.`);
+}
 
 export function emptyContextState() {
   return { schemaVersion: CONTEXT_SCHEMA_VERSION, revision: 0, frames: [], pins: [], values: {}, watches: {} };
@@ -53,17 +60,34 @@ export function normalizeContextState(raw) {
   for (const frame of raw.frames) {
     if (!object(frame) || typeof frame.id !== "string" || !frame.id || scopes.has(frame.id) || frame.parent !== parent || typeof frame.boundaryId !== "string" || !(frame.summaryId === null || typeof frame.summaryId === "string")) fail("Invalid frame stack or parent summary reference.");
     if (!Array.isArray(frame.saved) || !Array.isArray(frame.refs) || !Array.isArray(frame.copies)) fail("Invalid frame source lists.");
+    const frameScopes = new Set([...scopes, frame.id]);
     ensureIds(frame.saved.map((item) => item.id), "saved source IDs");
     ensureIds(frame.refs.map((item) => item.id), "reference capture IDs");
     ensureIds(frame.copies.map((item) => item.id), "copy capture IDs");
-    for (const item of frame.saved) if (typeof item.visible !== "boolean" || !(item.editId === null || typeof item.editId === "string")) fail("Invalid saved source reference.");
-    for (const item of frame.refs) ensureVersion(item.version);
+    for (const item of frame.saved) {
+      if (typeof item.visible !== "boolean" || !(item.editId === null || typeof item.editId === "string")) fail("Invalid saved source reference.");
+      if (item.binding !== null && item.binding !== undefined) ensureBinding(item.binding, scopes, "saved source", item.logicalId ?? item.id);
+    }
+    for (const item of frame.refs) {
+      ensureVersion(item.version);
+      ensureBinding(item.key, scopes, "reference capture", item.id);
+    }
+    for (const item of frame.copies) {
+      ensureVersion(item.version);
+      if (item.viewKey !== null && item.viewKey !== undefined) ensureBinding(item.viewKey, frameScopes, "copy view", item.id);
+    }
     scopes.add(frame.id);
     parent = frame.id;
   }
-  for (const pin of raw.pins) if (!object(pin) || typeof pin.id !== "string" || !scopes.has(pin.scope) || !object(raw.values[pin.key]) || (pin.goalVersion !== undefined && (!Number.isSafeInteger(pin.goalVersion) || pin.goalVersion < 1))) fail("Invalid pin owner or value.");
+  for (const pin of raw.pins) {
+    if (!object(pin) || typeof pin.id !== "string" || !scopes.has(pin.scope) || !object(raw.values[pin.key]) || (pin.goalVersion !== undefined && (!Number.isSafeInteger(pin.goalVersion) || pin.goalVersion < 1))) fail("Invalid pin owner or value.");
+    ensureBinding(pin.key, scopes, "pin", pin.id);
+  }
   if (Object.keys(raw.values).length > MAX_SOURCES) fail("Too many active value bindings; retire or spill unused values.");
-  for (const head of Object.values(raw.values)) validateValue(head);
+  for (const [key, head] of Object.entries(raw.values)) {
+    ensureBinding(key, scopes, "value");
+    validateValue(head);
+  }
   for (const watch of Object.values(raw.watches)) {
     if (!object(watch) || !scopes.has(watch.owner)) fail("Invalid watch owner.");
     if (watch.instanceId !== undefined && (typeof watch.instanceId !== "string" || !watch.instanceId.trim())) fail("Invalid native watch identity.");
