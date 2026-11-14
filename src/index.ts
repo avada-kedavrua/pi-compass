@@ -74,6 +74,7 @@ import {
   revisePlanState,
   summarizePlanStatus,
   transitionTasks,
+  reconcileUnknownExecutionTasks,
   triageIssue,
 } from "./goal-run.mjs";
 import {
@@ -1751,10 +1752,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
               }
               if (currentTask.status !== "in_progress") throw new Error(`Task "${taskIdValue}" is ${currentTask.status}; expected in_progress for reconciliation. No state changed.`);
             }
-            const doneItems = params.results.filter((item: any) => item.status === "done" && state.plan.tasks.find((task: any) => task.id === item.id)?.status === "in_progress");
-            const blockedItems = params.results.filter((item: any) => item.status === "blocked" && state.plan.tasks.find((task: any) => task.id === item.id)?.status === "in_progress");
-            if (doneItems.length) state = transitionTasks(state, "done", doneItems.map((item: any) => ({ id: item.id, evidence: item.evidence })), updateTasks).state;
-            if (blockedItems.length) state = transitionTasks(state, "block", blockedItems.map((item: any) => ({ id: item.id, reason: item.reason })), updateTasks).state;
+            state = reconcileUnknownExecutionTasks(state, params.requestId, params.results, updateTasks).state;
             const latest = state.plan.execution;
             if (!latest || latest.requestId !== params.requestId) throw new Error("Execution record changed during reconciliation. No state changed.");
             latest.results = latest.results.map((item: any) => {
@@ -2533,12 +2531,13 @@ export default function (pi: any) {
         if (captured.captured) {
           state = captured.state;
           const routeRequest = state.routeSet?.selectionRequest;
-          if (routeRequest?.sourceEntryId === sourceEntryId && captured.item?.questionnaire) {
+          if (routeRequest?.sourceEntryId === sourceEntryId && routeRequest?.toolCallId === sourceCallId && captured.item?.questionnaire) {
             try {
               const selected = recordRouteSelection(state, {
                 expectedStateVersion: state.routeSet.stateVersion,
                 selectionRequestId: routeRequest.id,
                 sourceEntryId,
+                sourceCallId,
                 questionnaire: captured.item.questionnaire,
               });
               state = selected.state;

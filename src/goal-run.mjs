@@ -849,8 +849,9 @@ export function captureHumanDecision(stateValue, input) {
   const sourceEntryId = typeof input?.sourceEntryId === "string" ? input.sourceEntryId : "";
   const sourceCallId = typeof input?.sourceCallId === "string" ? input.sourceCallId : "";
   const approvalRequest = state.plan.approvalRequest;
-  const correlatedApprovalAnswer = Boolean(approvalRequest?.sourceEntryId && approvalRequest.sourceEntryId === sourceEntryId);
-  if (sourceEntryId && state.humanDecisions.some((item) => item.sourceEntryId === sourceEntryId)) {
+  const correlatedApprovalAnswer = Boolean(approvalRequest?.sourceEntryId && approvalRequest.sourceEntryId === sourceEntryId
+    && approvalRequest.toolCallId && approvalRequest.toolCallId === sourceCallId);
+  if (sourceEntryId && sourceCallId && state.humanDecisions.some((item) => item.sourceEntryId === sourceEntryId && item.sourceCallId === sourceCallId)) {
     return { state, captured: false, kind: "duplicate" };
   }
   const last = state.humanDecisions.at(-1);
@@ -904,10 +905,13 @@ export function recordHumanQuestionnaireFailure(stateValue, input) {
   const sourceCallId = typeof input?.sourceCallId === "string" ? input.sourceCallId.slice(0, 120) : "";
   const suppliedCode = typeof input?.errorCode === "string" ? input.errorCode : "";
   const errorCode = QUESTIONNAIRE_ERRORS.has(suppliedCode) ? suppliedCode : "unknown";
-  if (sourceEntryId && state.events.some((event) => event.kind === "human_questionnaire_error" && event.ref === sourceEntryId)) {
+  const hasIdentity = Boolean(sourceEntryId && sourceCallId);
+  if (hasIdentity && state.events.some((event) => event.kind === "human_questionnaire_error"
+    && event.sourceEntryId === sourceEntryId && event.sourceCallId === sourceCallId)) {
     return { state, captured: false, kind: "duplicate" };
   }
-  if (state.plan.approvalRequest?.sourceEntryId && state.plan.approvalRequest.sourceEntryId === sourceEntryId) {
+  if (state.plan.approvalRequest?.sourceEntryId === sourceEntryId
+    && state.plan.approvalRequest?.toolCallId && state.plan.approvalRequest.toolCallId === sourceCallId) {
     state.plan.approvalRequest.status = "questionnaire_error";
   }
   const reason = clip(input?.reason, 360);
@@ -920,6 +924,10 @@ export function recordHumanQuestionnaireFailure(stateValue, input) {
     status: errorCode,
     goalVersion: state.goal.version ?? 1,
   });
+  if (hasIdentity) {
+    event.sourceEntryId = sourceEntryId;
+    event.sourceCallId = sourceCallId;
+  }
   return { state, captured: true, kind: "error", event };
 }
 
@@ -940,6 +948,9 @@ export function applyGoalChange(stateValue, input) {
   const newGoal = nonEmpty(input?.newGoal || update.proposedGoal, "newGoal", 4000);
   if (newGoal === state.goal.current) throw new Error("newGoal is already the current Goal; no state changed.");
   const sourceText = sourceTextForUpdate(state, update) || update.text || "";
+  const suppliedCriteria = Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria : extractAcceptanceCriteria(sourceText);
+  const nextCriteria = suppliedCriteria
+    .map((item, i) => nonEmpty(item, `acceptanceCriteria[${i}]`, 300)).slice(0, MAX_ACCEPTANCE_CRITERIA);
   const sourceTextTruncated = sourceText.length > MAX_TEXT || update.sourceTextTruncated === true;
   const previousPlan = state.plan;
   const prior = {
@@ -976,7 +987,11 @@ export function applyGoalChange(stateValue, input) {
   state.goalChanges = [...state.goalChanges, prior].slice(-MAX_GOAL_CHANGES);
   state.goal.changes = [...state.goalChanges];
   const previousVersion = state.goal.version ?? 1;
-  update.goalChangeResolution = "applied";
+  state.goal.updates = state.goal.updates.map((item) => {
+    if (item.id !== updateId) return item;
+    const { sourceText: _sourceText, sourceTextTruncated: _sourceTextTruncated, ...retained } = item;
+    return { ...retained, goalChangeResolution: "applied" };
+  });
   state.goal.current = newGoal;
   state.goal.version = previousVersion + 1;
   state.goal.sourceUpdateId = updateId;
@@ -984,8 +999,6 @@ export function applyGoalChange(stateValue, input) {
   state.goal.sourceUpdateTruncated = sourceTextTruncated;
   // The current Goal now owns the bounded source snapshot. Avoid keeping the
   // same long Human message in both the update record and Goal state.
-  delete update.sourceText;
-  delete update.sourceTextTruncated;
   // Directives written in the same Human message as this scope change belong to
   // the new Goal. Pending candidates remain on the old version until explicitly
   // applied; when applied, their associated directives move with them.
@@ -994,9 +1007,6 @@ export function applyGoalChange(stateValue, input) {
       ? { ...item, goalVersion: state.goal.version }
       : item);
   state.sessionDirectives = retainSessionDirectives(state.sessionDirectives, state.goal.version);
-  const suppliedCriteria = Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria : extractAcceptanceCriteria(sourceText);
-  const nextCriteria = suppliedCriteria
-    .map((item, i) => nonEmpty(item, `acceptanceCriteria[${i}]`, 300)).slice(0, MAX_ACCEPTANCE_CRITERIA);
   state.goal.acceptanceCriteria = [];
   state.goal.criteria = [];
   state.plan = emptyDagState();
@@ -2272,12 +2282,17 @@ export function createRouteSet(stateValue, input = {}) {
     if (!item || typeof item !== "object") throw new Error(`acceptanceCriteria[${index}] must be a string or object. No state changed.`);
     return { id: nonEmpty(item.id, `acceptanceCriteria[${index}].id`, 32), text: nonEmpty(item.text, `acceptanceCriteria[${index}].text`, 300) };
   });
+  const criterionIds = new Set();
+  for (const criterion of acceptanceCriteria) {
+    if (criterionIds.has(criterion.id)) throw new Error(`Duplicate shared acceptance criterion ID "${criterion.id}". No state changed.`);
+    criterionIds.add(criterion.id);
+  }
   if (!Array.isArray(input.routes) || input.routes.length < 2 || input.routes.length > 3) throw new Error("routes must contain 2..3 alternatives so the Human questionnaire stays within Pi's four-option limit. No state changed.");
   const ids = new Set();
   const routes = input.routes.map((route, index) => {
     if (!route || typeof route !== "object") throw new Error(`routes[${index}] must be an object. No state changed.`);
     const routeId = nonEmpty(route.routeId, `routes[${index}].routeId`, 40);
-    if (!ROUTE_ID.test(routeId)) throw new Error(`Route ID "${routeId}" is invalid. No state changed.`);
+    if (!ROUTE_ID.test(routeId) || routeId === "parallel_exploration") throw new Error(`Route ID "${routeId}" is invalid or reserved. No state changed.`);
     if (ids.has(routeId)) throw new Error(`Duplicate route ID "${routeId}". No state changed.`);
     ids.add(routeId);
     return {
@@ -2333,7 +2348,8 @@ export function bindRouteSetQuestionnaire(stateValue, input, sourceEntryId, tool
 export function recordRouteSelection(stateValue, input = {}) {
   const state = routeInput(stateValue, input);
   const request = state.routeSet.selectionRequest;
-  if (!request || request.status !== "presented" || request.id !== input.selectionRequestId || request.sourceEntryId !== input.sourceEntryId) throw new Error("Route selection questionnaire identity is stale or was not presented. No state changed.");
+  if (!request || request.status !== "presented" || request.id !== input.selectionRequestId || request.sourceEntryId !== input.sourceEntryId
+    || request.toolCallId !== (typeof input.sourceCallId === "string" ? input.sourceCallId : "")) throw new Error("Route selection questionnaire identity is stale or was not presented. No state changed.");
   if (request.binding !== routeSetBinding(state.routeSet, state.goal.current)) throw new Error("Route selection proposal changed after presentation. No state changed.");
   const questionnaire = input.questionnaire;
   const answer = questionnaire?.answers?.length === 1 ? questionnaire.answers[0] : null;
@@ -2442,6 +2458,7 @@ export function recordCompetitorResult(stateValue, input = {}) {
   route.caveats = run.result.caveats.concat(run.result.unresolvedCaveats);
   route.evidenceRefs = run.result.evidenceRefs;
   route.status = "evaluated";
+  if (state.routeSet.winningRouteId === route.routeId && acceptanceGate !== "passed") state.routeSet.winningRouteId = null;
   routeSetComparison(state);
   state.routeSet.stateVersion += 1;
   appendEvent(state, "route_competitor_result", { summary: `Recorded ${run.runId} result for route ${run.routeId}; acceptance gate ${acceptanceGate}.`, ref: run.runId, status: acceptanceGate });
@@ -2501,8 +2518,9 @@ export function updateCompetitorCancellation(stateValue, input = {}) {
   const run = state.routeSet.competitorRuns.find((item) => item.runId === input.runId && item.routeId === input.routeId);
   if (!run || run.goalVersion !== state.goal.version || run.baselineRef !== state.routeSet.baselineRef || run.correlationId !== input.correlationId) throw new Error("Competitor identity, Goal version, baseline, or correlation is stale. No state changed.");
   if (input.action === "request") {
-    if (state.routeSet.winningRouteId === null || state.routeSet.comparison.status !== "accepted") throw new Error("Competitor cancellation is acceptance-gated; no accepted route exists. No state changed.");
-    if (run.routeId === state.routeSet.winningRouteId) throw new Error("The accepted route cannot be cancelled as a competitor. No state changed.");
+    const winner = state.routeSet.routes.find((route) => route.routeId === state.routeSet.winningRouteId);
+    if (!winner || winner.acceptanceGate !== "passed" || state.routeSet.selectedRouteId !== winner.routeId || state.routeSet.comparison.status !== "accepted") throw new Error("Competitor cancellation is acceptance-gated; no current accepted winning route exists. No state changed.");
+    if (run.routeId === winner.routeId) throw new Error("The accepted route cannot be cancelled as a competitor. No state changed.");
     if (!["registered", "running", "unknown"].includes(run.status)) throw new Error(`Competitor ${run.runId} is not cancellable from status ${run.status}. No state changed.`);
     const requestId = nonEmpty(input.requestId, "requestId", 128);
     run.cancellation = { requestId, phase: "requested", requestedAt: timestamp(), acknowledgedAt: null, terminalAt: null, terminalStatus: null };
@@ -2517,10 +2535,14 @@ export function updateCompetitorCancellation(stateValue, input = {}) {
       run.status = "cancel_acknowledged";
     } else if (input.action === "terminal") {
       if (!["requested", "acknowledged"].includes(cancellation.phase)) throw new Error("Cancellation terminal acknowledgement is out of order. No state changed.");
+      const terminalStatus = nonEmpty(input.terminalStatus, "terminalStatus", 32);
+      if (!new Set(["completed", "failed", "timed_out", "cancelled", "interrupted", "tool_budget_exhausted", "structured_output_failed", "acceptance_failed", "invalid_request", "unavailable_context", "duplicate_node"]).has(terminalStatus)) {
+        throw new Error(`terminalStatus "${terminalStatus}" is not a documented native terminal outcome. No state changed.`);
+      }
       cancellation.phase = "terminal";
       cancellation.terminalAt = timestamp();
-      cancellation.terminalStatus = nonEmpty(input.terminalStatus, "terminalStatus", 32);
-      run.status = "cancelled";
+      cancellation.terminalStatus = terminalStatus;
+      run.status = terminalStatus === "cancelled" ? "cancelled" : terminalStatus === "completed" ? "completed" : "failed";
     } else if (input.action === "unknown") {
       cancellation.phase = "unknown";
       cancellation.terminalAt = timestamp();
@@ -2651,6 +2673,43 @@ export function dagApprovalStatus(stateValue) {
     status: approvalIsCurrent(state) ? "approved" : state.plan.approvalRequest?.status ?? "not_requested",
     currentBinding: dagApprovalBinding(state),
   };
+}
+
+export function reconcileUnknownExecutionTasks(stateValue, requestId, items, updateTasksFn) {
+  const state = normalizeGoalRunState(stateValue);
+  const execution = state.plan.execution;
+  if (!execution || execution.status !== "unknown" || execution.requestId !== requestId) throw new Error("Only the exact current unknown execution batch can be reconciled. No task state changed.");
+  if (!Array.isArray(items) || items.length !== execution.taskIds.length) throw new Error("Reconciliation requires one result for every exact batch task. No task state changed.");
+  const batchIds = new Set(execution.taskIds);
+  const seen = new Set();
+  const updates = items.map((item, index) => {
+    const id = nonEmpty(item?.id, `items[${index}].id`, 40);
+    if (!batchIds.has(id) || seen.has(id)) throw new Error(`Unexpected or duplicate batch task "${id}". No task state changed.`);
+    seen.add(id);
+    const task = state.plan.tasks.find((candidate) => candidate.id === id);
+    if (!task) throw new Error(`Task "${id}" is missing from this batch. No task state changed.`);
+    if (item.status === "done") {
+      const update = { id, status: "done", evidence: nonEmpty(item.evidence, `items[${index}].evidence`, 1600) };
+      if (task.status === "done") return null;
+      if (task.status !== "in_progress") throw new Error(`Task "${id}" is not in progress for this batch. No task state changed.`);
+      return update;
+    }
+    if (item.status === "blocked") {
+      const update = { id, status: "blocked", reason: nonEmpty(item.reason, `items[${index}].reason`, 600) };
+      if (task.status === "blocked") return null;
+      if (task.status !== "in_progress") throw new Error(`Task "${id}" is not in progress for this batch. No task state changed.`);
+      return update;
+    }
+    throw new Error(`Invalid terminal task result for "${id}". No task state changed.`);
+  });
+  if (seen.size !== batchIds.size) throw new Error("Reconciliation must cover the exact batch task set. No task state changed.");
+  const changed = updates.filter(Boolean);
+  if (changed.length) {
+    state.plan = updateTasksFn(state.plan, changed);
+    state.plan.executionDrift = null;
+    appendEvent(state, "execution_tasks_reconciled", { summary: `Reconciled exact unknown batch ${requestId}: ${changed.map((item) => item.id).join(", ")}.` });
+  }
+  return { state, affected: changed.map((item) => item.id) };
 }
 
 export function transitionTasks(stateValue, action, items, updateTasksFn) {

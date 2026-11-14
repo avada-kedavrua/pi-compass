@@ -752,6 +752,8 @@ test("restarted unresolved execution is marked unknown and can be reconciled wit
   await pi.events.get("session_start")({}, ctx(pi));
   const recovered = latestState(pi);
   assert.equal(recovered.plan.execution.status, "unknown");
+  await pi.events.get("message_end")({ message: { role: "user", id: "new-constraint", content: "Do not use subagents for this Goal." } }, ctx(pi));
+  assert.equal(dagApprovalStatus(latestState(pi)).approved, false, "new Human constraints invalidate prior execution approval");
   assert.ok(pi.activeNames().includes("compass_execution"), "recovery control is only surfaced while the batch is unresolved");
   assert.equal(pi.delegationRequests.length, 0, "restoration must not automatically re-dispatch possibly active children");
   const status = await currentTool(pi, "compass_execution").execute("status", { action: "status" }, undefined, undefined, ctx(pi));

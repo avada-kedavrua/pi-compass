@@ -27,6 +27,7 @@ import {
   buildGoalDetails,
   summarizePlanStatus,
   transitionTasks,
+  reconcileUnknownExecutionTasks,
   revisePlanState,
   bindDagApprovalQuestionnaire,
   renewDagApprovalRequest,
@@ -94,6 +95,7 @@ function humanSelectRoute(state, routeId) {
     expectedStateVersion: state.routeSet.stateVersion,
     selectionRequestId: request.id,
     sourceEntryId,
+    sourceCallId: `route-call-${request.id}`,
     questionnaire: { outcome: "answered", answers: [{ questionIndex: 0, question: request.questionnaire.question,
       answer: routeId, selected: [routeId], kind: "option" }] },
   }).state;
@@ -109,6 +111,7 @@ function authorizeRoutes(state) {
     expectedStateVersion: state.routeSet.stateVersion,
     selectionRequestId: request.id,
     sourceEntryId,
+    sourceCallId: `route-call-${request.id}`,
     questionnaire: { outcome: "answered", answers: [{ questionIndex: 0, question: request.questionnaire.question,
       answer: "parallel_exploration", selected: ["parallel_exploration"], kind: "option" }] },
   }).state;
@@ -191,6 +194,21 @@ test("route questionnaire answer must correlate to the exact question and contai
   ]) assert.throws(() => tryAnswer(invalid), /clear, note-free, correlated structured Human answer/);
 });
 
+test("route selection answers require both the persisted entry and call identity", () => {
+  const state = routeState();
+  const request = state.routeSet.selectionRequest;
+  const sourceEntryId = "route-question-entry";
+  const sourceCallId = "route-question-call";
+  const bound = bindRouteSetQuestionnaire(state, { expectedStateVersion: state.routeSet.stateVersion,
+    questionnaire: { questions: [request.questionnaire] } }, sourceEntryId, sourceCallId).state;
+  const answer = { outcome: "answered", answers: [{ questionIndex: 0, question: request.questionnaire.question,
+    answer: "routeA", selected: ["routeA"], kind: "option" }] };
+  const input = { expectedStateVersion: bound.routeSet.stateVersion, selectionRequestId: request.id, sourceEntryId,
+    sourceCallId: "different-call", questionnaire: answer };
+  assert.throws(() => recordRouteSelection(bound, input), /identity is stale/);
+  assert.equal(bound.routeSet.selectionRequest.status, "presented");
+});
+
 test("RouteSet bounds alternatives at three and direct select cannot bypass the Human choice", () => {
   const state = routeState();
   assert.throws(() => createRouteSet(withGoal(), { expectedStateVersion: 0, baselineRef: "git:b", acceptanceCriteria: ["check"],
@@ -200,6 +218,14 @@ test("RouteSet bounds alternatives at three and direct select cannot bypass the 
   assert.equal(humanSelectRoute(state, "routeA").routeSet.selectedRouteId, "routeA");
 });
 
+test("RouteSet rejects duplicate normalized criteria and reserved route IDs without mutation", () => {
+  const base = withGoal("Goal: compare alternatives");
+  const common = { expectedStateVersion: 0, baselineRef: "git:baseline", routes: [{ routeId: "A", summary: "A" }, { routeId: "B", summary: "B" }] };
+  assert.throws(() => createRouteSet(base, { ...common, acceptanceCriteria: ["x", { id: "C1", text: "y" }] }), /Duplicate shared acceptance criterion/);
+  assert.throws(() => createRouteSet(base, { ...common, acceptanceCriteria: ["x"], routes: [{ routeId: "parallel_exploration", summary: "A" }, { routeId: "B", summary: "B" }] }), /reserved/);
+  assert.equal(base.routeSet, null);
+});
+
 test("RouteSet preserves exact competitor identity and shared acceptance evidence", () => {
   let state = authorizeRoutes(routeState());
   state = registerCompetitorRun(state, { expectedStateVersion: 3, runId: "run-a", routeId: "routeA", baselineRef: "git:baseline", correlationId: "corr-a" }).state;
@@ -207,6 +233,26 @@ test("RouteSet preserves exact competitor identity and shared acceptance evidenc
   const result = recordCompetitorResult(state, { expectedStateVersion: 4, runId: "run-a", routeId: "routeA", correlationId: "corr-a", criteria: [{ id: "C1", status: "pass", evidence: "shared smoke test passed" }] });
   assert.equal(result.acceptanceGate, "passed");
   assert.equal(result.state.routeSet.competitorRuns[0].result.criteria[0].id, "C1");
+});
+
+test("RouteSet replaces winning evidence safely and rejects nonterminal cancellation outcomes", () => {
+  let state = authorizeRoutes(routeState());
+  for (const [runId, routeId] of [["run-a", "routeA"], ["run-b", "routeB"], ["run-c", "routeA"]]) {
+    state = registerCompetitorRun(state, { expectedStateVersion: state.routeSet.stateVersion, runId, routeId, baselineRef: "git:baseline", correlationId: `corr-${runId}` }).state;
+  }
+  state = recordCompetitorResult(state, { expectedStateVersion: state.routeSet.stateVersion, runId: "run-a", routeId: "routeA", correlationId: "corr-run-a", criteria: [{ id: "C1", status: "pass", evidence: "pass" }] }).state;
+  state = selectRoute(state, { expectedStateVersion: state.routeSet.stateVersion, routeId: "routeA" }).state;
+  state = recordCompetitorResult(state, { expectedStateVersion: state.routeSet.stateVersion, runId: "run-a", routeId: "routeA", correlationId: "corr-run-a", criteria: [{ id: "C1", status: "fail", evidence: "replacement failed" }] }).state;
+  state = recordCompetitorResult(state, { expectedStateVersion: state.routeSet.stateVersion, runId: "run-b", routeId: "routeB", correlationId: "corr-run-b", criteria: [{ id: "C1", status: "pass", evidence: "pass" }] }).state;
+  assert.equal(state.routeSet.winningRouteId, null);
+  assert.throws(() => updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "request", runId: "run-b", routeId: "routeB", correlationId: "corr-run-b", requestId: "cancel" }), /current accepted winning route/);
+  state = selectRoute(state, { expectedStateVersion: state.routeSet.stateVersion, routeId: "routeB" }).state;
+  state = updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "request", runId: "run-c", routeId: "routeA", correlationId: "corr-run-c", requestId: "cancel" }).state;
+  const before = structuredClone(state);
+  assert.throws(() => updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "terminal", runId: "run-c", routeId: "routeA", correlationId: "corr-run-c", requestId: "cancel", terminalStatus: "running" }), /documented native terminal outcome/);
+  assert.deepEqual(state, before);
+  state = updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "terminal", runId: "run-c", routeId: "routeA", correlationId: "corr-run-c", requestId: "cancel", terminalStatus: "cancelled" }).state;
+  assert.equal(state.routeSet.competitorRuns.find((run) => run.runId === "run-c").status, "cancelled");
 });
 
 test("RouteSet cancellation is acceptance-gated and tracks unknown termination", () => {
@@ -220,6 +266,49 @@ test("RouteSet cancellation is acceptance-gated and tracks unknown termination",
   state = updateCompetitorCancellation(state, { expectedStateVersion: 8, action: "unknown", runId: "run-b", routeId: "routeB", correlationId: "corr-b", requestId: "cancel-1" }).state;
   assert.equal(state.routeSet.competitorRuns.find((run) => run.runId === "run-b").status, "unknown");
   assert.equal(state.routeSet.competitorRuns.find((run) => run.runId === "run-b").cancellation.phase, "unknown");
+});
+
+test("approval correlation and questionnaire deduplication use both persisted identities", () => {
+  let state = revisePlanState(withGoal(), { acceptanceCriteria, tasks }).state;
+  const request = state.plan.approvalRequest;
+  const entryId = "same-assistant-entry";
+  const callId = "approval-call";
+  state = bindDagApprovalQuestionnaire(state, approvalInput(request), entryId, callId).state;
+  const details = { answers: [{ questionIndex: 0, question: request.question, kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] };
+  const wrong = captureHumanDecision(state, { source: "ask_user_question", sourceEntryId: entryId, sourceCallId: "other-call", details });
+  assert.equal(dagApprovalStatus(wrong.state).approved, false);
+  const right = captureHumanDecision(wrong.state, { source: "ask_user_question", sourceEntryId: entryId, sourceCallId: callId, details });
+  assert.equal(dagApprovalStatus(right.state).approved, true);
+  assert.equal(captureHumanDecision(right.state, { source: "ask_user_question", sourceEntryId: entryId, sourceCallId: callId, details }).captured, false);
+  const failed = recordHumanQuestionnaireFailure(right.state, { sourceEntryId: entryId, sourceCallId: "failure-one", errorCode: "no_ui" });
+  const anotherFailure = recordHumanQuestionnaireFailure(failed.state, { sourceEntryId: entryId, sourceCallId: "failure-two", errorCode: "no_ui" });
+  assert.equal(anotherFailure.captured, true);
+});
+
+test("questionnaire failures correlate and deduplicate by persisted entry and call pair", () => {
+  const state = revisePlanState(withGoal(), { acceptanceCriteria, tasks }).state;
+  const request = state.plan.approvalRequest;
+  const entryId = "same-entry";
+  const callId = "bound-call";
+  const bound = bindDagApprovalQuestionnaire(state, approvalInput(request), entryId, callId).state;
+  const unrelated = recordHumanQuestionnaireFailure(bound, { sourceEntryId: entryId, sourceCallId: "other-call", errorCode: "no_ui" });
+  assert.equal(unrelated.state.plan.approvalRequest.status, "presented");
+  const failure = recordHumanQuestionnaireFailure(unrelated.state, { sourceEntryId: entryId, sourceCallId: callId, errorCode: "no_ui" });
+  assert.equal(failure.state.plan.approvalRequest.status, "questionnaire_error");
+  assert.equal(recordHumanQuestionnaireFailure(failure.state, { sourceEntryId: entryId, sourceCallId: callId, errorCode: "no_ui" }).kind, "duplicate");
+  assert.equal(recordHumanQuestionnaireFailure(failure.state, { sourceEntryId: entryId, sourceCallId: "another-call", errorCode: "no_ui" }).captured, true);
+});
+
+test("confirmed terminal execution facts reconcile despite stale approval without advancing dependencies", () => {
+  let state = withPlan(withGoal());
+  state = transitionTasks(state, "start", [{ id: "api" }], updateTasks).state;
+  state.plan.execution = { requestId: "native-batch", status: "unknown", taskIds: ["api"], planRevision: state.plan.revision };
+  state = captureHumanPrompt(state, "Do not use the existing API; preserve the existing Goal and constraints.").state;
+  assert.equal(dagApprovalStatus(state).approved, false);
+  const reconciled = reconcileUnknownExecutionTasks(state, "native-batch", [{ id: "api", status: "done", evidence: "native terminal result" }], updateTasks).state;
+  assert.equal(reconciled.plan.tasks.find((task) => task.id === "api").status, "done");
+  assert.equal(reconciled.plan.tasks.find((task) => task.id === "ui").status, "pending");
+  assert.throws(() => transitionTasks(reconciled, "start", [{ id: "ui" }], updateTasks), /current correlated Human approval/);
 });
 
 test("selected RouteSet route stays isolated from the DAG until the Agent creates one", () => {
@@ -388,6 +477,14 @@ test("one-shot review prompts are not persisted as session directives or convent
   assert.equal(ordinary.state.goal.updates.length, 1);
 });
 
+test("invalid acceptance criteria leave the original pending Goal update untouched", () => {
+  const state = captureHumanPrompt(withGoal(), "Actually, I need online visual editing instead of local parsing.").state;
+  const update = state.goal.updates.find((item) => item.id === "U1");
+  const before = structuredClone(update);
+  assert.throws(() => applyGoalChange(state, { updateId: "U1", newGoal: "Implement the replacement", acceptanceCriteria: [" "] }), /acceptanceCriteria\[0\]/);
+  assert.deepEqual(update, before);
+});
+
 test("only a recorded explicit scope update can change Current Goal, and the old plan is archived", () => {
   let state = withPlan(withGoal());
   state = captureHumanPrompt(state, "Actually, I need online visual editing instead of local parsing.").state;
@@ -520,7 +617,7 @@ test("ask-user-question choices are kept as authoritative decisions and included
   const duplicate = captureHumanDecision(captured.state, {
     source: "ask_user_question", sourceEntryId: "entry-q1", sourceCallId: "different-provider-id", text: "duplicate",
   });
-  assert.equal(duplicate.captured, false);
+  assert.equal(duplicate.captured, true, "a different tool call in the same persisted assistant entry is a distinct Human decision");
 });
 
 test("structured questionnaire answers preserve choice semantics without storing rich preview payloads", () => {
@@ -922,7 +1019,7 @@ test("DAG progression requires a correlated exact approval; partial and custom a
   assert.equal(dagApprovalStatus(freshDecision.state).approved, true, "renewed exact approval remains current despite reused provider call ID");
   assert.equal(freshDecision.state.humanDecisions.length, 2, "distinct persisted exchanges sharing a provider ID are both retained");
   const duplicate = captureHumanDecision(freshDecision.state, { sourceEntryId: "entry-fresh", sourceCallId: "different-provider-id", details: { answers: [{ questionIndex: 0, question: renewedRequest.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION }] } });
-  assert.equal(duplicate.kind, "duplicate", "only the same persisted exchange is deduplicated");
+  assert.notEqual(duplicate.kind, "duplicate", "a second tool call in the same persisted entry remains a separate decision");
 
   const revised = revisePlanState(state, { acceptanceCriteria, tasks: tasks.map((task) => task.id === "api" ? { ...task, acceptance: "API route and health semantics are documented with readiness evidence" } : task) }).state;
   assert.notEqual(revised.plan.approvalRequest.id, request.id, "material revision gets a new approval identity");
