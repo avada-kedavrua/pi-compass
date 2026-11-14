@@ -15,7 +15,7 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 ## Important boundaries
 
 - No second Pi session, transcript store, conventions registry, scheduler, polling observer, or automatic route fan-out.
-- Lexical retrieval is not semantic search. Similarity and repeated/subset-result automation are not silently claimed.
+- Lexical recovery is not semantic scoring. The Agent may rank verified candidates. Repeat analysis and relocation are explicit/on demand, not an always-on optimizer; a subset without a shared native file revision remains unknown.
 - Filesystem effects are not rolled back by Compass. Artifact writes report possible orphans if readback or a later native commit fails. Race-safe spill/reload currently requires Linux `/proc/self/fd`; other platforms fail closed rather than use a symlink check/open race.
 - Stock Pi 1.5.2 has no general awaited post-compaction canonical-restoration boundary. Compass uses request-side qualified overlays and later existing native boundaries instead of modifying Pi.
 - Recursive Compass use inside pi-subagents children is fail-closed because the installed delegation contract does not inherit Compass extensions.
@@ -27,6 +27,10 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 - Node.js: `>=22.16.0`.
 - TypeBox is supplied by Pi as a peer dependency; Compass must not install a package-local copy.
 - pi-subagents and ask-user-questions must be installed and enabled by the Human's Pi configuration when those capabilities are used.
+
+## Install
+
+From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
 
 ## Local validation
 

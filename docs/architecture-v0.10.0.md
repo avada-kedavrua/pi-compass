@@ -1,6 +1,6 @@
 # Compass v0.10.0 — requirements, milestones and delivery gates
 
-Status: v0.10 implementation in final integration. M1, the implemented M2/M3 context slice, M4 native composition, M5 approval/evidence gates, and M6 RouteSet authority have local evidence. M7 cleanup, final reconciliation and Human live Pi/provider acceptance remain open. This document is the single implementation checklist; unchecked items are not implemented or proven.
+Status: v0.10 local candidate. M0–M7 local delivery gates are complete, with explicit native reuse/unsupported decisions below. Verified implementation `b2d2a24` is pushed to `origin/chatgpt-only`; final local results are recorded below. Human live Pi/provider acceptance remains open; local tests and scoped source reviews are not that acceptance.
 
 ## Source of requirements
 
@@ -44,7 +44,7 @@ Evaluations end with evidence and a decision: implement, reuse a native capabili
 - [x] Recover original Human inputs and structured questionnaire answers; distinguish requirements, proposals and superseded instructions.
 - [x] Enumerate all known gaps and reproduce the frame defects locally, without provider requests.
 - [x] Replace premature completion checkboxes with this single milestone/TODO contract.
-- [ ] Keep each requirement assigned to a milestone through final reconciliation; no unassigned "later" list.
+- [x] Keep each requirement assigned to a milestone through final reconciliation; native capability decisions and Human-only evidence are recorded explicitly below.
 
 Audit baseline: native in-memory probes at `c355469` reproduced parent-summary loss, child-process resurrection after compaction, invisible-parent search failure, pin loss after native compaction, failing drop, orphan tool results after ref capture, and premature repeating-watch ownership release. Existing `npm test` still passed 200/200. This proves inadequate coverage, not correctness.
 
@@ -64,14 +64,14 @@ Goal: make the native projection reliable before adding more operations.
 
 Exit: regressions reproduce the audit defects before fixing them; targeted checks pass after the fix. No new AgentSession/loop and no raw transcript mutation. Remaining live-provider limitations stay explicit.
 
-Local M1 evidence (scoped independent review confirmed): six targeted regressions failed on the prior implementation, including dropped parent summaries, resurrected child process, incomplete exchanges, failed drop, tool-call rewrite and silently ignored mixed batches. Independent review found two further P1 defects: stale steering/watch state could erase a newly committed frame, and the commit digest excluded resulting control state. Both were reproduced as failing installed-runner tests and fixed; native wakes now reconcile committed state, Human text cannot spoof a native wake, and the digest binds the resulting state. Frame identity uses persisted entry IDs, not assumed session-global provider call IDs. Current context core/installed-runner checks 23/23, full tests 216/216, core 89/89, preflight and syntax/diff checks pass. LSP probing is not a clean/typecheck claim: one check was inconclusive and a pre-existing `Record<string, any>` rule finding remains in an untouched index section. Runner tests use the installed Pi implementation with registry/lifecycle adapters, not a live AgentSession or provider. At M1, context control schema was v2; the first M2 value slice used v3. Current-only v4 adds handling and Goal-scoped retention metadata. Earlier development states are rejected rather than migrated or silently reset.
+Local M1 evidence (scoped independent review confirmed): six targeted regressions failed on the prior implementation, including dropped parent summaries, resurrected child process, incomplete exchanges, failed drop, tool-call rewrite and silently ignored mixed batches. Independent review found two further P1 defects: stale steering/watch state could erase a newly committed frame, and the commit digest excluded resulting control state. Both were reproduced as failing installed-runner tests and fixed; native wakes now reconcile committed state, Human text cannot spoof a native wake, and the digest binds the resulting state. Frame identity uses persisted entry IDs, not assumed session-global provider call IDs. At the M1 checkpoint, context core/installed-runner checks 23/23, full tests 216/216, core 89/89, preflight and syntax/diff checks passed. LSP probing is not a clean/typecheck claim: one check was inconclusive and a pre-existing `Record<string, any>` rule finding remains in an untouched index section. Runner tests use the installed Pi implementation with registry/lifecycle adapters, not a live AgentSession or provider. At M1, context control schema was v2; the first M2 value slice used v3. Current-only v4 adds handling and Goal-scoped retention metadata. Earlier development states are rejected rather than migrated or silently reset.
 
 ## M2 — slots, retention and complete message operations
 
 - [x] Provide an explicit source/value ownership model: Reserved, scoped Pinned and Working, without a second transcript or conventions registry.
 - [x] Stable source IDs and versioned references; same-session shared bindings; explicit ref/copy capture and return with empty defaults.
 - [x] Copy-on-write rather than eager history duplication where the native protocol permits it; whole-value moves preserve tool envelopes and evidence identity.
-- [ ] Implement replace/drop and selected-range movement/reordering at protocol-safe boundaries; exact source/range selection is implemented for loads, but cut/reorder remains intentionally unimplemented.
+- [x] Implement replace/drop and selected-range movement at protocol-safe boundaries. Move Agent-authored text ranges to the append end, retaining the remainder; read-result ranges become qualified data copies so the complete original execution and larger superset remain intact. Human originals, executed calls and active Skill sources cannot be cut.
 - [x] Preserve active Skill content after it is read, with explicit scope and retirement; preserve material temporary Human requirements and handling state.
 - [x] Make pins survive native compaction and frame changes. Do not ban compaction to conceal an inconsistent projection.
 - [x] Carry sources, versions and caveats through summaries, exports and derived replacements. Agent-authored edits must not masquerade as original tool observations.
@@ -93,7 +93,7 @@ Two guarantees must be distinguished:
 
 **Human's proposed near-term direction:** after compaction, inject pinned content through system context on stock Pi. Record and evaluate this rather than treating a Pi fork as the only possible route.
 
-**Implemented retention path (local, not full M2):** pins have qualified native views with immutable source/body references. `context_with_system` supplements only missing complete outgoing envelopes; native-projection membership and key/version tags alone are not presence proof. Altered tagged snapshots fail visibly, and payload blocks are cloned at the extension boundary so later handlers cannot mutate original image data. At the next existing `turn_end`, Pi's chained preview supplies the preceding proposed frame/watch state; omitted snapshots are materialized through validated drafts plus integrity receipts, without requesting another turn. Scope deduplication, compacted-pin retirement, root pins through compacted frame entry/return, and original tool pairing are checked locally. Immediate post-compaction canonical restoration remains unavailable on stock Pi; the request overlay covers that gap until an existing boundary. The current local slice adds explicit Skill activation (`pin kind=skill` after a successful source read), `mark active|handled|retired` with rationale, and Goal-default/session-explicit retention lifetimes. Genuine structured questionnaire answers retain full notes and partial/declined distinctions as source-qualified data across frame return; rich previews remain only in raw history. Whole-value moves and exact-range data copies preserve tool envelopes. These paths are implemented, not independent approval of all M2 requirements; selected-range cut/reordering, material-external lifecycle integration and final receipt/review reconciliation remain pending.
+**Implemented retention path (local, not full M2):** pins have qualified native views with immutable source/body references. `context_with_system` supplements only missing complete outgoing envelopes; native-projection membership and key/version tags alone are not presence proof. Altered tagged snapshots fail visibly, and payload blocks are cloned at the extension boundary so later handlers cannot mutate original image data. At the next existing `turn_end`, Pi's chained preview supplies the preceding proposed frame/watch state; omitted snapshots are materialized through validated drafts plus integrity receipts, without requesting another turn. Scope deduplication, compacted-pin retirement, root pins through compacted frame entry/return, and original tool pairing are checked locally. Immediate post-compaction canonical restoration remains unavailable on stock Pi; the request overlay covers that gap until an existing boundary. The current local slice adds explicit Skill activation (`pin kind=skill` after a successful source read), `mark active|handled|retired` with rationale, and Goal-default/session-explicit retention lifetimes. Genuine structured questionnaire answers retain full notes and partial/declined distinctions as source-qualified data across frame return; rich previews remain only in raw history. Whole-value moves and exact-range data copies preserve tool envelopes. Selected-range movement and material native child/watch/Human result preservation now have regression coverage. Search and ranking expose edit lineage/authorship, immutable read completeness and caveats; loaded/copied/derived reads cannot bypass original complete Skill-read activation. Independent review found and drove these qualification repairs.
 
 Local retention evidence: the earlier outgoing-filter and marker-only bugs were reproduced as failing installed-runner tests before repair. Full tests 230/230, core 89/89 and static preflight passed; a subsequently added compacted-frame/scope case also passed independently. These checks use installed Pi projection/runner code with registry/lifecycle adapters, not a live provider. LSP reported an inconclusive path and the existing untouched `Record<string, any>` rule finding; this is not a clean typecheck claim.
 
@@ -111,15 +111,15 @@ Evidence in the installed Pi 1.5.2 package: `docs/extensions.md` sections `conte
 
 - [x] Search both the active view and recoverable parent/branch-local history on demand; return bounded snippets, stable IDs, versions, provenance and useful ranges.
 - [x] Provide explicit load/recovery of uncaptured or spilled material; snippets may suffice without a forced second call.
-- [ ] Provide semantic retrieval/ranking when chosen; current retrieval is explicitly lexical and no embedding store or mandatory semantic call was introduced.
+- [x] Evaluate semantic retrieval: reuse the parent Agent's semantic selection over bounded recovered candidates; `rankedSources` verifies caller ordering, IDs, versions and ranges. Native symbol navigation targets code, not omitted session evidence. No embedding store or mandatory extra model loop; semantic quality remains unmeasured, not mislabeled lexical scoring.
 - [x] Spill selected content to an allowed project artifact before replacing it with a recoverable pointer; preserve purpose, source/version, caveats and integrity checks.
 - [x] Verify artifact write before context removal; missing/stale/wrong-scope artifacts fail visibly. No hidden environment rollback.
-- [ ] Detect exact repeated read-only results and verified subset relations using source identity/read ranges, not bare text equality alone; no automatic repetition optimizer is shipped.
-- [x] Relocate whole prior working payloads to the append end without losing protocol envelopes; subset/similarity relocation remains deferred.
+- [x] Detect exact repeated successful native reads by persisted call path/range and complete payload versions; verified subsets additionally require a shared native file revision and matching covered lines. Missing revision is unknown, never inferred from text. Later changed, failed or truncated read evidence blocks verified relocation.
+- [x] Explicit `move` with `verifiedAgainst` relocates the complete earlier read or verified superset to the append end; both covered execution pairs keep qualified pointers and one complete retained payload remains. Coalescing requires the entire companion read, never just a selected comparison range. Preserve unrefreshed outside-subset data and report what changed. Similarity never triggers relocation.
 - [x] Never automatically transform a non-exact/similarity-only match or Reserved material. Offer bounded, non-repetitive advisory hints when justified.
 - [x] Measure scan/index, storage and cache-edit overhead; allow Agent policy to avoid optimizations whose total cost exceeds its benefit.
 
-Implemented local slice: `search` distinguishes active, saved-parent and branch history; `load` makes version/range-checked private data copies, and `move` relocates whole working payloads while preserving executed calls/results. `spill` writes and reads back an explicit project-relative artifact before a native pointer replacement; `load` re-verifies its immutable full-envelope digest/root/identity and returns a new data reference. Existing raw history is never silently substituted for a failed artifact read. Artifact creation is a filesystem effect: rejected native commits may leave an explicitly reported orphan. Current context checks are 50/50, using installed projection/runner adapters, not a real provider. Historical mutable-version coverage, semantic retrieval evaluation, repeated/subset automation, measurement and independent review remain open.
+Implemented local slice: `search` distinguishes active, saved-parent and branch history; `load` makes version/range-checked private data copies, and `move` relocates whole working payloads while preserving executed calls/results. `spill` writes and reads back an explicit project-relative artifact before a native pointer replacement; `load` re-verifies its immutable full-envelope digest/root/identity and returns a new data reference. Existing raw history is never silently substituted for a failed artifact read. Artifact creation is a filesystem effect: rejected native commits may leave an explicitly reported orphan. The initial context slice passed 50/50 checks using installed projection/runner adapters, not a real provider; final follow-up evidence is recorded below. The completed follow-up adds cross-call repeat/subset analysis, explicit verified relocation, source-qualified Agent ranking, range movement and qualification repair. Similarity stays advisory; there is no always-on optimizer or forced source search. Missing file revision cannot authorize subset relocation.
 
 Exit: repeated/subset/changed-file cases preserve information; spill round trips work; retrieval does not require searching on every frame call.
 
@@ -127,7 +127,7 @@ Exit: repeated/subset/changed-file cases preserve information; spill round trips
 
 - [x] Reuse task identity and explicit parent/code/subagent intent; attach optional frame scope rather than create a parallel task registry. DAG tasks and native execution receipts now retain an optional `frameScope`; native child identity remains `(ownerRunId, nodeId, requestId)`.
 - [x] Integrate serial same-session calls and independently justified native child work; no silent executor conversion.
-- [ ] Establish explicit supported launch/configuration for a child to use Compass recursively; do not assume extension inheritance.
+- [x] Evaluate recursive child Compass against the installed launch contract: unsupported and fail-closed. The documented foreground delegation boundary does not inherit ambient Compass extensions and read-only requests do not grant Compass mutation tools. No fabricated launch configuration or implicit inheritance is shipped.
 - [x] Correlate and consume native child results; unknown runs remain unknown, never duplicate-dispatched. Preserve native activation/user preferences.
 - [x] Track watches by native arm identity and frame owner; native live status is authoritative, including nested Code Mode calls.
 - [x] Handle native custom wake/lost messages and repeating rounds correctly. A repeating wake is not terminal completion.
@@ -149,7 +149,7 @@ Exit: native APIs are the execution authorities. No assumed notification deliver
 - [x] Block both automatic delegation and parent/code DAG task progression before approval. No recovery sweep bypasses the gate.
 - [x] Support Human additions/revisions and re-approval; arbitrary text or Agent-reported "Human approved" is not a stamp.
 - [x] Require an explicit semantic step check against approved criteria, evidence and unresolved caveats before dependency progression; preserve failed/inconclusive results.
-- [ ] Optional independent reviewer/watchdog: evaluated and deliberately deferred; there is no evidence-backed need for an always-on extra model loop in the current local contract.
+- [x] Evaluate optional independent reviewer/watchdog: reuse explicitly authorized native reviewers when valuable; explicit semantic task assessments are implemented. No always-on model/watchdog loop or mandatory review ritual is introduced.
 - [x] Keep task completion, Agent assessment, independent review and final Goal acceptance distinct. Unknown evidence never becomes pass.
 - [x] Represent material Human optimization declarations in the same approved constraints/decisions, without another policy registry.
 
@@ -174,16 +174,35 @@ Exit: unauthorized exploration and premature cancellation are rejected; accepted
 - [x] Remove obsolete GoalRun schema migration, active-capability projection, session-wide state fallback, and tool-result state fallback; retain relevant current-format behavioral coverage rather than historical-format tests.
 - [x] Align current design, tool contract, README, package identity, preflight and installed native extension versions. Historical evidence is not current compatibility proof.
 - [x] Replace false completion/documentation claims with actual local evidence and known limitations.
-- [ ] Final Occam review of all M0–M7 touched scope remains part of the last integration pass.
+- [x] Apply Occam to the touched scope: remove obsolete schemas/fallbacks, the unused global write-guard implementation/test, dead scheduler rerun state and eager copies of arbitrary tool arguments. Keep source/range proof and meaningful regressions.
 - [x] Measure representative local transition/search memory and CPU costs plus request/context sizes. Collect native usage evidence where available; do not invent provider/cache/cost measurements.
-- [ ] Run targeted checks, full/core tests, static and installed-Pi preflight; independent review of high-risk boundaries; resolve findings.
-- [ ] Reconcile every requirement against this list; report implemented, evaluated/reused, explicitly deferred and Human-only acceptance separately.
-- [ ] Commit and push coherent milestones; verify actual Git state. Explain in plain language what changed and give a short real-session test guide.
+- [x] Run targeted/full/core/non-extension checks, static preflight, installed host import/API checks and independent high-risk source review; resolve reproduced findings. Verify actual package/Skill discovery from an unrelated target directory, not just source-project auto-discovery. Active interactive Pi registry/provider acceptance remains Human-only.
+- [x] Reconcile requirements: implemented context/retention/retrieval/movement/spill, native composition, DAG and RouteSet gates; reuse native execution/waits/review and parent semantic judgment; unsupported recursive child Compass is explicitly fail-closed, not advertised as implemented. Human-only live evidence stays separate.
+- [x] Commit and push coherent implementation milestones; `3dc2a8c..b2d2a24` push and remote hooks passed. README/handoff provide a short real-session test guide; local configuration is not included in delivery commits.
 - [ ] Human performs actual Compass/provider acceptance and provides a feedback path. This is the only remaining verification ownership transferred to Human, not development TODOs.
+
+## Final local evidence
+
+Implementation `b2d2a24`, after the final context/native integration:
+
+| Check | Observed result |
+|---|---:|
+| `npm test` | 278/278, 0 skipped; 4.644 s |
+| `npm run test:core` | 100/100; 0.163 s |
+| `npm run test:non-extension` | 136/136; 0.348 s |
+| `npm run preflight` / `node scripts/preflight.mjs --static-only` | PASS; expected source/target overlap warning |
+| `node scripts/check-subagents-contract.mjs` | 36/36 against installed pi-subagents 0.88.1 |
+| Context/retention/artifact installed-adapter regressions | 66/66 |
+| Native package Skill discovery outside checkout | 1/1; one progressive Skill, no provider |
+| `git diff --check` | PASS |
+
+Independent scoped reviews cleared persistence/approval, branch and scheduler generation recovery, nested watch ownership, route questionnaire/proposal correlation, artifact symlink-redirection protection, retrieval edit lineage/read completeness, Skill activation, spill range provenance, conflicting read evidence and whole-companion coalescing. The repeated-read regression checks one covered payload and a net serialized-context reduction for a representative large read; a partial comparison cannot remove an uncovered remainder. The repaired scheduler regression emitted four requests instead of two before repair; the artifact race created an outside file before repair. Source identities, not text equality alone, control edits and eligibility. Auxiliary diagnostics remain inconclusive for some files and include a pre-existing dictionary-`any` rule finding; this is not a clean whole-project typecheck claim.
+
+Native API/installed projection/runner checks do not establish a real AgentSession/provider cycle. See [measurements](./measurements-v0.10.0.md) for bounded local CPU/memory/draft/request-size data and [handoff](../handoff.md) for Human acceptance and feedback. No provider/cache/token or semantic-quality improvement is claimed from these checks.
 
 ## Native reference baseline
 
-Last inspected local baseline: Pi 1.5.2; pi-subagents 0.88.0; sibling pi-await 1.3.0 candidate revision 4 (`8a51e51`). Recheck versions/contracts when integrating, without modifying pi-await or global Pi settings.
+Last inspected local baseline: Pi 1.5.2; pi-subagents 0.88.1; sibling pi-await 1.3.0 candidate revision 4 (`8a51e51`). Recheck versions/contracts when integrating, without modifying pi-await or global Pi settings.
 
 - Pi public extension boundary/session-format/compaction contracts and installed SessionManager projection implementation.
 - Installed pi-subagents `docs/extension-api.md` and delegation declarations; native child lifecycle/status/cancellation contracts.

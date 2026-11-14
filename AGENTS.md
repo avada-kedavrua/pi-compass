@@ -1,14 +1,14 @@
-# Compass V2 v0.9.1 development protocol
+# Compass V2 v0.10.0 development protocol
 
-This is an Agent-only local Pi extension. Keep changes small, evidence-driven, and consistent with `docs/design.md`.
+This is an Agent-only local Pi extension. Keep changes scoped, evidence-driven, and consistent with `docs/design.md`.
 
 ## Non-negotiable principles
 
 - Goal: lower total cost to complete arbitrary Goals without lowering delivery quality.
 - Use code for deterministic mechanics: state transitions, dependency readiness, schema validation, visibility gates, duplicate detection, path-scope checks, and measurement.
-- Keep `parent`, `code`, and `subagent` executor intent explicit on DAG tasks. A Subagent task must be read-only. Existing v2-v5 tasks migrate to `parent`; schema v6 executor fields are retained.
+- Keep `parent`, `code`, and `subagent` executor intent explicit on DAG tasks. A Subagent task must be read-only. GoalRun schema v7 and context schema v4 are current-only; unsupported snapshots fail visibly without migration or silent reset.
 - The model chooses decomposition and executor; code validates state and safety boundaries.
-- Compass automatically dispatches only explicit, ready `executor=subagent` + `writeScope=read-only` tasks through the documented pi-subagents structured delegation API at the `tool_result` boundary. A `before_agent_start` sweep recovers a persisted ready DAG if that boundary was missed, after checking the latest Human instruction and exact Current Goal. It consumes structured results; it never ignores child feedback.
+- Compass automatically dispatches only exactly Human-approved, ready `executor=subagent` + `writeScope=read-only` tasks through the documented pi-subagents structured delegation API at the `tool_result` boundary. A `before_agent_start` sweep recovers a persisted ready DAG if that boundary was missed, after checking the latest Human instruction and exact Current Goal. It consumes structured results; it never ignores child feedback.
 - Do not call the model-visible `subagent` tool recursively from a `tool_call` hook. Use the documented structured-delegation event contract from a supported event callback/application step.
 - Do not build a second agent loop or scheduler. Reuse Pi Code Mode and pi-subagents.
 - Parent tasks stay with the main Agent; Code Mode tasks stay with the main Agent and are used for deterministic batching. Neither executor is silently converted to Subagent.
@@ -45,6 +45,6 @@ This is an Agent-only local Pi extension. Keep changes small, evidence-driven, a
 - Exact unchanged state reads return only a small cursor/revision envelope.
 - Dynamic visibility preserves user native-tool preferences. Compass may temporarily hide a native semantic tool under a deterministic eligibility gate, but never erases the user's enabled/disabled preference.
 - Structured `ask_user_question` details are authoritative when present. Preserve answered/partial/declined distinctions and notes; questionnaire UI/validation errors are not Human decisions. Keep the text-only path for older result envelopes.
-- Do not implement durable Context Edit by writing session files or mutating `ctx.sessionManager`. Pi 1.4.0 context edits must be proposed through documented actionable boundaries and must preserve complete tool-call/result exchanges.
-- RouteSet alternatives are not DAG tasks. Do not create route fan-out, branch races, or automatic winner selection until branch correlation and acceptance-gated comparison have an evidence-backed contract.
+- Do not implement durable Context Edit by writing session files or mutating `ctx.sessionManager`. Pi 1.5.2 context edits must be proposed through documented actionable boundaries and must preserve complete tool-call/result exchanges.
+- RouteSet alternatives are not DAG tasks. No automatic fan-out, branch race, or first-result-wins selection. Parallel exploration requires the exact correlated Human scope/budget proposal; competitor cancellation requires shared-criteria acceptance and native identity/termination evidence.
 - Caveats qualify claims and evidence; do not flatten them into generic notes or silently drop them during summaries/projections.

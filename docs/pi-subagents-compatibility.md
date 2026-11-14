@@ -20,4 +20,4 @@ The runtime config bounds concurrency and spawn counts, keeps scheduled runs/mis
 
 ## Current implementation boundaries
 
-A locally passing API contract check is not a live run. Pi is 1.5.2 locally, but no provider acceptance has been run for this development source. Do not describe implementation as release-complete: the M7 checklist remains in progress, M5 Human approval/semantic progression is not implemented, and M2/M3 contain explicitly incomplete requirements. See `docs/architecture-v0.10.0.md` and `RELEASE-MANIFEST.json`.
+A locally passing API contract check is not a live run. Pi is 1.5.2 locally, but no provider acceptance has been run for this development source. Local M0–M7 development and scoped review gates are complete for the declared supported boundaries. M5 approval/semantic progression is implemented and locally tested; real Pi/provider acceptance remains open, so this is a local candidate, not a runtime-verified release. See `docs/architecture-v0.10.0.md` and `RELEASE-MANIFEST.json`.

@@ -1,29 +1,33 @@
-# Compass v0.10.0 development handoff
+# Compass v0.10.0 local candidate handoff
 
-## Delivery status
+## Delivery
 
-**Implementation is in progress; this is not a release-complete handoff.** The current source aligns its native identity records to the locally inspected Pi `1.5.2` and pi-subagents `0.88.1` baseline. Local package/API inspection is not live acceptance. No provider was called for this work.
+Local M0–M7 development and requirement reconciliation are complete for the declared supported boundaries. Implementation `b2d2a24` is pushed to `origin/chatgpt-only`. This is a **local candidate**, not a claim of live Pi/provider acceptance.
 
-The exact human-acceptance boundary is a real interactive Pi/provider run on final committed bytes. Source inspection and local tests show correlated Human approval gating for DAG progression/dispatch and explicit semantic task assessments; this is not proof of the real Human UI or provider lifecycle. The architecture checklist still has unchecked M5 items despite those code paths, so reconcile checklist/evidence before marking them complete. M2 and M3 retain explicitly open requirements. Do not call the work release-ready until remaining implementation, measurement, review and evidence reconciliation in `docs/architecture-v0.10.0.md` are resolved.
+The canonical [milestone checklist](docs/architecture-v0.10.0.md) records implemented behavior, native reuse/unsupported decisions and verification. [README](README.md) provides installation and a short real-session guide; [tool contract](docs/tool-contract.md) explains the current surface.
 
-## Baseline and evidence
+## Local evidence
 
-- Local `pi --version`: `1.5.2`.
-- Installed package manifest: `pi-subagents@0.88.1`.
-- The current contract checker inspects the installed declaration/export/API shape. This proves only the checked source contract, not dispatch, provider behavior, cache behavior, cost, or completion correctness.
-- `RELEASE-MANIFEST.json` is the source for current release identity and the expected native versions. No current-milestone test counts are asserted there; historical validation records apply only to their named earlier source bytes.
-- No live provider acceptance was run.
+For implementation `b2d2a24`: full tests **278/278**, core **100/100**, non-extension **136/136**; static/installed-host preflight and the installed pi-subagents structural contract **36/36** passed. Context/retention/artifact regressions passed **66/66**. Scoped independent reviews cleared the identified high-risk findings after repairs. These are source/installed-adapter checks, not a live AgentSession/provider cycle or a clean whole-project typecheck.
 
-## Configuration safety
+The inspected baseline is Pi **1.5.2**, Node **22.22.1**, pi-subagents **0.88.1**. The release manifest owns the declared native identity. Local CPU, draft/control sizes, request-overlay bytes and process memory are measured separately in [measurements](docs/measurements-v0.10.0.md); no provider/cache/token or semantic-quality win is inferred.
 
-The proposal merger reads the user's Pi settings and pi-subagents runtime config, preserves unrelated values, and writes separate private proposals. It does not modify global Pi settings. Review both resulting files before any eventual isolated acceptance run; do not copy proposals into global config as part of development validation. The native tool preference remains owned by Pi/user settings.
+## Deliberate boundaries
 
-## Remaining development work
+- Stock Pi has no general awaited immediate post-compaction canonical-restoration hook. Qualified request overlays bridge the gap until an existing native boundary; raw history and native system/tool/AGENTS state remain unchanged.
+- Semantic selection stays with the parent Agent over bounded recovered candidates. Runtime verifies selected IDs/versions/ranges; there is no embedding store or always-on extra model loop.
+- Repeat/subset processing is explicit. Subset relocation without shared native file-revision evidence stays unknown; similarity never triggers edits. Older unrefreshed superset content remains qualified.
+- Recursive child Compass is unsupported/fail-closed under the inspected native delegation launch contract. Native pi-subagents still owns child work and pi-await owns watches; no second scheduler/observer is introduced.
+- Race-safe artifact spill/reload currently requires Linux `/proc/self/fd`. Other platforms fail closed. A failed readback or native commit may leave a possible filesystem orphan; Compass does not roll back environment effects.
+- Unsupported GoalRun/context snapshots fail visibly without migration or silent reset. Use a fresh session or a supported native branch.
 
-Use `docs/architecture-v0.10.0.md` as the implementation checklist, while reconciling its stale M5 unchecked markers against the implemented approval/assessment paths and their regression tests. Remaining substantive gaps include scoped-retention/retrieval/repeated-result requirements (M2/M3), representative local measurements, and final independent review/reconciliation. Do not mark anything complete because the documentation now names it.
+## Human acceptance
 
-## Eventual Human-only live acceptance
+1. Install from the README into a safe target project; use a fresh disposable Pi session and run `/compass-preflight`.
+2. Exercise a small same-session frame, ref/copy return, qualified pin, native compaction and branch navigation. Check nested Code Mode watch ownership and cancellation/transfer before returning a frame.
+3. Exercise genuine structured DAG/route questionnaires: clear, conditional, partial, declined and UI-error outcomes. Only the exact unqualified answer should authorize the displayed work.
+4. For actual read-only children, use **another fresh session before any Goal is captured** and run `/compass-live-acceptance` only when provider cost is acceptable. Alternatively, `bash scripts/run-live-acceptance.sh` prepares an isolated launcher. Neither a passing report fixture nor an installed API check is a live provider result.
 
-After the missing local implementation and reviews are complete, run the isolated acceptance harness against the exact candidate package in a separate Compass session. It starts an isolated Pi process and can incur provider cost. The expected command is `bash scripts/run-live-acceptance.sh`; in the opened TUI, run `/compass-live-acceptance` and require a passing bounded report. Also perform live structured-questionnaire checks for fully answered, partial, declined and UI/error outcomes. The harness must not overwrite global Pi settings or include credentials/session transcripts in uploaded evidence.
+Config scripts create private proposals, preserve unrelated settings and do not apply changes to global Pi settings. Do not upload credentials or full private transcripts.
 
-If implementation remains blocked, report the precise gap and do not interpret a blocked preflight or a passing mock/adapter test as runtime acceptance.
+For feedback, provide the failing action, expected/actual behavior, versions, error text and relevant frame/source/watch/request/run identities. A local report can be generated with `node scripts/session-report.mjs <session.jsonl> --json`; review/redact it before sharing. Missing, stale, partial or contradictory evidence must remain qualified rather than becoming pass.

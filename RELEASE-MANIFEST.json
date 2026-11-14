@@ -1,25 +1,18 @@
 {
   "name": "pi-compass-v2",
   "version": "0.10.0",
-  "sourceBaseline": "0.9.1",
   "goalRunSchemaVersion": 7,
   "minimumPiVersion": "1.5.2",
-  "testedPiRuntime": "Pi 1.5.2 (installed local host; no live provider acceptance)",
+  "testedPiRuntime": "Pi 1.5.2 installed projection/runner/import checks; not live provider acceptance",
   "piSubagentsPinned": "0.88.1",
-  "askUserQuestionSourceVersion": "2.15.0",
-  "liveEvidence": "No 0.10.0 live provider run. Installed host identity/API checks are local evidence only; earlier v0.9.1/0.8.0 evidence is historical and does not validate these bytes.",
+  "implementationCommit": "b2d2a24",
+  "validationLog": "docs/architecture-v0.10.0.md#final-local-evidence",
+  "liveEvidence": "No live Pi/provider acceptance for this candidate. Historical release evidence does not validate the current implementation.",
   "releaseCaveats": [
-    "Implementation remains in progress; M2 and M3 retain explicitly incomplete requirements",
-    "M5 approval and semantic-progression paths exist in source but require final milestone review and evidence reconciliation",
-    "Human-only live Pi/provider acceptance remains pending",
-    "Natural provider fallback and parent-only cost baseline are not established"
-  ],
-  "validationLog": "No current milestone validation log is recorded yet; do not infer test counts from historical release evidence.",
-  "inheritedLiveEvidence": {
-    "pi": "1.4.0",
-    "piSubagents": "0.83.1",
-    "childCalls": 3,
-    "dagWaves": 2,
-    "scope": "v0.8.0 RC6 predecessor only; not v0.9.1 evidence"
-  }
+    "Stock-Pi post-compaction continuity uses qualified request overlays until an existing native boundary",
+    "Recursive child Compass is unsupported/fail-closed under the inspected launch contract",
+    "Subset relocation without shared native file revision remains unknown; semantic selection is Agent-owned, not a runtime semantic score",
+    "Race-safe artifact spill/reload requires Linux /proc/self/fd; filesystem effects are not rolled back",
+    "Human-only live Pi/provider acceptance, actual token/cache behavior, natural provider fallback and parent-only cost comparison are not established"
+  ]
 }

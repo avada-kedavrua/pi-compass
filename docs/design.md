@@ -26,7 +26,7 @@ Do not introduce a second scheduler, second session store, or duplicate conventi
 
 ## Messages contract
 
-Raw Pi session history remains append-only. Compass stores a compact, bounded GoalRun projection and event history; it does not copy every raw tool result into a second ledger. A future context-attention layer may alter only the future model-context projection, never the original session record. Every omission/replacement must be traceable and must preserve the evidence needed for the active Goal.
+Raw Pi session history remains append-only. Compass stores a compact, bounded GoalRun projection and event history; it does not copy every raw tool result into a second ledger. The context-attention layer alters only the future model-context projection through validated native boundary drafts and request-side retention overlays, never the original session record. Every omission/replacement must be traceable and must preserve the evidence needed for the active Goal.
 
 ## Route contract
 
@@ -39,4 +39,4 @@ A RouteSet is a set of alternative strategies for the same Goal version and base
 - Node.js: `>=22.16.0`.
 - GoalRun schema/API: v7; current-only state normalization rejects obsolete schemas rather than migrating them.
 
-The detailed v0.9.0 architecture and implementation boundaries are in [`architecture-v0.9.0.md`](./architecture-v0.9.0.md). Historical v0.8.0 implementation details remain in [`design-v0.8.0.md`](./design-v0.8.0.md).
+Historical v0.9.0 architecture and implementation boundaries are in [`architecture-v0.9.0.md`](./architecture-v0.9.0.md). Historical v0.8.0 implementation details remain in [`design-v0.8.0.md`](./design-v0.8.0.md).
