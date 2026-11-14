@@ -3,24 +3,17 @@ import { emptyDagState, readyTasks, createOrRevisePlan, taskAssessmentBinding, t
 import { approvalIsCurrent, clearDagApprovalAnswer, createDagApprovalRequest, dagApprovalBinding, matchesDagApprovalQuestion } from "./dag-approval.mjs";
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 
-export const GOAL_RUN_API_VERSION = 7;
+export const GOAL_RUN_API_VERSION = 8;
 export const GOAL_RUN_RELEASE = "0.10.0";
 
-const MAX_UPDATES = 10;
 const MAX_DECISIONS = 8;
 const MAX_CHECKPOINTS = 5;
-const MAX_GOAL_CHANGES = 5;
 const MAX_FAILURES = 12;
 const MAX_WRITES = 12;
 const MAX_HUMAN_DECISIONS = 8;
-const MAX_SESSION_DIRECTIVES = 24;
-const MAX_HARD_SESSION_DIRECTIVES = 48;
 const MAX_EVENTS = 80;
 const MAX_EVENT_TEXT = 1_200;
-const MAX_CAPTURE_LEDGER = 12;
 const MAX_ACCEPTANCE_CRITERIA = 12;
-const MAX_TEXT = 12_000;
-const MAX_UPDATE_TEXT = 1_800;
 const QUESTIONNAIRE_ERRORS = new Set([
   "no_ui", "no_custom_ui", "no_questions", "empty_options", "too_many_questions",
   "duplicate_question", "duplicate_option_label", "reserved_label", "session_load_failed",
@@ -33,41 +26,35 @@ const CANCELLATION_TERMINAL_STATUSES = new Set([
 
 export function emptyGoalRunState() {
   return {
-    schemaVersion: 7,
+    schemaVersion: 8,
     stateRevision: 0,
     eventSeq: 1,
     events: [],
-    captureLedger: [],
     goal: {
       original: null,
       current: null,
       createdAt: null,
       originalTruncated: false,
-      sourceUpdateId: null,
-      sourceUpdateText: null,
-      sourceUpdateTruncated: false,
+      sourceIds: [],
+      originalSourceIds: [],
+      reviewedInputId: null,
+      constraints: [],
       acceptanceCriteria: [],
       criteria: [],
       nextAcceptanceNumber: 1,
-      updates: [],
-      nextUpdateNumber: 1,
-      changes: [],
-      version: 1,
+      version: 0,
     },
     plan: emptyDagState(),
     routeSet: null,
     humanDecisions: [],
     nextHumanDecisionNumber: 1,
-    sessionDirectives: [],
-    nextDirectiveNumber: 1,
+    latestHumanEntryId: null,
     decisions: [],
     checkpoints: [],
     nextDecisionNumber: 1,
     nextCheckpointNumber: 1,
-    goalChanges: [],
     trace: { failures: [], writes: [] },
     activeCapabilities: [],
-    autoActivation: null,
     triageRuns: [],
     nextTriageNumber: 1,
     projectRoot: null,
@@ -107,7 +94,7 @@ function questionnaireSummary(questionnaire, fallbackText) {
   }
   const answers = questionnaire.answers.map((answer) => {
     const values = [answer.answer, ...(answer.selected ?? [])].filter((item) => typeof item === "string" && item.trim());
-    return `${answer.question} = ${values.join(" + ") || "answered"}`;
+    return `${answer.question} = ${values.join(" + ") || "answered"}${answer.notes ? `; note: ${answer.notes}` : ""}`;
   });
   if (questionnaire.unanswered?.length) answers.push(`${questionnaire.unanswered.length} question(s) left unanswered`);
   if (questionnaire.globalNote) answers.push(`note: ${questionnaire.globalNote}`);
@@ -324,101 +311,68 @@ function routeSetBinding(routeSet, goal = "") {
     exploration: Object.fromEntries(Object.entries(routeSet.exploration).filter(([key]) => key !== "proposalBinding")),
   })).digest("hex");
 }
-function canonicalDirective(value) {
-  return String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-}
-function isHardDirective(value) {
-  const text = String(value ?? "");
-  return /\b(?:must(?:\s+not)?|do\s+not|don't|should\s+not|never|only|read-only|readonly|forbid(?:den)?|prohibit(?:ed)?)\b|(?:只允许|只能|只有|只从|仅限|不得|禁止|不许|绝不|严禁|必须|务必|不能|不允许|不应该|不需要考虑|不要|别再|别|不可|不以|不假设|不替换|不覆盖|不落盘|零进程残留)/i.test(text);
-}
-function textFingerprint(text) {
-  let hash = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `${text.length}:${(hash >>> 0).toString(16)}`;
-}
-
-// Keep the most recent updates, but pin the update that established the
-// current Goal and a bounded number of unresolved scope candidates. Otherwise
-// a long session can evict the very Human message needed to explain the active
-// Goal, or evict a candidate before the Agent resolves it.
-function retainGoalUpdates(items, sourceUpdateId = null) {
-  const list = Array.isArray(items) ? items : [];
-  const keep = new Set(list.slice(-MAX_UPDATES).map((item) => item?.id).filter(Boolean));
-  if (sourceUpdateId) keep.add(sourceUpdateId);
-  const pending = list.filter((item) => item?.goalChangeCandidate === true && item?.goalChangeResolution === "pending");
-  for (const item of pending.slice(-MAX_GOAL_CHANGES)) if (item?.id) keep.add(item.id);
-  return list.filter((item) => keep.has(item?.id));
-}
-
-function compactCaptureLedgerItem(item) {
-  if (!item || typeof item.fingerprint !== "string" || !item.fingerprint.trim() || !Number.isSafeInteger(item.textLength) || item.textLength < 0) return null;
-  return {
-    ...(typeof item.messageId === "string" && item.messageId ? { messageId: item.messageId } : {}),
-    source: clip(item.source || "unknown", 48),
-    fingerprint: item.fingerprint.slice(0, 128),
-    textLength: item.textLength,
-    preview: clip(item.preview, 140),
-    at: typeof item.at === "string" ? item.at : timestamp(),
-  };
-}
-
 const nonEmpty = (value, name, max = 4000) => {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string.`);
   return clip(value, max);
 };
 
+function textFingerprint(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
+
 export function normalizeGoalRunState(raw) {
   const empty = emptyGoalRunState();
   if (!raw) return empty;
-  if (typeof raw !== "object" || raw.schemaVersion !== 7) throw new Error("Unsupported Compass GoalRun schema. Open a new session or navigate to a supported branch; no state changed.");
+  if (typeof raw !== "object" || raw.schemaVersion !== 8) throw new Error("Unsupported Compass GoalRun schema. Open a new session or navigate to a supported branch; no state changed.");
+  const rawGoal = raw.goal && typeof raw.goal === "object" ? raw.goal : {};
   const state = {
     ...empty,
-    ...raw,
-    schemaVersion: 7,
+    schemaVersion: 8,
     stateRevision: Number.isSafeInteger(raw.stateRevision) && raw.stateRevision >= 0 ? raw.stateRevision : 0,
     eventSeq: Number.isSafeInteger(raw.eventSeq) && raw.eventSeq >= 1 ? raw.eventSeq : 1,
     events: Array.isArray(raw.events) ? raw.events.slice(-MAX_EVENTS) : [],
-    captureLedger: Array.isArray(raw.captureLedger) ? raw.captureLedger.slice(-MAX_CAPTURE_LEDGER) : [],
-    autoActivation: raw.autoActivation && typeof raw.autoActivation === "object" ? raw.autoActivation : null,
     triageRuns: Array.isArray(raw.triageRuns) ? raw.triageRuns.slice(-6) : [],
     nextTriageNumber: Number.isInteger(raw.nextTriageNumber) ? raw.nextTriageNumber : 1,
-    goal: { ...empty.goal, ...(raw.goal ?? {}) },
+    goal: {
+      ...empty.goal,
+      original: rawGoal.original ?? null,
+      current: rawGoal.current ?? null,
+      createdAt: rawGoal.createdAt ?? null,
+      originalTruncated: rawGoal.originalTruncated === true,
+      sourceIds: Array.isArray(rawGoal.sourceIds) ? rawGoal.sourceIds : [],
+      originalSourceIds: Array.isArray(rawGoal.originalSourceIds) ? rawGoal.originalSourceIds : [],
+      reviewedInputId: rawGoal.reviewedInputId ?? null,
+      constraints: Array.isArray(rawGoal.constraints) ? rawGoal.constraints : [],
+      acceptanceCriteria: Array.isArray(rawGoal.acceptanceCriteria) ? rawGoal.acceptanceCriteria : [],
+      criteria: Array.isArray(rawGoal.criteria) ? rawGoal.criteria : [],
+      nextAcceptanceNumber: rawGoal.nextAcceptanceNumber,
+      version: rawGoal.version,
+    },
     plan: raw.plan && typeof raw.plan === "object" ? raw.plan : emptyDagState(),
-    routeSet: normalizeRouteSet(raw.routeSet, raw.goal?.version),
+    routeSet: normalizeRouteSet(raw.routeSet, rawGoal.version),
     humanDecisions: Array.isArray(raw.humanDecisions)
-      ? raw.humanDecisions.slice(-MAX_HUMAN_DECISIONS).map((item, index) => normalizeHumanDecisionRecord(item, index, raw.goal?.version)).filter(Boolean)
+      ? raw.humanDecisions.slice(-MAX_HUMAN_DECISIONS).map((item, index) => normalizeHumanDecisionRecord(item, index, rawGoal.version)).filter(Boolean)
       : [],
     nextHumanDecisionNumber: Number.isInteger(raw.nextHumanDecisionNumber) ? raw.nextHumanDecisionNumber : 1,
-    sessionDirectives: Array.isArray(raw.sessionDirectives)
-      ? raw.sessionDirectives.slice(-((MAX_SESSION_DIRECTIVES + MAX_HARD_SESSION_DIRECTIVES) * 4))
-      : [],
-    nextDirectiveNumber: Number.isInteger(raw.nextDirectiveNumber) ? raw.nextDirectiveNumber : 1,
+    latestHumanEntryId: typeof raw.latestHumanEntryId === "string" ? raw.latestHumanEntryId : null,
     decisions: Array.isArray(raw.decisions) ? raw.decisions.slice(-MAX_DECISIONS) : [],
     checkpoints: Array.isArray(raw.checkpoints) ? raw.checkpoints.slice(-MAX_CHECKPOINTS) : [],
-    goalChanges: Array.isArray(raw.goalChanges) ? raw.goalChanges.slice(-MAX_GOAL_CHANGES) : [],
+    nextDecisionNumber: Number.isInteger(raw.nextDecisionNumber) ? raw.nextDecisionNumber : 1,
+    nextCheckpointNumber: Number.isInteger(raw.nextCheckpointNumber) ? raw.nextCheckpointNumber : 1,
     trace: {
       failures: Array.isArray(raw.trace?.failures) ? raw.trace.failures.slice(-MAX_FAILURES) : [],
       writes: Array.isArray(raw.trace?.writes) ? raw.trace.writes.slice(-MAX_WRITES) : [],
     },
+    projectRoot: typeof raw.projectRoot === "string" ? raw.projectRoot : null,
   };
-  state.goal.updates = Array.isArray(state.goal.updates) ? state.goal.updates : [];
   state.triageRuns = Array.isArray(state.triageRuns) ? state.triageRuns.slice(-6) : [];
   const maxTriageNumber = state.triageRuns.reduce((max, item) => Math.max(max, Number(String(item?.id ?? "").replace(/^T/, "")) || 0), 0) + 1;
   state.nextTriageNumber = Math.max(Number.isInteger(state.nextTriageNumber) ? state.nextTriageNumber : 1, maxTriageNumber);
-  delete state.capabilityEpoch;
-  delete state.activeCapability;
-  state.goal.changes = Array.isArray(state.goal.changes) ? state.goal.changes.slice(-MAX_GOAL_CHANGES) : [];
-  state.goal.version = Number.isInteger(state.goal.version) && state.goal.version > 0 ? state.goal.version : 1;
-  state.goal.sourceUpdateId = typeof state.goal.sourceUpdateId === "string" ? state.goal.sourceUpdateId : null;
-  state.goal.sourceUpdateText = typeof state.goal.sourceUpdateText === "string" ? state.goal.sourceUpdateText.slice(0, MAX_TEXT) : null;
-  state.goal.sourceUpdateTruncated = raw.goal?.sourceUpdateTruncated === true;
-  if (!state.goal.sourceUpdateId && state.goal.version > 1) {
-    const latestChange = state.goalChanges.at(-1);
-    if (latestChange?.updateId && state.goal.updates.some((item) => item.id === latestChange.updateId)) state.goal.sourceUpdateId = latestChange.updateId;
-  }
+  state.goal.version = Number.isInteger(state.goal.version) && state.goal.version >= 0 ? state.goal.version : 0;
+  state.goal.sourceIds = Array.isArray(state.goal.sourceIds) ? state.goal.sourceIds.filter((id) => typeof id === "string").slice(0, 16) : [];
+  state.goal.originalSourceIds = Array.isArray(state.goal.originalSourceIds) ? state.goal.originalSourceIds.filter((id) => typeof id === "string").slice(0, 16) : [];
+  state.goal.reviewedInputId = typeof state.goal.reviewedInputId === "string" ? state.goal.reviewedInputId : null;
+  state.goal.constraints = Array.isArray(state.goal.constraints) ? state.goal.constraints.filter((item) => typeof item === "string").slice(0, 24) : [];
   state.goal.acceptanceCriteria = Array.isArray(state.goal.acceptanceCriteria) ? state.goal.acceptanceCriteria.filter((item) => typeof item === "string" && item.trim()).slice(0, MAX_ACCEPTANCE_CRITERIA) : [];
   const validAcceptanceStatuses = new Set(["unverified", "reported_pass", "failed", "blocked", "inconclusive"]);
   state.goal.criteria = Array.isArray(state.goal.criteria) ? state.goal.criteria.filter((item) => item && typeof item === "object" && typeof item.text === "string" && item.text.trim()).slice(0, MAX_ACCEPTANCE_CRITERIA).map((item, index) => ({
@@ -482,9 +436,13 @@ export function normalizeGoalRunState(raw) {
       agent: task?.executor === "subagent" && ["scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"].includes(task?.agent) ? task.agent : "scout",
     })) : [],
   };
-  if (!state.goal.current && state.goal.original) state.goal.current = state.goal.original;
-  if (!state.goal.original) {
-    state.goal.current = null;
+  if (!state.goal.current) {
+    state.goal.original = null;
+    state.goal.version = 0;
+    state.goal.sourceIds = [];
+    state.goal.originalSourceIds = [];
+    state.goal.reviewedInputId = null;
+    state.goal.constraints = [];
     state.goal.acceptanceCriteria = [];
     state.goal.criteria = [];
     state.plan = emptyDagState();
@@ -498,42 +456,6 @@ export function normalizeGoalRunState(raw) {
     ? [...new Set(raw.activeCapabilities.filter((item) => typeof item === "string" && item !== "root"))]
     : [];
   if (state.goal.criteria.length) state.goal.acceptanceCriteria = state.goal.criteria.filter((item) => item.goalVersion === version).map((item) => item.text);
-  for (const [index, item] of state.goal.updates.entries()) {
-    if (!item.id) item.id = `U${index + 1}`;
-    if (typeof item.sourceText === "string" && item.sourceText.length > MAX_TEXT) {
-      item.sourceText = item.sourceText.slice(0, MAX_TEXT);
-      item.sourceTextTruncated = true;
-    }
-  }
-  if (!state.goal.sourceUpdateText && state.goal.sourceUpdateId) {
-    const sourceUpdate = state.goal.updates.find((item) => item.id === state.goal.sourceUpdateId);
-    const sourceText = sourceUpdate?.sourceText || sourceUpdate?.text || "";
-    if (sourceText) {
-      state.goal.sourceUpdateText = sourceText.slice(0, MAX_TEXT);
-      state.goal.sourceUpdateTruncated = sourceText.length > MAX_TEXT || sourceUpdate?.sourceTextTruncated === true;
-    }
-  }
-  state.goal.updates = retainGoalUpdates(state.goal.updates, state.goal.sourceUpdateId);
-  // The ledger is only for bounded duplicate detection; full prompts remain in
-  // Goal/source fields, never in every persisted state snapshot.
-  state.captureLedger = state.captureLedger.map(compactCaptureLedgerItem).filter(Boolean).slice(-MAX_CAPTURE_LEDGER);
-  const directiveSourceTexts = [state.goal.original, state.goal.current, state.goal.sourceUpdateText,
-    ...state.goal.updates.map((item) => item.sourceText || item.text)]
-    .filter((item) => typeof item === "string" && item);
-  const initialPinnedDirectives = new Set(directiveSourceTexts.flatMap((text) => extractSessionDirectiveFragments(text)
-    .filter((item) => item.pinned)
-    .map((item) => canonicalDirective(item.text))));
-  state.sessionDirectives = state.sessionDirectives.map((item, index) => ({
-    ...item,
-    id: typeof item.id === "string" && item.id ? item.id : `S${index + 1}`,
-    text: clip(item.text, 260),
-    goalVersion: Number.isInteger(item.goalVersion) && item.goalVersion > 0 ? item.goalVersion : version,
-    reaffirmations: Number.isInteger(item.reaffirmations) && item.reaffirmations > 0 ? item.reaffirmations : 1,
-    lastConfirmedAt: typeof item.lastConfirmedAt === "string" ? item.lastConfirmedAt : (typeof item.at === "string" ? item.at : timestamp()),
-    pinned: item.pinned === true || initialPinnedDirectives.has(canonicalDirective(item.text)),
-    hard: item.hard === true || item.pinned === true || isHardDirective(item.text) || initialPinnedDirectives.has(canonicalDirective(item.text)),
-  }));
-  state.sessionDirectives = retainSessionDirectives(state.sessionDirectives, version);
   for (const item of state.humanDecisions) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
   for (const item of state.decisions) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
   for (const item of state.checkpoints) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
@@ -638,38 +560,6 @@ export function goalOutcomeStatus(stateValue) {
   };
 }
 
-/**
- * Deterministic, deliberately conservative planning activation.
- * A numbered list alone is ambiguous (it can be a problem report, evidence list,
- * or implementation plan), so it is not sufficient. Explicit planning/multi-stage
- * phrases are accepted, as are numbered items whose opening words are clearly
- * actionable. This only changes tool visibility; it never creates a DAG.
- */
-export function planningActivationSignal(value) {
-  const source = stripConventionSections(String(value ?? ""))
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/`[^`\n]*`/g, " ")
-    .replace(/"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’/g, " ")
-    .split(/\r?\n/)
-    .filter((line) => !/^\s*>/.test(line))
-    .join("\n");
-  if (!source.trim()) return null;
-  const explicit = [
-    [/\b(?:multi[- ](?:stage|track|phase)|multiple\s+(?:independent\s+)?(?:workstreams|tracks|stages|phases|subgoals|deliverables)|cross[- ](?:file|module|project)|dependency graph|interdependent tasks|decompose(?: the)? (?:task|goal|work)|break (?:this|the work|the goal) down|task graph|\bDAG\b|implementation roadmap)\b/i, "explicit multi-stage/workstream or planning intent"],
-    [/(?:多阶段|多条(?:工作流|线|路线)|多个(?:子目标|工作流|项目|模块|交付物|独立任务)|跨(?:多个)?(?:文件|模块|项目)|依赖关系|分阶段|并行(?:执行|任务|工作)|拆解任务|分解任务|制定计划|任务图|实施路线图)/i, "明确的多阶段/多工作流或规划意图"],
-  ];
-  for (const [pattern, reason] of explicit) if (pattern.test(source)) return reason;
-
-  // Keep this lexical gate intentionally small. Diagnostic headings such as
-  // phenomenon/root-cause/evidence/impact are not actionable work items.
-  const items = [...source.matchAll(/(?:^|[\s])(?:[1-9]\d?[.)、])\s+([\s\S]*?)(?=(?:\s+[1-9]\d?[.)、]\s+)|$)/g)]
-    .map((match) => match[1].split(/\r?\n/)[0].trim());
-  const action = /^(?:implement|create|add|remove|fix|update|build|test|verify|deploy|migrate|integrate|restrict|preserve|rewrite|refactor|run|write|configure|replace|inspect|compare|measure|validate|实现|新增|增加|删除|修复|修改|构建|测试|验证|部署|迁移|接入|保留|重写|重构|运行|编写|配置|替换|检查|比较|测量|确认|限制|拆分|完成)(?:\b|[，,：:：、\s])/i;
-  const actionable = items.filter((item) => action.test(item));
-  if (actionable.length >= 2) return "numbered actionable work items";
-  return null;
-}
-
 export function defineAcceptanceCriteria(stateValue, criteria) {
   const state = normalizeGoalRunState(stateValue);
   if (!state.goal.current) throw new Error("No Goal exists in this session.");
@@ -709,130 +599,93 @@ export function recordAcceptanceResult(stateValue, input) {
   return { state, criterion, status: acceptanceStatus(state), changed: true };
 }
 
-function summarizeNonDirectiveContent(text, directiveFragments) {
-  let remainder = stripQuotedRegions(text);
-  for (const fragment of [...directiveFragments].sort((a, b) => b.text.length - a.text.length)) {
-    if (fragment.text) remainder = remainder.replaceAll(fragment.text, " ");
-  }
-  remainder = remainder
-    .replace(/^\s*(?:constraints?|restrictions?)\s*[:：]\s*/gim, " ")
-    .replace(/[，,；;。！？.!?]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return remainder.length >= 16 ? clip(remainder, 220) : "";
+export function observeHumanInput(stateValue, sourceEntryId) {
+  const state = normalizeGoalRunState(stateValue);
+  const id = typeof sourceEntryId === "string" ? sourceEntryId.trim() : "";
+  if (!id || id.length > 128) throw new Error("sourceEntryId must be a non-empty stable ID of at most 128 characters. No state changed.");
+  if (state.latestHumanEntryId === id) return { state, changed: false };
+  state.latestHumanEntryId = id;
+  return { state, changed: true };
 }
 
-export function captureHumanPrompt(stateValue, prompt, meta = {}) {
-  const state = normalizeGoalRunState(stateValue);
-  if (typeof prompt !== "string" || !prompt.trim()) return { state, captured: false, kind: "empty" };
-  const text = prompt.trim();
-  const source = clip(meta?.source || "unknown", 48);
-  const messageId = typeof meta?.messageId === "string" ? meta.messageId : "";
-  const receivedAt = timestamp();
-  const canonical = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
-  // Exact repeats do not change scope.
-  if (state.goal.original && [state.goal.original, state.goal.current].some((known) =>
-    known && canonical(known) === canonical(text))) {
-    return { state, captured: false, kind: "duplicate_goal" };
-  }
-  const ledger = state.captureLedger ?? [];
-  const fingerprint = textFingerprint(text);
-  const priorById = messageId && ledger.find((item) => item.messageId === messageId);
-  // before_agent_start and message_end may describe the same Human message,
-  // with only one event carrying an ID. Deduplicate across those event sources,
-  // but never collapse two different non-empty message IDs.
-  const priorCrossEvent = [...ledger].reverse().find((item) =>
-    item.fingerprint === fingerprint && item.textLength === text.length && item.source !== source
-    && (Date.now() - Date.parse(item.at || 0)) < 60_000
-    && (!item.messageId || !messageId || item.messageId === messageId));
-  if (priorById || priorCrossEvent) return { state, captured: false, kind: "duplicate" };
-  state.captureLedger = [...ledger, {
-    messageId, source, fingerprint, textLength: text.length, preview: clip(text, 140), at: receivedAt,
-  }].slice(-MAX_CAPTURE_LEDGER);
-
-  if (!state.goal.original) {
-    const original = text.slice(0, MAX_TEXT);
-    state.goal.original = original;
-    state.goal.current = original;
-    state.goal.originalTruncated = text.length > MAX_TEXT;
-    state.goal.createdAt = receivedAt;
-    appendEvent(state, "goal_created", { at: receivedAt, source, text, summary: clip(text.replace(/\s+/g, " "), 240) });
-    // The first prompt is also where many users place the only copy of hard
-    // constraints and acceptance criteria. Preserve those as structured state
-    // before compaction can reduce the prompt to a short preview.
-    const initialCriteria = extractAcceptanceCriteria(original);
-    if (initialCriteria.length) {
-      syncAcceptanceCriteria(state, initialCriteria, "initial_human_prompt");
-      appendEvent(state, "acceptance_defined", { at: receivedAt, source, summary: `Captured ${initialCriteria.length} explicitly labelled acceptance criteria from the initial Human prompt.` });
-    }
-    addSessionDirectives(state, extractSessionDirectiveFragments(original), { updateId: null, goalVersion: state.goal.version ?? 1, at: receivedAt });
-    return { state, captured: true, kind: "original" };
-  }
-
-  // One-shot reports/reviews remain traceable events but never become persistent instructions.
-  if (isOneShotMetaPrompt(text)) {
-    appendEvent(state, "human_meta_prompt", { at: receivedAt, source, text, summary: clip(text.replace(/\s+/g, " "), 240) });
-    return { state, captured: true, kind: "one_shot_meta" };
-  }
-
-  const explicitGoal = extractExplicitGoalTarget(text);
-  const candidateGoal = explicitGoal || extractGoalScopeCandidate(text);
-  const applyPending = isApplyPendingGoalChangeCommand(text);
-  const isScopeCandidate = Boolean(candidateGoal) || (hasExplicitGoalChangeLanguage(text) && !applyPending);
-  const id = `U${state.goal.nextUpdateNumber++}`;
-  const full = text.slice(0, MAX_UPDATE_TEXT);
-  const directiveFragments = extractSessionDirectiveFragments(text);
-  const nonDirectiveSummary = directiveFragments.length ? summarizeNonDirectiveContent(text, directiveFragments) : "";
-  const update = {
-    id,
-    at: receivedAt,
-    goalVersion: state.goal.version ?? 1,
-    source,
-    messageId,
-    text: full,
-    truncated: text.length > MAX_UPDATE_TEXT,
-    quote: full.slice(0, 1200),
-    summary: clip(full.replace(/\s+/g, " "), 220),
-    directiveCount: directiveFragments.length,
-    nonDirectiveSummary,
-    goalChangeCandidate: isScopeCandidate,
-    goalChangeResolution: isScopeCandidate ? "pending" : null,
-    proposedGoal: candidateGoal || null,
-    ...(isScopeCandidate ? { sourceText: text.slice(0, MAX_TEXT), sourceTextTruncated: text.length > MAX_TEXT } : {}),
-  };
-  state.goal.updates = retainGoalUpdates([...state.goal.updates, update], state.goal.sourceUpdateId);
-  const eventSummary = update.directiveCount > 0
-    ? (update.nonDirectiveSummary || `${update.directiveCount} Human directive(s) captured`)
-    : update.summary;
-  appendEvent(state, "human_update", { at: receivedAt, source, text: eventSummary, summary: eventSummary, ref: id, goalVersion: update.goalVersion });
-
-  // Store short, atomic directives rather than clipping an entire long prompt.
-  // Quoted/fenced task material is excluded so a review of old instructions does
-  // not silently turn those instructions into active constraints. Directives
-  // repeated inside a pending Goal-change message are associated with that update
-  // so they move with the new Goal if the Human/Agent explicitly applies it.
-  addSessionDirectives(state, directiveFragments, {
-    updateId: id,
-    goalVersion: state.goal.version ?? 1,
-    at: receivedAt,
-    reassignDuplicateToUpdate: isScopeCandidate,
+function validateSourceIds(value, latestHumanEntryId) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 16) throw new Error("sourceIds must contain 1..16 unique Human entry IDs.");
+  const ids = value.map((id, index) => {
+    if (typeof id !== "string" || !id.trim() || id.trim().length > 128) throw new Error(`sourceIds[${index}] must be a non-empty ID of at most 128 characters.`);
+    return id.trim();
   });
+  if (new Set(ids).size !== ids.length) throw new Error("sourceIds must not contain duplicates.");
+  if (!ids.includes(latestHumanEntryId)) throw new Error("sourceIds must include the latest observed Human input ID.");
+  return ids;
+}
 
-  // Only a direct top-level Goal label/replacement command applies automatically.
-  // Goal-scope language embedded in a larger instruction is recorded as a candidate
-  // for semantic review, not silently promoted to the active Goal.
-  if (explicitGoal) {
-    const applied = applyGoalChange(state, { updateId: id, newGoal: explicitGoal });
-    return { state: applied.state, captured: true, kind: "goal_changed", id, changedFromUpdateId: id };
+function validateGoalCriteria(value) {
+  if (!Array.isArray(value) || value.length > MAX_ACCEPTANCE_CRITERIA) throw new Error(`acceptanceCriteria must be an array of at most ${MAX_ACCEPTANCE_CRITERIA} strings.`);
+  const items = value.map((item, index) => {
+    if (typeof item !== "string" || !item.trim() || item.trim().length > 300) throw new Error(`acceptanceCriteria[${index}] must be a non-empty string of at most 300 characters.`);
+    return item.trim();
+  });
+  if (new Set(items).size !== items.length) throw new Error("acceptanceCriteria must not contain duplicates.");
+  return items;
+}
+
+export function setGoal(stateValue, input = {}) {
+  const state = normalizeGoalRunState(stateValue);
+  if (input.expectedVersion !== state.goal.version) throw new Error(`Stale Goal version: expected ${state.goal.version}, received ${input.expectedVersion}. No state changed.`);
+  if (typeof input.current !== "string" || !input.current.trim() || input.current.length > 4000) throw new Error("current must be a non-empty string of at most 4000 characters; text is never clipped.");
+  const current = input.current.trim();
+  const sourceIds = validateSourceIds(input.sourceIds, state.latestHumanEntryId);
+  if (!Array.isArray(input.constraints) || input.constraints.length > 24) throw new Error("constraints must be an array of at most 24 strings.");
+  const constraints = input.constraints.map((item, index) => {
+    if (typeof item !== "string" || !item.trim() || item.trim().length > 600) throw new Error(`constraints[${index}] must be a non-empty string of at most 600 characters.`);
+    return item.trim();
+  });
+  if (new Set(constraints).size !== constraints.length) throw new Error("constraints must not contain exact duplicates.");
+  const replacing = Boolean(state.goal.current) && state.goal.current !== current;
+  const creating = !state.goal.current;
+  const criteriaProvided = Object.hasOwn(input, "acceptanceCriteria");
+  const criteria = criteriaProvided ? validateGoalCriteria(input.acceptanceCriteria)
+    : (creating || replacing ? [] : (state.goal.criteria ?? []).filter((item) => item.goalVersion === state.goal.version).map((item) => item.text));
+  if (replacing && hasUnresolvedExecution(state)) throw new Error("Cannot replace the Goal while native execution or competitor identity is unresolved. No state changed.");
+  if (!replacing && !creating && state.plan.tasks.length && criteriaProvided && JSON.stringify(criteria) !== JSON.stringify(state.goal.acceptanceCriteria)) {
+    throw new Error("A DAG exists; change acceptance criteria through revisePlanState. No state changed.");
   }
-  if (applyPending) {
-    const pending = explicitGoalChangeUpdates(state).slice().reverse().map((item) => ({ ...item, resolvedGoal: item.proposedGoal || extractExplicitGoalTarget(item.text) })).find((item) => item.id !== id && item.resolvedGoal);
-    if (pending) {
-      const applied = applyGoalChange(state, { updateId: pending.id, newGoal: pending.resolvedGoal, relatedUpdateIds: [id] });
-      return { state: applied.state, captured: true, kind: "goal_changed", id, changedFromUpdateId: pending.id };
-    }
+  const oldConstraints = JSON.stringify(state.goal.constraints ?? []);
+  const oldCriteria = JSON.stringify((state.goal.criteria ?? []).filter((item) => item.goalVersion === state.goal.version).map((item) => item.text));
+  const semanticChanged = oldConstraints !== JSON.stringify(constraints) || oldCriteria !== JSON.stringify(criteria);
+  const sameTextMetadataChanged = !creating && !replacing && (semanticChanged
+    || JSON.stringify(state.goal.sourceIds) !== JSON.stringify(sourceIds)
+    || state.goal.reviewedInputId !== state.latestHumanEntryId);
+  if (!creating && !replacing && !sameTextMetadataChanged) return { state, changed: false, replaced: false };
+  if (creating) {
+    state.goal.original = current;
+    state.goal.originalSourceIds = [...sourceIds];
+    state.goal.version = 1;
+    state.goal.createdAt = timestamp();
+  } else if (replacing) {
+    state.goal.version += 1;
+    state.goal.current = current;
+    state.plan = emptyDagState();
+    state.routeSet = null;
+    state.goal.criteria = [];
+    state.goal.acceptanceCriteria = [];
+    state.goal.nextAcceptanceNumber = 1;
   }
-  return { state, captured: true, kind: "update", id };
+  state.goal.current = current;
+  state.goal.sourceIds = [...sourceIds];
+  state.goal.reviewedInputId = state.latestHumanEntryId;
+  state.goal.constraints = constraints;
+  if (criteriaProvided || creating || replacing) syncAcceptanceCriteria(state, criteria, "explicit_goal_criteria");
+  if (criteriaProvided && oldCriteria !== JSON.stringify(criteria)) appendEvent(state, "acceptance_defined", { summary: `Defined ${criteria.length} explicit acceptance criteria.` });
+  if (creating) appendEvent(state, "goal_created", { summary: `Explicit Goal created from ${sourceIds.length} Human source reference(s).`, ref: sourceIds[0] });
+  else if (replacing) appendEvent(state, "goal_replaced", { summary: `Current Goal replaced at version ${state.goal.version}.`, ref: sourceIds[0] });
+  else if (oldConstraints !== JSON.stringify(constraints)) appendEvent(state, "goal_constraints_updated", { summary: `Updated ${constraints.length} explicit Goal constraint(s).`, ref: sourceIds[0] });
+  return { state, changed: true, replaced: replacing };
+}
+
+function hasUnresolvedExecution(state) {
+  if (["dispatching", "running", "unknown"].includes(state.plan?.execution?.status)) return true;
+  return (state.routeSet?.competitorRuns ?? []).some((run) => ["registered", "running", "unknown", "cancel_requested", "cancel_acknowledged"].includes(run.status));
 }
 
 export function captureHumanDecision(stateValue, input) {
@@ -931,120 +784,6 @@ export function recordHumanQuestionnaireFailure(stateValue, input) {
     event.sourceCallId = sourceCallId;
   }
   return { state, captured: true, kind: "error", event };
-}
-
-export function explicitGoalChangeUpdates(stateValue) {
-  const state = normalizeGoalRunState(stateValue);
-  return state.goal.updates.filter((update) => update.goalVersion === (state.goal.version ?? 1)
-    && !state.goalChanges.some((change) => change.updateId === update.id)
-    && update.goalChangeResolution !== "dismissed"
-    && (update.goalChangeCandidate === true || hasExplicitGoalChangeLanguage(update.text))).slice(-8);
-}
-
-export function applyGoalChange(stateValue, input) {
-  const state = normalizeGoalRunState(stateValue);
-  if (!state.goal.original) throw new Error("No Goal has been captured in this session.");
-  const updateId = nonEmpty(input?.updateId, "updateId", 32);
-  const update = explicitGoalChangeUpdates(state).find((item) => item.id === updateId);
-  if (!update) throw new Error(`Update "${updateId}" is not an explicit Goal/scope change or has expired. No state changed.`);
-  const newGoal = nonEmpty(input?.newGoal || update.proposedGoal, "newGoal", 4000);
-  if (newGoal === state.goal.current) throw new Error("newGoal is already the current Goal; no state changed.");
-  const sourceText = sourceTextForUpdate(state, update) || update.text || "";
-  const suppliedCriteria = Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria : extractAcceptanceCriteria(sourceText);
-  const nextCriteria = suppliedCriteria
-    .map((item, i) => nonEmpty(item, `acceptanceCriteria[${i}]`, 300)).slice(0, MAX_ACCEPTANCE_CRITERIA);
-  const sourceTextTruncated = sourceText.length > MAX_TEXT || update.sourceTextTruncated === true;
-  const previousPlan = state.plan;
-  const prior = {
-    at: timestamp(),
-    updateId,
-    relatedUpdateIds: Array.isArray(input?.relatedUpdateIds) ? input.relatedUpdateIds.slice(0, 4) : [],
-    previousGoal: clip(state.goal.current, 1000),
-    previousSourceUpdateId: state.goal.sourceUpdateId ?? null,
-    newGoal,
-    previousGoalVersion: state.goal.version ?? 1,
-    planRevision: previousPlan.revision ?? 0,
-    previousAcceptanceCriteria: (state.goal.acceptanceCriteria ?? []).slice(0, 12),
-    previousCriteria: (state.goal.criteria ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).slice(0, MAX_ACCEPTANCE_CRITERIA).map((item) => ({ id: item.id, text: clip(item.text, 240), status: item.status, evidence: clip(item.evidence, 240) })),
-    previousPlan: {
-      goal: clip(previousPlan.goal || state.goal.current, 1000),
-      revision: previousPlan.revision ?? 0,
-      acceptanceCriteria: (previousPlan.acceptanceCriteria ?? []).slice(0, 12),
-      tasks: (previousPlan.tasks ?? []).slice(0, 24).map((task) => ({
-        id: task.id, title: clip(task.title, 180), status: task.status,
-        dependsOn: (task.dependsOn ?? []).slice(0, 24),
-        acceptance: clip(task.acceptance, 260), evidence: clip(task.evidence, 260),
-        reason: clip(task.reason, 220),
-      })),
-      planHistory: (previousPlan.planHistory ?? []).slice(-4).map((item) => ({ revision: item.revision, summary: clip(item.summary, 220), reason: clip(item.reason, 220) })),
-    },
-    traceCounts: {
-      failures: state.trace.failures.filter((item) => item.goalVersion === (state.goal.version ?? 1)).length,
-      writes: state.trace.writes.filter((item) => item.goalVersion === (state.goal.version ?? 1)).length,
-    },
-    decisions: state.decisions.filter((item) => item.goalVersion === (state.goal.version ?? 1)).slice(-MAX_DECISIONS).map((item) => ({ id: item.id, at: item.at, summary: clip(item.summary, 180), rationale: clip(item.rationale, 180), evidence: clip(item.evidence, 160) })),
-    checkpoints: state.checkpoints.filter((item) => item.goalVersion === (state.goal.version ?? 1)).slice(-MAX_CHECKPOINTS).map((item) => ({ id: item.id, at: item.at, summary: clip(item.summary, 180), ref: clip(item.ref, 180), evidence: clip(item.evidence, 160) })),
-    humanDecisions: state.humanDecisions.filter((item) => item.goalVersion === (state.goal.version ?? 1)).slice(-4).map((item) => ({ id: item.id, at: item.at, source: item.source, summary: clip(item.summary, 300) })),
-  };
-  state.goalChanges = [...state.goalChanges, prior].slice(-MAX_GOAL_CHANGES);
-  state.goal.changes = [...state.goalChanges];
-  const previousVersion = state.goal.version ?? 1;
-  state.goal.updates = state.goal.updates.map((item) => {
-    if (item.id !== updateId) return item;
-    const { sourceText: _sourceText, sourceTextTruncated: _sourceTextTruncated, ...retained } = item;
-    return { ...retained, goalChangeResolution: "applied" };
-  });
-  state.goal.current = newGoal;
-  state.goal.version = previousVersion + 1;
-  state.goal.sourceUpdateId = updateId;
-  state.goal.sourceUpdateText = sourceText.slice(0, MAX_TEXT);
-  state.goal.sourceUpdateTruncated = sourceTextTruncated;
-  // The current Goal now owns the bounded source snapshot. Avoid keeping the
-  // same long Human message in both the update record and Goal state.
-  // Directives written in the same Human message as this scope change belong to
-  // the new Goal. Pending candidates remain on the old version until explicitly
-  // applied; when applied, their associated directives move with them.
-  state.sessionDirectives = state.sessionDirectives.map((item) =>
-    item.updateId === updateId && item.goalVersion === previousVersion
-      ? { ...item, goalVersion: state.goal.version }
-      : item);
-  state.sessionDirectives = retainSessionDirectives(state.sessionDirectives, state.goal.version);
-  state.goal.acceptanceCriteria = [];
-  state.goal.criteria = [];
-  state.plan = emptyDagState();
-  state.routeSet = null;
-  state.plan.goal = newGoal;
-  if (nextCriteria.length) syncAcceptanceCriteria(state, nextCriteria, "goal_change");
-  state.plan.acceptanceCriteria = [...state.goal.acceptanceCriteria];
-  // Keep broadly applicable capability groups loaded across a Goal change. Hiding
-  // history/planning/acceptance here caused stale-tool "not found" failures on the
-  // next turn. The next request boundary filters this set against current availability;
-  // only Goal-specific review/change capabilities are dropped.
-  state.activeCapabilities = (state.activeCapabilities ?? []).filter((capability) => !["goal_change", "issue_review"].includes(capability));
-  state.autoActivation = null;
-  appendEvent(state, "goal_changed", {
-    summary: `Goal v${previousVersion} replaced by Goal v${state.goal.version}.`,
-    ref: updateId,
-    text: `Previous Goal: ${prior.previousGoal}\nCurrent Goal: ${newGoal}`,
-    goalVersion: state.goal.version,
-  });
-  return { state, archivedTaskCount: prior.previousPlan.tasks.length, updateId };
-}
-
-export function dismissGoalChangeCandidate(stateValue, input) {
-  const state = normalizeGoalRunState(stateValue);
-  const updateId = nonEmpty(input?.updateId, "updateId", 32);
-  const update = explicitGoalChangeUpdates(state).find((item) => item.id === updateId);
-  if (!update) throw new Error(`Update "${updateId}" is not a pending Goal/scope candidate. No state changed.`);
-  update.goalChangeResolution = "dismissed";
-  delete update.sourceText;
-  delete update.sourceTextTruncated;
-  appendEvent(state, "goal_change_candidate_dismissed", {
-    summary: `Kept current Goal after reviewing candidate ${updateId}.`,
-    ref: updateId,
-    text: update.summary,
-  });
-  return { state, updateId };
 }
 
 export function recordDecision(stateValue, input) {
@@ -1223,299 +962,6 @@ function isOtherSectionHeading(line) {
   return /^(?:goal|objective|scope|current state|context|background|deliverables?|constraints?|restrictions?|requirements?|rules?|implementation plan|workflow|interaction flow|core effects|verification|约束|限制|需求|要求|交付物|范围|当前状态|上下文|背景|核心效果|交互流程|实现流程|验证|必读契约|已完成|已知问题|问题列表|仓库与现状)$/i.test(value);
 }
 
-export function stripConventionSections(value) {
-  const lines = String(value ?? "").split(/\r?\n/);
-  const output = [];
-  let skipping = false;
-  let fenced = false;
-  let blankInSection = false;
-  for (const line of lines) {
-    if (/^\s*```/.test(line)) {
-      fenced = !fenced;
-      if (!skipping) output.push(line);
-      continue;
-    }
-    if (fenced) {
-      if (!skipping) output.push(line);
-      continue;
-    }
-    if (isConventionHeading(line)) {
-      skipping = true;
-      blankInSection = false;
-      continue;
-    }
-    if (skipping) {
-      const heading = normalizeHeading(line);
-      const resumes = isAcceptanceHeading(line)
-        || /^(?:goal|objective|scope|current state|context|background|deliverables?|hard constraints?|hard restrictions?|constraints?|restrictions?|requirements?|rules?|implementation plan|workflow|verification|约束|限制|硬性约束|硬性限制|需求|要求|交付物|范围|当前状态|上下文|背景|必读契约)$/i.test(heading)
-        || /^\s*#{1,6}\s+/.test(line);
-      const ordinaryProseAfterBlank = blankInSection && line.trim() && !/^\s*(?:[-*+]\s+|\d+[.)、]\s+)/.test(line);
-      if (resumes || ordinaryProseAfterBlank) {
-        skipping = false;
-      } else {
-        if (!line.trim()) blankInSection = true;
-        else blankInSection = false;
-        continue;
-      }
-    }
-    output.push(line);
-  }
-  return output.join("\n");
-}
-
-function extractAcceptanceCriteria(text) {
-  const clean = stripQuotedRegions(text);
-  if (!clean) return [];
-  const criteria = [];
-  let active = false;
-  let current = "";
-  let blankAfterCriterion = false;
-  const flush = () => {
-    const value = current.replace(/\s+/g, " ").trim();
-    if (value && criteria.length < MAX_ACCEPTANCE_CRITERIA) criteria.push(clip(value, 300));
-    current = "";
-  };
-  for (const rawLine of clean.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (isAcceptanceHeading(rawLine)) {
-      flush();
-      active = true;
-      blankAfterCriterion = false;
-      const inline = rawLine.match(/^\s*(?:#{1,6}\s*)?(?:acceptance(?:\s+(?:criteria|conditions?|checks?))?|验收(?:标准|条件|准则|要求)?)\s*(?:\([^)]*\))?\s*[:：]\s*(.+)$/i)?.[1]?.trim();
-      if (inline) current = inline;
-      continue;
-    }
-    if (!active) continue;
-    if (!line) {
-      flush();
-      if (criteria.length) blankAfterCriterion = true;
-      continue;
-    }
-    if (isOtherSectionHeading(rawLine)) {
-      flush();
-      active = false;
-      continue;
-    }
-    const bullet = rawLine.match(/^\s*(?:[-*+]\s+|\d+[.)]\s+|AC\s*\d+\s*[:：.)-]\s*)(.+)$/i);
-    if (blankAfterCriterion && !bullet) {
-      // A blank line followed by ordinary prose is the end of the labelled
-      // acceptance list, not another criterion. Blank-separated list items
-      // remain supported because a new bullet clears this marker.
-      active = false;
-      continue;
-    }
-    blankAfterCriterion = false;
-    if (bullet) {
-      flush();
-      current = bullet[1].trim();
-    } else if (current) {
-      current += ` ${line}`;
-    } else {
-      current = line;
-    }
-    if (criteria.length >= MAX_ACCEPTANCE_CRITERIA) break;
-  }
-  flush();
-  return [...new Set(criteria)].slice(0, MAX_ACCEPTANCE_CRITERIA);
-}
-
-function isOneShotMetaPrompt(text) {
-  if (typeof text !== "string") return false;
-  const s = stripQuotedRegions(text);
-  if (!s) return false;
-  const pattern = /(?:复盘本轮|复盘(?:当前|本次)?(?:session|会话|任务)|回顾本轮|回顾本次会话|总结本轮|总结本次会话|分析本轮|分析本次会话|review (?:this|the) (?:session|turn|run)|retrospect(?:ion)? (?:on|of) (?:this|the) (?:session|turn|run)|summari[sz]e (?:this|the) (?:session|turn|run)|report on (?:this|the) (?:session|turn|run))/i;
-  const firstLine = s.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
-  return pattern.test(firstLine) || (s.length <= 1200 && pattern.test(s));
-}
-
-function directiveClauseMatches(clause) {
-  const s = String(clause ?? "").trim().replace(/^\s*(?:constraint|constraints|restriction|restrictions)\s*[:：]\s*/i, "");
-  if (!s || s.length < 3) return false;
-  return /\b(?:do not|don't|never|must(?: not)?|should(?: not)?|prefer|avoid|only|always|stop|wait|keep|read-only|readonly|no\s+cd|please use|use .{1,80} instead of|all .{1,50} conclusions? .{0,30}(?:evidence|reference))\b|(?:不要|别(?:再)?|不许|不得|禁止|不以|不假设|必须|务必|优先|请用|用.{1,80}不用|用\s*(?:pi[- ]?)?compass|先.{1,80}再|只允许|只能|只有|只从|必须先|不能|不应该|不需要考虑|不落盘|保持|等到|等待|不用|只写用例名|有问题不要死磕|你就在 cwd|当前就在 cwd|最小|最核心|快准省|输入和输出由你自己定义|及时问我|写清楚|结论.{0,30}(?:evidence|reference|证据|引用)|都要有.{0,20}(?:evidence|reference|证据|引用))/i.test(s);
-}
-
-function extractSessionDirectiveFragments(text) {
-  if (typeof text !== "string" || isOneShotMetaPrompt(text)) return [];
-  const clean = stripQuotedRegions(text);
-  const fragments = [];
-  const seen = new Map();
-  let sectionMode = "general";
-  const addClause = (value, force = false, explicitHard = false, pinned = false) => {
-    const clause = String(value ?? "").trim().replace(/^\s*(?:constraint|constraints|restriction|restrictions)\s*[:：]\s*/i, "").replace(/[。.!?]+$/, "").trim();
-    if (!clause || clause.length < 3 || (!force && !directiveClauseMatches(clause))) return;
-    const key = canonicalDirective(clause);
-    const hard = explicitHard || isHardDirective(clause);
-    if (!key) return;
-    if (seen.has(key)) {
-      const existing = fragments[seen.get(key)];
-      existing.hard = existing.hard || hard;
-      existing.pinned = existing.pinned || pinned;
-    } else {
-      seen.set(key, fragments.length);
-      fragments.push({ text: clause, hard, pinned });
-    }
-  };
-  const lines = clean.split(/\r?\n/);
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const line = lines[lineIndex];
-    if (!line.trim() && (sectionMode === "constraints" || sectionMode === "conventions")) {
-      const nextNonEmpty = lines.slice(lineIndex + 1).find((item) => item.trim()) ?? "";
-      if (!/^\s*(?:[-*+]\s+|\d+[.)、]\s+)/.test(nextNonEmpty)) sectionMode = "general";
-      continue;
-    }
-    const heading = normalizeHeading(line);
-    if (isConventionHeading(line)) {
-      sectionMode = "conventions";
-      continue;
-    }
-    if (isAcceptanceHeading(line)) {
-      sectionMode = "acceptance";
-      continue;
-    }
-    const inlineConstraint = line.match(/^\s*(?:#{1,6}\s*)?(?:constraints?|restrictions?|hard constraints?|rules?|约束|限制|硬性约束|硬性限制|必须遵守)\s*[:：]\s*(.+)$/i);
-    if (inlineConstraint) {
-      sectionMode = "constraints";
-      addClause(inlineConstraint[1], true, true, true);
-      continue;
-    }
-    const isConstraintHeading = /^(?:constraints?|restrictions?|hard constraints?|rules?|约束|限制|硬性约束|硬性限制|必须遵守)$/i.test(heading);
-    if (isConstraintHeading) {
-      sectionMode = "constraints";
-      const inline = line.match(/^\s*(?:#{1,6}\s*)?(?:constraints?|restrictions?|hard constraints?|rules?|约束|限制|硬性约束|硬性限制|必须遵守)\s*[:：]\s*(.+)$/i)?.[1];
-      if (inline) addClause(inline, true, true, true);
-      continue;
-    }
-    if (isOtherSectionHeading(line)) {
-      sectionMode = "general";
-      continue;
-    }
-    if (sectionMode === "acceptance" || sectionMode === "conventions") continue;
-    const isNumberedItem = /^\s*\d+[.)、]\s+/.test(line);
-    const unbulleted = line.trim().replace(/^(?:[-*+\s]+|\d+[.)、]\s+)/, "");
-    if (!unbulleted) continue;
-    // Split natural-language sentences before matching broad phrases such as
-    // "use X instead of Y"; do not split dots inside paths or version numbers.
-    for (const clause of unbulleted.split(/[，,；;。！？]+|(?<=\.)\s+(?=[A-Za-z])/)) {
-      const pinNumberedHard = isNumberedItem && isHardDirective(clause);
-      addClause(clause, sectionMode === "constraints", sectionMode === "constraints", sectionMode === "constraints" || pinNumberedHard);
-    }
-  }
-  return fragments.slice(-((MAX_SESSION_DIRECTIVES + MAX_HARD_SESSION_DIRECTIVES) * 4));
-}
-
-function addSessionDirectives(state, directiveFragments, { updateId = null, goalVersion = state.goal.version ?? 1, at = timestamp(), reassignDuplicateToUpdate = false } = {}) {
-  for (const fragment of directiveFragments ?? []) {
-    const directiveText = typeof fragment === "string" ? fragment : fragment?.text;
-    if (typeof directiveText !== "string" || !directiveText.trim()) continue;
-    const canonical = canonicalDirective(directiveText);
-    const pinned = fragment?.pinned === true;
-    const hard = pinned || fragment?.hard === true || isHardDirective(directiveText);
-    const existing = state.sessionDirectives.find((item) =>
-      item.goalVersion === goalVersion
-      && canonicalDirective(item.text) === canonical);
-    if (existing) {
-      existing.reaffirmations = (existing.reaffirmations ?? 1) + 1;
-      existing.lastConfirmedAt = at;
-      existing.hard = existing.hard === true || hard;
-      existing.pinned = existing.pinned === true || pinned;
-      if (reassignDuplicateToUpdate && updateId) existing.updateId = updateId;
-      continue;
-    }
-    state.sessionDirectives.push({
-      id: `S${state.nextDirectiveNumber++}`,
-      updateId,
-      at,
-      lastConfirmedAt: at,
-      reaffirmations: 1,
-      goalVersion,
-      text: clip(directiveText, 260),
-      summary: clip(directiveText.replace(/\s+/g, " "), 200),
-      hard,
-      pinned,
-    });
-  }
-  state.sessionDirectives = retainSessionDirectives(state.sessionDirectives, goalVersion);
-}
-
-function firstTopLevelLine(text) {
-  return stripQuotedRegions(text).split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
-}
-
-function hasExplicitGoalChangeLanguage(text) {
-  const line = firstTopLevelLine(text);
-  if (!line) return false;
-  const firstClause = line.split(/[。！？.!?]/)[0].trim();
-  return /^(?:(?:好|好的|那么|那|另外|现在|当前)[，,。；;:\s]*)?(?:goal(?:\s+v\d+)?|目标)\s*[:：]|^(?:(?:好|好的|那么|那|另外)[，,。；;:\s]*)?(?:我(?:现在)?(?:要)?换(?:一个|个)?\s*(?:新的?\s*)?(?:goal|目标)|(?:把|将)(?:当前|现在的)?(?:compass\s*)?(?:goal|目标).{0,18}(?:改为|改成|换成|调整为)|(?:current\s+)?goal\s+(?:is now|changed to|replaced by))\b|^(?:actually[,，]?\s*)?i\s+(?:need|want)\b.{0,140}\b(?:instead of|rather than)\b|^(?:不再需要|不要.{0,40}而是|不是.{0,60}而是|范围调整为|目标改为|目标改成|换(?:一个|个)?目标)/i.test(firstClause);
-}
-
-function extractGoalScopeCandidate(text) {
-  const clean = stripQuotedRegions(text);
-  if (!clean) return "";
-  if (/(?:not a replacement(?: command)?|not a goal change|not changing the goal|not a scope change|不是.{0,36}(?:目标变更|目标替换|替换命令|改目标)|不代表.{0,24}目标(?:变更|替换))/i.test(clean)) return "";
-  // A versioned Goal label embedded in a longer structured engineering prompt
-  // is a strong scope-change signal, but not enough to silently replace Goal.
-  // Preserve it as a candidate so the Agent can explicitly apply or dismiss it.
-  const versionedGoal = clean.match(/(?:^|[\s#（(，,;；:])(?:goal|目标)\s+v\d+\s*[:：]\s*([^\n]+)/i);
-  if (versionedGoal?.[1]?.trim()) return clip(versionedGoal[1].trim(), 4000);
-  const patterns = [
-    /(?:当前|现在的|本轮)?目标\s*(?:就是|改为|改成|调整为|换成)\s*([^。\n；;]+)/i,
-    /(?:the\s+)?goal\s+(?:for this session\s+)?(?:is now|changed to|replaced by|is to)\s*[:：=]?\s*([^\n.;]+)/i,
-    /(?:current\s+)?scope\s+(?:is now|changed to|should be)\s*[:：=]?\s*([^\n.;]+)/i,
-  ];
-  for (const pattern of patterns) {
-    const match = clean.match(pattern);
-    const target = match?.[1]?.trim().replace(/[，,。；;\s]+$/, "");
-    if (target && target.length >= 3 && !/^(?:什么|哪个|whether|if)\b/i.test(target)) return clip(target, 4000);
-  }
-  return "";
-}
-
-function extractExplicitGoalTarget(text) {
-  if (typeof text !== "string" || !text.trim()) return "";
-  const clean = stripQuotedRegions(text);
-  const firstLine = clean.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
-  if (!firstLine) return "";
-  // Questions/proposals and embedded Goal mentions are not a replacement command.
-  if (/(?:是否|要不要|建议|我建议|考虑一下|如果|should we|could we|maybe|perhaps|consider changing|what if)/i.test(firstLine)) return "";
-
-  const goalLabel = firstLine.match(/^(?:(?:好|好的|那么|那|另外)[，,。；;:\s]*)?(?:我来更新[，,。；; ]*)?(?:当前的?\s*)?(?:goal|目标)(?:\s+v\d+)?\s*[:：]\s*(.*)$/i);
-  if (goalLabel) {
-    const colon = firstLine.search(/[:：]/);
-    const fullOffset = clean.indexOf(firstLine) + colon + 1;
-    const remainder = clean.slice(fullOffset).trim();
-    const lines = remainder.split(/\r?\n/);
-    const goalLines = [];
-    for (const line of lines) {
-      const trimmed = line.trim();
-      const heading = normalizeHeading(trimmed);
-      const rawHeading = trimmed.replace(/^#{1,6}\s*/, "");
-      if (/^(?:constraints?|restrictions?|acceptance(?:\s+(?:criteria|conditions?))?|requirements?|deliverables?|scope|current state|context|约束|限制|验收(?:标准|条件|准则|要求)?|需求|要求|交付物|范围|当前状态|上下文)\s*(?:[:：].*)?$/i.test(rawHeading)) break;
-      goalLines.push(line);
-    }
-    const target = goalLines.join("\n").trim();
-    return target.length >= 3 ? clip(target, 4000) : "";
-  }
-
-  const directPatterns = [
-    /^(?:好[，,。；; ]*)?(?:那)?我(?:现在)?(?:要)?换(?:一个|个)?\s*(?:新的?\s*)?(?:goal|目标)[，,。；; ]*(?:现在的?\s*)?(?:goal|目标)\s*(?:就)?是\s*([^\n。；;，,]+)/i,
-    /^(?:好[，,。；; ]*)?(?:当前|现在的?)\s*(?:goal|目标)\s*(?:就)?(?:改为|改成|换成|调整为)\s*([^\n。；;，,]+)/i,
-    /^(?:好[，,。；; ]*)?(?:把|将)(?:当前|现在的)?(?:compass\s*)?(?:goal|目标)(?:给我)?(?:改为|换成|调整为|改成)\s*([^\n。；;，,]+)/i,
-    /^(?:好[，,。；; ]*)?(?:new\s+goal|(?:the\s+)?goal\s+is\s+now|current\s+goal\s+is)\s*[:：=\-]?\s*([^\n.;，,]+)/i,
-  ];
-  for (const pattern of directPatterns) {
-    const match = firstLine.match(pattern);
-    const target = match?.[1]?.trim().replace(/[，,。；;\s]+$/, "");
-    if (target && target.length >= 3 && !/^(?:什么|哪个|whether|if)\b/i.test(target)) return clip(target, 4000);
-  }
-  return "";
-}
-
-function isApplyPendingGoalChangeCommand(text) {
-  const line = firstTopLevelLine(text);
-  if (!line) return false;
-  return /^(?:好[，,。；; ]*)?(?:把.{0,28}(?:compass\s*(?:的)?\s*)?(?:goal|目标).{0,14}(?:换|改|更新)|(?:change|switch|update)\s+(?:the\s+)?(?:compass\s*)?(?:goal|objective)\b)/i.test(line);
-}
-
 function failureSignature(item) {
   const error = String(item?.error ?? "").toLowerCase()
     .replace(/(?:[a-z]:)?[\\/][^\s:'"<>]+/g, "<path>")
@@ -1527,7 +973,7 @@ function failureSignature(item) {
 
 export function shouldSurfaceIssueReview(stateValue) {
   const state = normalizeGoalRunState(stateValue);
-  const version = state.goal.version ?? 1;
+  const version = state.goal.version;
   const failures = state.trace.failures.filter((item) => item.goalVersion === version).slice(-6);
   if (failures.length < 3) return false;
   const last = failures.slice(-3);
@@ -1540,168 +986,25 @@ export function shouldSurfaceIssueReview(stateValue) {
   return [...counts.values()].some((count) => count >= 2);
 }
 
-function directivePriority(item) {
-  const text = String(item?.text ?? "").toLowerCase();
-  let score = 0;
-  if (item?.pinned === true) score += 12;
-  if (item?.hard === true || isHardDirective(text)) score += 8;
-  if (/(?:token|credential|secret|凭据|密钥|安全|security|read-only|readonly|pid|进程残留|不得回传|不能推送|不允许写)/i.test(text)) score += 4;
-  if (/(?:use .* instead|用.{1,80}不用|必须先|先.{1,80}再|及时问我|有问题不要死磕|写清楚|evidence|reference|证据|引用)/i.test(text)) score += 3;
-  if (/(?:最小|最核心|快准省|cwd|compass|rg|fd|amend)/i.test(text)) score += 1;
-  score += Math.min(2, Math.log2(Math.max(1, Number(item?.reaffirmations) || 1)));
-  return score;
-}
-
-function retainSessionDirectives(items, currentVersion = 1) {
-  const candidates = (Array.isArray(items) ? items : []).slice(-((MAX_SESSION_DIRECTIVES + MAX_HARD_SESSION_DIRECTIVES) * 4));
-  const isHard = (item) => item?.hard === true || isHardDirective(item?.text);
-  const hard = candidates.filter(isHard);
-  const soft = candidates.filter((item) => !isHard(item));
-  if (hard.length <= MAX_HARD_SESSION_DIRECTIVES && soft.length <= MAX_SESSION_DIRECTIVES) return candidates;
-  const rank = (a, b) => {
-    const currentBiasA = a.goalVersion === currentVersion ? 100 : 0;
-    const currentBiasB = b.goalVersion === currentVersion ? 100 : 0;
-    return (directivePriority(b) + currentBiasB) - (directivePriority(a) + currentBiasA)
-      || Date.parse(b.lastConfirmedAt || b.at || 0) - Date.parse(a.lastConfirmedAt || a.at || 0);
-  };
-  const keep = new Set([
-    ...hard.sort(rank).slice(0, MAX_HARD_SESSION_DIRECTIVES),
-    ...soft.sort(rank).slice(0, MAX_SESSION_DIRECTIVES),
-  ].map((item) => item.id));
-  return candidates.filter((item) => keep.has(item.id));
-}
-
-function prioritizedCurrentDirectives(state, limit = 8) {
-  const version = state.goal.version ?? 1;
-  return state.sessionDirectives
-    .filter((item) => item.goalVersion === version)
-    .filter((item) => item.text !== state.goal.original && item.text !== state.goal.current)
-    .slice()
-    .sort((a, b) => Number(b.pinned === true) - Number(a.pinned === true)
-      || Number(isHardDirective(b.text) || b.hard === true) - Number(isHardDirective(a.text) || a.hard === true)
-      || directivePriority(b) - directivePriority(a)
-      || Date.parse(b.lastConfirmedAt || b.at || 0) - Date.parse(a.lastConfirmedAt || a.at || 0))
-    .slice(0, limit);
-}
-
-function sourceTextForUpdate(state, update) {
-  if (!update) return "";
-  if (update.id && update.id === state.goal.sourceUpdateId && typeof state.goal.sourceUpdateText === "string") {
-    return state.goal.sourceUpdateText;
-  }
-  if (typeof update.sourceText === "string") return update.sourceText;
-  const exact = update.messageId
-    ? state.captureLedger.find((item) => item.messageId === update.messageId)
-    : null;
-  return exact?.text ?? update.sourceText ?? update.text ?? "";
-}
-
-function unresolvedAcceptanceRange(state) {
-  const version = state.goal.version ?? 1;
-  const currentCriteria = (state.goal.criteria ?? []).filter((item) => item.goalVersion === version);
-  const sourceUpdate = state.goal.sourceUpdateId
-    ? sourceTextForUpdate(state, state.goal.updates.find((item) => item.id === state.goal.sourceUpdateId))
-    : "";
-  const source = `${state.goal.current ?? ""}\n${sourceUpdate}\n${state.goal.current === state.goal.original ? state.goal.original ?? "" : ""}`;
-  const ranges = [...source.matchAll(/\bAC\s*(\d+)\s*[-–—至到]\s*AC?\s*(\d+)\b/gi)];
-  if (!ranges.length) return null;
-  const ids = new Set(currentCriteria.map((item) => String(item.id ?? "").toUpperCase().replace(/\s+/g, "")));
-  for (const match of ranges) {
-    const start = Number(match[1]);
-    const end = Number(match[2]);
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start || end - start > 40) {
-      return { range: `AC${match[1]}-AC${match[2]}`, missing: [] };
-    }
-    const missing = [];
-    for (let number = start; number <= end; number += 1) {
-      if (!ids.has(`AC${number}`)) missing.push(`AC${number}`);
-    }
-    if (missing.length) return { range: `AC${start}-AC${end}`, missing };
-  }
-  return null;
-}
-
 export function buildGoalDetails(stateValue, maxChars = 26000) {
   const state = normalizeGoalRunState(stateValue);
-  if (!state.goal.original) return "No Goal has been captured for this session.";
-  const version = state.goal.version ?? 1;
-  const original = state.goal.original;
-  const current = state.goal.current || original;
-  const canonical = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
-  const sameAsOriginal = canonical(current) === canonical(original);
-  const lines = [
-    `Current Goal v${version}${sameAsOriginal ? " (unchanged from original)" : ""}:`,
-    current,
-    `Acceptance: ${acceptanceStatus(state).status}.`,
-  ];
-  const directives = state.sessionDirectives.filter((item) => item.goalVersion === version)
-    .filter((item) => canonical(item.text) !== canonical(original) && canonical(item.text) !== canonical(current));
-  const directiveTexts = new Set(directives.map((item) => canonical(item.text)));
-  const hardDirectives = prioritizedCurrentDirectives(state, MAX_HARD_SESSION_DIRECTIVES)
-    .filter((item) => item.hard === true || isHardDirective(item.text));
-  if (hardDirectives.length) {
-    lines.push("Hard Human constraints (full retained text; do not treat as optional preferences):");
-    for (const item of hardDirectives) lines.push(`- ${item.id}: ${item.text}`);
-  }
-  if (state.goal.originalTruncated) lines.push(`[Original Goal stored up to ${MAX_TEXT} characters; inspect the original Human message for omitted details.]`);
-  if (state.goal.sourceUpdateId) {
-    const sourceUpdate = state.goal.updates.find((item) => item.id === state.goal.sourceUpdateId);
-    if (sourceUpdate) {
-      lines.push(`Human message that established Current Goal (${sourceUpdate.id}; source message is retained):`);
-      const sourceText = sourceTextForUpdate(state, sourceUpdate);
-      lines.push(sourceText);
-      if (state.goal.sourceUpdateTruncated) lines.push(`[source update stored up to ${MAX_TEXT} characters; original message was longer]`);
-      else if (sourceUpdate.truncated && sourceText.length <= sourceUpdate.text.length) lines.push("[source update was truncated in GoalRun; inspect the original Human message if omitted details matter]");
-    }
-  }
+  if (!state.goal.current) return "No explicit Goal has been set for this session.";
+  const version = state.goal.version;
   const criteria = state.goal.criteria.filter((item) => item.goalVersion === version);
-  lines.push(criteria.length
-    ? `Acceptance criteria: ${criteria.map((item) => `${item.id}[${item.status}] ${item.text}${item.evidence ? ` — ${clip(item.evidence, 180)}` : ""}`).join("; ")}`
-    : "Acceptance criteria: not defined.");
-  if (!sameAsOriginal) lines.push("Original Goal (historical; current Goal takes precedence for this run):", original);
-
-  const softDirectives = directives.filter((item) => !(item.hard === true || isHardDirective(item.text))).slice(-6);
-  if (softDirectives.length) {
-    lines.push("Recent Human preferences:");
-    for (const item of softDirectives) lines.push(`- ${item.id}: ${clip(item.text.replace(/\s+/g, " "), 260)}`);
-  }
-
-  const seenUpdates = new Set();
-  const updates = state.goal.updates.filter((item) => item.goalVersion === version)
-    .filter((item) => {
-      const normalized = canonical(item.text);
-      if (!normalized || normalized === canonical(original) || normalized === canonical(current) || directiveTexts.has(normalized) || seenUpdates.has(normalized)) return false;
-      seenUpdates.add(normalized);
-      return true;
-    }).slice(-4);
-  if (updates.length) {
-    lines.push("Other recent Human updates:");
-    for (const item of updates) lines.push(`- ${item.id}: ${clip(item.summary || item.text.replace(/\s+/g, " "), 220)}${item.truncated ? " [truncated]" : ""}`);
-  }
-
-  const decisions = state.humanDecisions.filter((item) => item.goalVersion === version).slice(-4);
-  if (decisions.length) {
-    lines.push("Human decisions:");
-    const detailedDecisionIds = new Set(decisions.slice(-2).map((item) => item.id));
-    for (const item of decisions) {
-      const outcome = item.questionnaire?.outcome ? ` [${item.questionnaire.outcome}]` : "";
-      lines.push(`- ${item.id}${outcome}: ${clip(item.summary || item.text, 220)}`);
-      if (item.questionnaire && detailedDecisionIds.has(item.id)) {
-        for (const answer of item.questionnaire.answers) {
-          const selected = [answer.answer, ...(answer.selected ?? [])].filter((value) => typeof value === "string" && value.trim());
-          lines.push(`  - Q${answer.questionIndex + 1}: ${clip(answer.question, 120)} => ${clip(selected.join(" + ") || "answered", 140)}${answer.notes ? `; note: ${clip(answer.notes, 100)}` : ""}${answer.hasPreview ? " [preview selected]" : ""}`);
-        }
-        if (item.questionnaire.unanswered?.length) lines.push(`  - Unanswered question indexes: ${item.questionnaire.unanswered.join(", ")}`);
-        if (item.questionnaire.globalNote) lines.push(`  - Global note: ${clip(item.questionnaire.globalNote, 180)}`);
-      }
-    }
-  }
-  if (state.goalChanges.length) {
-    const changes = state.goalChanges.slice(-2);
-    lines.push("Recent Goal changes (summary only):", ...changes.map((item) => `- ${item.updateId}: v${item.previousGoalVersion} -> v${(item.previousGoalVersion ?? 1) + 1}; ${clip(item.summary || item.newGoal, 180)}`));
-  }
+  const lines = [
+    `Original Goal: ${state.goal.original}`,
+    `Current Goal v${version}: ${state.goal.current}`,
+    `Original Human source IDs: ${(state.goal.originalSourceIds ?? []).join(", ") || "none"}`,
+    `Current Human source IDs: ${(state.goal.sourceIds ?? []).join(", ") || "none"}`,
+    `Reviewed latest Human input: ${state.goal.reviewedInputId === state.latestHumanEntryId ? "yes" : "no"}`,
+    `Declared constraints: ${(state.goal.constraints ?? []).length ? state.goal.constraints.map((item) => `- ${item}`).join("\n") : "none"}`,
+    `Acceptance: ${acceptanceStatus(state).status}.`,
+    criteria.length ? `Acceptance criteria: ${criteria.map((item) => `${item.id}[${item.status}] ${item.text}${item.evidence ? ` — ${clip(item.evidence, 180)}` : ""}`).join("; ")}` : "Acceptance criteria: none explicitly declared.",
+  ];
+  const decisions = state.humanDecisions.filter((item) => item.goalVersion === version);
+  if (decisions.length) lines.push(`Genuine Human answers: ${decisions.map((item) => `${item.id}: ${clip(item.summary || item.text, 300)}`).join("; ")}`);
   const result = lines.join("\n");
-  return result.length > maxChars ? `${result.slice(0, maxChars - 45)}\n[Output truncated; use History for event chronology.]` : result;
+  return result.length > maxChars ? `${result.slice(0, maxChars - 1)}…` : result;
 }
 
 export function buildIssueReview(stateValue, issue, evidenceRefs = []) {
@@ -1766,110 +1069,74 @@ function compactEvent(event) {
 
 function parseStateCursor(value) {
   if (typeof value !== "string") return null;
-  const match = value.match(/^R(\d+)-E(\d+)$/);
+  const match = value.match(/^R(\d+)-E(\d+)-C(\d+)$/);
   if (!match) return null;
-  const revision = Number(match[1]);
-  const eventSeq = Number(match[2]);
-  if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(eventSeq)) return null;
-  return { revision, eventSeq };
+  const values = match.slice(1).map(Number);
+  return values.every(Number.isSafeInteger) ? { revision: values[0], eventSeq: values[1], contextRevision: values[2] } : null;
+}
+
+export function stateCursor(stateValue, contextRevision = 0) {
+  const state = normalizeGoalRunState(stateValue);
+  const revision = Number.isSafeInteger(state.stateRevision) ? state.stateRevision : 0;
+  const latestEvent = Math.max(0, state.eventSeq - 1);
+  const context = Number.isSafeInteger(contextRevision) && contextRevision >= 0 ? contextRevision : 0;
+  return `R${revision}-E${latestEvent}-C${context}`;
 }
 
 export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {}) {
   const state = normalizeGoalRunState(stateValue);
-  const latestSeq = Math.max(0, (state.eventSeq ?? 1) - 1);
-  const revision = Number.isInteger(state.stateRevision) ? state.stateRevision : 0;
-  const cursor = `R${revision}-E${latestSeq}`;
-  if (!state.goal.current) return { v: 6, hasGoal: false, stateRevision: revision, cursor, goalOutcome: goalOutcomeStatus(state), message: "No Goal captured." };
-
-  if (afterCursor !== null && afterCursor !== undefined && (typeof afterCursor !== "string" || afterCursor.length > 32 || !parseStateCursor(afterCursor))) {
-    throw new Error('cursor must be an opaque cursor returned by compass_state, e.g. "R12-E42". No state changed.');
+  const contextRevision = Number.isSafeInteger(runtime?.contextRevision) && runtime.contextRevision >= 0 ? runtime.contextRevision : 0;
+  const cursor = stateCursor(state, contextRevision);
+  const revision = state.stateRevision;
+  const latestSeq = Math.max(0, state.eventSeq - 1);
+  const frame = runtime?.contextFrame && typeof runtime.contextFrame === "object"
+    ? { active: runtime.contextFrame.active === true, depth: Number.isInteger(runtime.contextFrame.depth) ? runtime.contextFrame.depth : 0, id: typeof runtime.contextFrame.id === "string" ? runtime.contextFrame.id : null }
+    : { active: false, depth: 0, id: null };
+  if (afterCursor !== null && afterCursor !== undefined && (typeof afterCursor !== "string" || afterCursor.length > 64 || !parseStateCursor(afterCursor))) {
+    throw new Error('cursor must be an opaque cursor returned by compass_state, e.g. "R12-E42-C3". No state changed.');
   }
-  const version = state.goal.version ?? 1;
-  const parsedCursor = afterCursor == null ? null : parseStateCursor(afterCursor);
-  const cursorAhead = Boolean(parsedCursor && (parsedCursor.revision > revision || parsedCursor.eventSeq > latestSeq));
-  const exactCursor = Boolean(parsedCursor && parsedCursor.revision === revision && parsedCursor.eventSeq === latestSeq);
-  if (exactCursor) {
-    return { v: 6, unchanged: true, stateRevision: revision, goalVersion: version, cursor };
-  }
-
-  const allEvents = state.events;
-  const firstSeq = allEvents.length ? (eventSequence(allEvents[0].id) ?? latestSeq) : latestSeq + 1;
-  const historyGap = Boolean(parsedCursor && parsedCursor.eventSeq < firstSeq - 1 && parsedCursor.eventSeq < latestSeq);
-  const stateChanged = Boolean(parsedCursor && parsedCursor.revision !== revision);
-  const currentEvents = allEvents.filter((event) => event.goalVersion === version);
-  let deltaEvents;
-  if (!parsedCursor || historyGap || cursorAhead) deltaEvents = currentEvents.slice(-4);
-  else deltaEvents = currentEvents.filter((event) => (eventSequence(event.id) ?? 0) > parsedCursor.eventSeq).slice(-8);
-  const matchingCount = !parsedCursor || cursorAhead
-    ? currentEvents.length
-    : currentEvents.filter((event) => (eventSequence(event.id) ?? 0) > parsedCursor.eventSeq).length;
-  const noNewCurrentGoalEvents = Boolean(parsedCursor && !historyGap && !cursorAhead && matchingCount === 0);
-
-  const plan = state.plan?.tasks?.length ? (() => {
-    const tasks = state.plan.tasks;
-    return {
-      revision: state.plan.revision,
-      stateVersion: state.plan.stateVersion ?? 0,
-      total: tasks.length,
-      done: tasks.filter((task) => task.status === "done").length,
-      inProgress: tasks.filter((task) => task.status === "in_progress").map((task) => task.id).slice(0, 8),
-      blocked: tasks.filter((task) => task.status === "blocked").map((task) => task.id).slice(0, 8),
-      ready: readyTasks(state.plan).map((task) => task.id).slice(0, 8),
-      remaining: tasks.filter((task) => task.status !== "done").length,
-    };
-  })() : null;
-  const acceptance = acceptanceStatus(state);
+  const prior = afterCursor == null ? null : parseStateCursor(afterCursor);
+  const ahead = Boolean(prior && (prior.revision > revision || prior.eventSeq > latestSeq || prior.contextRevision > contextRevision));
+  const exact = Boolean(prior && prior.revision === revision && prior.eventSeq === latestSeq && prior.contextRevision === contextRevision);
+  if (exact) return { v: 8, unchanged: true, cursor, contextFrame: frame };
+  const firstSeq = state.events.length ? eventSequence(state.events[0].id) ?? latestSeq : latestSeq + 1;
+  const gap = Boolean(prior && prior.eventSeq < firstSeq - 1 && prior.eventSeq < latestSeq);
+  const currentEvents = state.events.filter((event) => event.goalVersion === state.goal.version);
+  const deltaEvents = prior && !gap && !ahead
+    ? currentEvents.filter((event) => (eventSequence(event.id) ?? 0) > prior.eventSeq).slice(-8)
+    : currentEvents.slice(-4);
+  const plan = state.plan?.goal && state.plan.tasks.length ? {
+    revision: state.plan.revision,
+    total: state.plan.tasks.length,
+    done: state.plan.tasks.filter((task) => task.status === "done").length,
+    inProgress: state.plan.tasks.filter((task) => task.status === "in_progress").length,
+    blocked: state.plan.tasks.filter((task) => task.status === "blocked").length,
+    remaining: state.plan.tasks.filter((task) => task.status !== "done").length,
+  } : undefined;
+  const criteria = state.goal.criteria.filter((item) => item.goalVersion === state.goal.version);
   const outcome = goalOutcomeStatus(state);
-  const blockedTaskIds = plan?.blocked ?? [];
-  const snapshot = {
-    v: 6,
-    stateRevision: revision,
-    goalOutcome: outcome,
-    goal: { version, current: clip(state.goal.current, 240), currentTruncated: state.goal.current.length > 240, originalTruncated: state.goal.originalTruncated === true, differsFromOriginal: state.goal.current !== state.goal.original },
-    contextFrame: runtime?.contextFrame ?? { active: false, depth: 0, id: null },
-    plan,
-    ...(state.routeSet ? { routeSet: routeSetStatus(state) } : {}),
-    acceptance: {
-      status: acceptance.status,
-      total: acceptance.total,
-      reportedPass: acceptance.passed,
-      failed: acceptance.failed,
-      blocked: acceptance.blocked,
-      unverified: acceptance.unverified,
-      referencedRangeWithoutDefinitions: Boolean(unresolvedAcceptanceRange(state)),
-      referenceMismatch: unresolvedAcceptanceRange(state),
-    },
-    ...(blockedTaskIds.length && acceptance.status === "reported_satisfied"
-      ? { goalOutcomeCaveat: `Acceptance is Agent-reported satisfied, but DAG task(s) remain blocked: ${blockedTaskIds.join(", ")}. Explain the blocker before claiming the overall Goal outcome is achieved.` }
-      : {}),
+  const acceptanceStatusValue = acceptanceStatus(state);
+  const outcomeCaveat = acceptanceStatusValue.status === "reported_satisfied" && state.plan.tasks.some((task) => task.status === "blocked")
+    ? `Acceptance is Agent-reported satisfied, but DAG task(s) remain blocked: ${state.plan.tasks.filter((task) => task.status === "blocked").map((task) => task.id).join(", ")}. Explain the blocker before claiming the overall Goal outcome is achieved.`
+    : null;
+  const result = {
+    v: 8,
     cursor,
-    delta: {
-      after: afterCursor ?? null,
-      hasNewEvents: matchingCount > 0,
-      stateChanged,
-      historyGap,
-      cursorAhead,
-      omitted: Math.max(0, matchingCount - deltaEvents.length),
-      events: deltaEvents.map(compactEvent),
-    },
-    runtime: runtime && typeof runtime === "object" ? runtime : {},
+    contextFrame: frame,
+    goal: state.goal.current ? { version: state.goal.version, current: clip(state.goal.current, 240), ...(state.goal.current.length > 240 ? { currentTruncated: true } : {}) } : null,
+    outcome: outcome.status,
+    ...(outcomeCaveat ? { caveat: clip(outcomeCaveat, 320) } : {}),
+    ...(state.latestHumanEntryId ? { input: { id: state.latestHumanEntryId, reviewed: state.goal.reviewedInputId === state.latestHumanEntryId } } : {}),
+    ...(plan ? { plan } : {}),
+    ...(criteria.length ? { acceptance: { status: acceptanceStatus(state).status, total: criteria.length, counts: {
+      passed: criteria.filter((item) => item.status === "reported_pass").length,
+      failed: criteria.filter((item) => item.status === "failed").length,
+      blocked: criteria.filter((item) => item.status === "blocked").length,
+      unverified: criteria.filter((item) => !["reported_pass", "failed", "blocked"].includes(item.status)).length,
+    } } } : {}),
+    ...(prior ? { delta: { events: deltaEvents.map(compactEvent), ...(gap ? { historyGap: true } : {}), ...(ahead ? { cursorAhead: true } : {}) } } : {}),
   };
-  // State can change without adding a user-facing event (for example, a trace
-  // merge). A revision change must still return a fresh snapshot, never a false
-  // "unchanged" response based only on event sequence.
-  if (!noNewCurrentGoalEvents || stateChanged || historyGap || cursorAhead) {
-    const directives = prioritizedCurrentDirectives(state, 8).map((item) => ({ id: item.id, text: clip(item.text, 180), hard: item.hard === true || isHardDirective(item.text), pinned: item.pinned === true, reaffirmations: item.reaffirmations ?? 1 }));
-    const decisions = state.humanDecisions.filter((item) => item.goalVersion === version).slice(-2).map((item) => ({
-      id: item.id,
-      summary: clip(item.summary, 140),
-      ...(item.questionnaire?.outcome ? { outcome: item.questionnaire.outcome } : {}),
-    }));
-    const pending = explicitGoalChangeUpdates(state).at(-1);
-    if (directives.length) snapshot.directives = directives;
-    if (decisions.length) snapshot.humanDecisions = decisions;
-    if (pending) snapshot.pendingGoalChange = { id: pending.id, summary: clip(pending.summary, 180), proposedGoal: pending.proposedGoal ?? null };
-  }
-  return snapshot;
+  return result;
 }
 
 function triageFingerprint(state, issue, refs) {
@@ -1931,39 +1198,7 @@ export function triageIssue(stateValue, input = {}) {
 
 export function availableCapabilities(stateValue) {
   const state = normalizeGoalRunState(stateValue);
-  if (!state.goal.original) return [];
-  const version = state.goal.version ?? 1;
-  const goalText = stripConventionSections([
-    state.goal.current,
-    state.goal.sourceUpdateText,
-    ...state.goal.updates.filter((item) => item.goalVersion === version).slice(-2).map((item) => item.sourceText || item.text),
-  ].filter((value) => typeof value === "string" && value.trim()).join("\n"));
-  const active = Array.isArray(state.activeCapabilities) ? state.activeCapabilities : [];
-  const hasPlan = Boolean(state.plan?.goal && state.plan.tasks.length);
-  const planningSignal = planningActivationSignal(goalText);
-  const acceptanceSignal = /(?:acceptance criteria|acceptance test|definition of done|goal-level verification|验收标准|验收条件|完成标准|验收要求)/i.test(goalText);
-  const routeSignal = Boolean(state.routeSet) || /(?:alternative routes?|route set|parallel exploration|competing routes?|compare strategies|路线|方案对比|并行探索|备选方案)/i.test(goalText);
-  const detailsSignal = Boolean(state.goal.originalTruncated || state.goal.sourceUpdateTruncated
-    || String(state.goal.current ?? "").length > 1600
-    || state.goal.updates.some((item) => item.goalVersion === version)
-    || explicitGoalChangeUpdates(state).length
-    || /(?:full original prompt|full goal details|show the original message|完整原始提示|完整目标详情|查看原始消息)/i.test(goalText));
-  const historySignal = hasPlan
-    || state.decisions.some((item) => item.goalVersion === version && !item.supersededBy)
-    || state.checkpoints.some((item) => item.goalVersion === version)
-    || state.trace.failures.some((item) => item.goalVersion === version)
-    || /(?:checkpoint|decision log|route decision|recovery point|decision history|检查点|决策记录|路线决策|恢复点|决策历史)/i.test(goalText);
-  const currentCriteria = (state.goal.criteria ?? []).some((item) => item.goalVersion === version);
-  const currentFailures = state.trace.failures.some((item) => item.goalVersion === version);
-  const caps = [];
-  if (planningSignal || hasPlan || active.includes("planning") || state.autoActivation?.capability === "planning") caps.push("planning");
-  if (routeSignal || active.includes("routes")) caps.push("routes");
-  if (currentCriteria || hasPlan || acceptanceSignal || active.includes("acceptance")) caps.push("acceptance");
-  if (historySignal || active.includes("history")) caps.push("history");
-  if (detailsSignal || active.includes("goal_details")) caps.push("goal_details");
-  if (currentFailures || shouldSurfaceIssueReview(state) || active.includes("issue_review")) caps.push("issue_review");
-  if (explicitGoalChangeUpdates(state).length > 0) caps.push("goal_change");
-  return caps;
+  return state.goal.current ? ["planning", "routes", "acceptance", "history", "goal_details", "issue_review"] : [];
 }
 
 export function buildRecentEvents(stateValue, limit = 12) {

@@ -40,9 +40,7 @@ export function dagApprovalBinding(state) {
       .filter((item) => item.goalVersion === version)
       .map((item) => ({ id: item.id, text: item.text })),
     tasks: (state?.plan?.tasks ?? []).map(taskDefinition),
-    constraints: (state?.sessionDirectives ?? [])
-      .filter((item) => item.goalVersion === version)
-      .map((item) => ({ id: item.id, text: item.text, hard: item.hard === true, pinned: item.pinned === true })),
+    constraints: [...(state?.goal?.constraints ?? [])],
     decisions: {
       human: (state?.humanDecisions ?? [])
         .filter((item) => item.goalVersion === version
@@ -77,7 +75,7 @@ export function createDagApprovalRequest(state) {
     `Plan acceptance criteria:\n${(state.plan.acceptanceCriteria ?? []).map((item, index) => `${index + 1}. ${item}`).join("\n")}`,
     `Goal acceptance criteria:\n${(state.goal.criteria ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => `- ${item.id}: ${item.text}`).join("\n") || "- none recorded"}`,
     `Tasks (DAG revision ${state.plan.revision}):\n${tasks}`,
-    `Human constraints:\n${(state.sessionDirectives ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => `- ${item.text}`).join("\n") || "- none recorded"}`,
+    `Human constraints:\n${(state.goal.constraints ?? []).map((item) => `- ${item}`).join("\n") || "- none recorded"}`,
     `Relevant Human decisions:\n${decisions.map((item) => `- ${item}`).join("\n") || "- none recorded"}`,
   ].join("\n\n");
   const questionnaire = {
@@ -113,6 +111,7 @@ export function approvalIsCurrent(state) {
     && request.toolCallId
     && approval.sourceEntryId === request.sourceEntryId
     && approval.sourceCallId === request.toolCallId
+    && state.goal?.reviewedInputId === state.latestHumanEntryId
     && request.binding === dagApprovalBinding(state)
     && approval.binding === request.binding
     && approval.goalVersion === (state.goal?.version ?? 1));

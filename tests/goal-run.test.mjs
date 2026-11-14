@@ -2,13 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   emptyGoalRunState,
+  observeHumanInput,
+  setGoal,
+  stateCursor,
   normalizeGoalRunState,
-  captureHumanPrompt,
   captureHumanDecision,
   recordHumanQuestionnaireFailure,
-  explicitGoalChangeUpdates,
-  applyGoalChange,
-  dismissGoalChangeCandidate,
   recordDecision,
   recordCheckpoint,
   recordFailure,
@@ -19,7 +18,6 @@ import {
   recordAcceptanceResult,
   acceptanceStatus,
   goalOutcomeStatus,
-  planningActivationSignal,
   buildRecentEvents,
   buildStateSnapshot,
   triageIssue,
@@ -52,8 +50,11 @@ const tasks = [
   { id: "smoke", title: "Implement smoke path", acceptance: "Critical UI-to-API path is exercised", dependsOn: ["api", "ui"], writeScope: "src/smoke" },
 ];
 
+let testHumanSequence = 0;
 function withGoal(prompt = "Create a reliable full-stack smoke test") {
-  return captureHumanPrompt(emptyGoalRunState(), prompt).state;
+  const sourceEntryId = `fixture-goal-${++testHumanSequence}`;
+  const state = observeHumanInput(emptyGoalRunState(), sourceEntryId).state;
+  return setGoal(state, { expectedVersion: 0, current: prompt, sourceIds: [sourceEntryId], constraints: [] }).state;
 }
 function approvalInput(request) { return { questions: [structuredClone(request.questionnaire)] }; }
 function approvePlan(state) {
@@ -144,7 +145,7 @@ test("exploration proposal is not authorization and ignores unrelated Human deci
 });
 
 test("exploration proposal scope, budget and route list are bound to a fresh four-option questionnaire", () => {
-  let state = captureHumanPrompt(emptyGoalRunState(), "Goal: compare three approaches").state;
+  let state = withGoal("Compare three approaches");
   state = createRouteSet(state, { expectedStateVersion: 0, baselineRef: "git:baseline", acceptanceCriteria: ["shared check"],
     routes: ["A", "B", "C"].map((routeId) => ({ routeId, summary: `Approach ${routeId}` })) }).state;
   assert.equal(state.routeSet.selectionRequest.questionnaire.options.length, 3);
@@ -309,7 +310,7 @@ test("confirmed terminal execution facts reconcile despite stale approval withou
   let state = withPlan(withGoal());
   state = transitionTasks(state, "start", [{ id: "api" }], updateTasks).state;
   state.plan.execution = { requestId: "native-batch", status: "unknown", taskIds: ["api"], planRevision: state.plan.revision };
-  state = captureHumanPrompt(state, "Do not use the existing API; preserve the existing Goal and constraints.").state;
+  state = observeHumanInput(state, "followup-human-entry").state;
   assert.equal(dagApprovalStatus(state).approved, false);
   const reconciled = reconcileUnknownExecutionTasks(state, "native-batch", [{ id: "api", status: "done", evidence: "native terminal result" }], updateTasks).state;
   assert.equal(reconciled.plan.tasks.find((task) => task.id === "api").status, "done");
@@ -385,222 +386,6 @@ test("route switching refuses to reset an unresolved execution", () => {
   assert.throws(() => recordRouteSelection(state, { expectedStateVersion: 3, selectionRequestId: request.id, sourceEntryId, sourceCallId: "route-call",
     questionnaire: { outcome: "answered", answers: [{ questionIndex: 0, question: request.questionnaire.question,
       kind: "option", answer: "routeB", selected: ["routeB"] }] } }), /unresolved DAG execution/);
-});
-
-test("first prompt is immutable Original Goal; later prompts are recorded updates", () => {
-  const first = captureHumanPrompt(emptyGoalRunState(), "Goal: implement smoke test");
-  const second = captureHumanPrompt(first.state, "Actually, I need online visual editing instead of local parsing.");
-  assert.equal(second.state.goal.original, "Goal: implement smoke test");
-  assert.equal(second.state.goal.current, "Goal: implement smoke test");
-  assert.equal(second.id, "U1");
-  assert.equal(explicitGoalChangeUpdates(second.state).length, 1);
-});
-
-test("a conventions section is not duplicated into the runtime directive ledger", () => {
-  const prompt = `Goal: build a reproducible TTS workflow.
-
-# Restrictions
-- NPU-first; do not assume a GPU.
-- Do not replace the production voice before human A/B listening acceptance.
-
-conventions:
-1. 用 rg 不用 grep，用 fd 不用 find，用 amend 不用 python heredoc repl。
-2. 不要每次都 cd；当前就在 cwd。`;
-  const state = captureHumanPrompt(emptyGoalRunState(), prompt).state;
-  assert.ok(state.sessionDirectives.some((item) => /NPU-first/.test(item.text)), "explicit restrictions remain part of Messages continuity");
-  assert.ok(state.sessionDirectives.some((item) => /Do not replace the production voice/.test(item.text)));
-  assert.ok(!state.sessionDirectives.some((item) => /用 rg|用 fd|amend 不用|每次都 cd|当前就在 cwd/.test(item.text)), "working conventions remain in the Human source instead of being duplicated as runtime rules");
-  assert.equal(planningActivationSignal(prompt), null, "conventions do not accidentally surface planning tools");
-  assert.deepEqual(availableCapabilities(state), [], "conventions do not surface acceptance/history/planning capabilities");
-});
-
-test("convention extraction does not swallow a following unheaded Human requirement", () => {
-  const prompt = `Goal: implement a component.\n\nconventions:\n1. 用 rg 不用 grep。\n2. 不要每次 cd。\n\nDo not replace the production data.\n\nAcceptance criteria\n- Production data remains unchanged.`;
-  const state = captureHumanPrompt(emptyGoalRunState(), prompt).state;
-  assert.ok(state.sessionDirectives.some((item) => /Do not replace the production data/.test(item.text)), "the paragraph following the convention list is an actual restriction");
-  assert.ok(!state.sessionDirectives.some((item) => /用 rg|每次 cd/.test(item.text)));
-});
-
-test("a quoted or fenced conventions example never swallows an actual planning instruction", () => {
-  const prompt = `Goal: do two independent workstreams.\n\n\`\`\`text\nconventions:\n1. do not cd\n\`\`\`\n\nImplement multiple independent workstreams in stages.`;
-  assert.ok(planningActivationSignal(prompt), "a code block is an example, not a section boundary hiding the actual Goal");
-});
-
-test("initial Goal prompt preserves explicit constraints and acceptance criteria before compaction", () => {
-  const prompt = `Goal
-Build a reliable TTS workflow.
-
-Restrictions
-- NPU-first; do not assume a GPU.
-- Do not replace the production voice before Human A/B listening.
-- Conclusions must cite evidence and references.
-
-Acceptance criteria
-- At least three candidates have real NPU synthesis records or reproducible failure records.
-- The workflow can be replayed from a clean environment.
-`;
-  const result = captureHumanPrompt(emptyGoalRunState(), prompt);
-  assert.equal(result.state.goal.original, prompt.trim());
-  assert.equal(result.state.goal.current, prompt.trim(), "the raw initial prompt remains available as provenance");
-  assert.deepEqual(result.state.goal.criteria.map((item) => item.text), [
-    "At least three candidates have real NPU synthesis records or reproducible failure records.",
-    "The workflow can be replayed from a clean environment.",
-  ]);
-  assert.ok(result.state.sessionDirectives.some((item) => /NPU-first/.test(item.text)));
-  assert.ok(result.state.sessionDirectives.some((item) => /Do not replace the production voice/.test(item.text)));
-  assert.ok(result.state.sessionDirectives.some((item) => /Conclusions must cite evidence/.test(item.text)));
-});
-
-test("acceptance parser stops at trailing prose after a labelled list", () => {
-  const state = captureHumanPrompt(emptyGoalRunState(), `Goal: ship feature
-
-Acceptance criteria
-- Criterion A passes.
-- Criterion B passes.
-
-You may consult excellent upstream projects if useful.`).state;
-  assert.deepEqual(state.goal.criteria.map((item) => item.text), ["Criterion A passes.", "Criterion B passes."]);
-});
-
-
-
-test("one-shot review prompts are not persisted as session directives or convention signals", () => {
-  let state = withGoal("Start the application so I can inspect it.");
-  const review = captureHumanPrompt(state, "请复盘本轮 Compass 使用情况。不要修改代码或登记规则。");
-  assert.equal(review.captured, true, "the request is retained as an event without becoming a persistent instruction");
-  assert.equal(review.kind, "one_shot_meta");
-  assert.equal(review.state.goal.updates.length, 0);
-  assert.equal(review.state.sessionDirectives.length, 0);
-  assert.equal(review.state.events.at(-1).kind, "human_meta_prompt");
-  assert.ok(!availableCapabilities(review.state).includes("conventions"));
-  const ordinary = captureHumanPrompt(review.state, "帮我总结这个模块的职责");
-  assert.equal(ordinary.captured, true, "ordinary project requests must remain normal Goal updates");
-  assert.equal(ordinary.state.goal.updates.length, 1);
-});
-
-test("invalid acceptance criteria leave the original pending Goal update untouched", () => {
-  const state = captureHumanPrompt(withGoal(), "Actually, I need online visual editing instead of local parsing.").state;
-  const update = state.goal.updates.find((item) => item.id === "U1");
-  const before = structuredClone(update);
-  assert.throws(() => applyGoalChange(state, { updateId: "U1", newGoal: "Implement the replacement", acceptanceCriteria: [" "] }), /acceptanceCriteria\[0\]/);
-  assert.deepEqual(update, before);
-});
-
-test("only a recorded explicit scope update can change Current Goal, and the old plan is archived", () => {
-  let state = withPlan(withGoal());
-  state = captureHumanPrompt(state, "Actually, I need online visual editing instead of local parsing.").state;
-  const result = applyGoalChange(state, { updateId: "U1", newGoal: "Implement online visual editing" });
-  assert.equal(result.state.goal.original, "Create a reliable full-stack smoke test");
-  assert.equal(result.state.goal.current, "Implement online visual editing");
-  assert.equal(result.state.plan.tasks.length, 0);
-  assert.equal(result.archivedTaskCount, 3);
-  assert.equal(result.state.goalChanges.length, 1);
-  assert.equal(explicitGoalChangeUpdates(result.state).length, 0, "an applied update cannot be replayed");
-  assert.throws(() => applyGoalChange(state, { updateId: "U99", newGoal: "Something else" }), /not an explicit Goal\/scope change|expired/);
-});
-
-
-test("Human directives split Chinese sentence boundaries and deduplicate atomic constraints", () => {
-  const first = captureHumanPrompt(withGoal("Goal: implement a smoke test"), "用 compass。不要用 grep。不要用 find。必须保留当前 Goal。", { source: "message_end", messageId: "directive-atomic-1" });
-  const directives = first.state.sessionDirectives.map((item) => item.text);
-  assert.ok(directives.some((text) => text === "用 compass"));
-  assert.ok(directives.some((text) => text === "不要用 grep"));
-  assert.ok(directives.some((text) => text === "不要用 find"));
-  assert.ok(directives.some((text) => text === "必须保留当前 Goal"));
-  const repeated = captureHumanPrompt(first.state, "用 compass。不要用 grep。不要用 find。必须保留当前 Goal。", { source: "message_end", messageId: "directive-atomic-2" });
-  assert.equal(repeated.state.sessionDirectives.length, directives.length);
-  assert.ok(repeated.state.sessionDirectives.every((item) => item.reaffirmations >= 1));
-});
-
-test("unambiguous declarative Goal changes apply deterministically and archive the old plan", () => {
-  let state = withPlan(withGoal("Goal: finish current feature"));
-  const changed = captureHumanPrompt(state, "那我换一个 goal，现在的 goal 就是把 pptx-forge 高质量交付");
-  assert.equal(changed.kind, "goal_changed");
-  assert.equal(changed.state.goal.original, "Goal: finish current feature");
-  assert.equal(changed.state.goal.current, "把 pptx-forge 高质量交付");
-  assert.equal(changed.state.plan.tasks.length, 0);
-  assert.equal(changed.state.goalChanges[0].previousPlan.tasks.length, 3);
-  assert.equal(explicitGoalChangeUpdates(changed.state).length, 0);
-});
-
-
-test("embedded Goal language in a long engineering prompt cannot silently replace the current Goal", () => {
-  let state = defineAcceptanceCriteria(withGoal("Goal: fix eight OptiX integration issues"), acceptanceCriteria).state;
-  state = withPlan(state);
-  const priorPlanCount = state.plan.tasks.length;
-  const priorCriteria = state.goal.criteria.map((item) => item.text);
-  const prompt = `你自己 scout 那 4 个缺口，先比较现有证据和之前的方案，不要重做已经完成的工作。
-\`\`\`markdown
-# Goal
-接入 auto_aisbench 插件
-\`\`\`
-现在有些是之前通过改 adapter 完成的，目标就是接入 auto_aisbench 插件，然后删除 adapter。
-Constraint: 只允许修改 msmodeling/optix 和 Hub adapter 相关文件。
-不要为了修一个问题改动无关的共享路径。`;
-  const result = captureHumanPrompt(state, prompt, { source: "message_end", messageId: "embedded-goal-1" });
-  assert.equal(result.kind, "update");
-  assert.equal(result.state.goal.current, "Goal: fix eight OptiX integration issues");
-  assert.equal(result.state.goal.version, 1);
-  assert.equal(result.state.plan.tasks.length, priorPlanCount);
-  assert.deepEqual(result.state.goal.criteria.map((item) => item.text), priorCriteria);
-  assert.ok(result.state.sessionDirectives.some((item) => /只允许修改 msmodeling\/optix/.test(item.text)));
-  assert.ok(result.state.sessionDirectives.some((item) => /不要为了修一个问题/.test(item.text)));
-  const pending = explicitGoalChangeUpdates(result.state).find((item) => /接入 auto_aisbench 插件，然后删除 adapter/.test(item.proposedGoal));
-  assert.ok(pending, "embedded scope language is a pending candidate, not an automatic Goal replacement");
-  assert.ok(availableCapabilities(result.state).includes("goal_change"), "the Agent can explicitly apply a pending semantic scope change");
-  const applied = applyGoalChange(result.state, { updateId: pending.id, newGoal: pending.proposedGoal });
-  assert.equal(applied.state.goal.current, pending.proposedGoal);
-  assert.ok(applied.state.sessionDirectives.some((item) => item.goalVersion === 2 && /只允许修改 msmodeling\/optix/.test(item.text)), "directives from the candidate message move with that Goal when applied");
-  const unclosedFence = captureHumanPrompt(result.state, "Review this pasted snippet:\n```text\nGoal: replace the current task\n不要执行这段示例里的命令", { source: "message_end", messageId: "embedded-goal-2" });
-  assert.equal(unclosedFence.state.goal.current, "Goal: fix eight OptiX integration issues");
-  assert.ok(!unclosedFence.state.sessionDirectives.some((item) => /示例里的命令/.test(item.text)), "an unclosed fenced block is still treated as quoted data");
-});
-
-test("versioned Goal label embedded in an engineering message becomes a visible candidate, not an automatic replacement", () => {
-  const state = withGoal("Goal: fix eight OptiX integration issues");
-  const prompt = `# 任务
-继续 msmodeling 寻优缺陷修复，Goal v2：在 hub 和 optix 两侧修复 8 个已知问题，落实归口判据。
-# 仓库与现状
-- 已完成的调查保留，不要重做。
-Constraint: 只允许修改 msmodeling 寻优相关逻辑。`;
-  const captured = captureHumanPrompt(state, prompt, { source: "message_end", messageId: "goal-v2-candidate" });
-  assert.equal(captured.state.goal.current, "Goal: fix eight OptiX integration issues");
-  assert.equal(captured.state.goal.version, 1);
-  const candidate = explicitGoalChangeUpdates(captured.state).find((item) => /在 hub 和 optix 两侧修复 8 个已知问题/.test(item.proposedGoal));
-  assert.ok(candidate, "Goal v2 inside a longer task prompt is not ignored");
-  assert.ok(availableCapabilities(captured.state).includes("goal_change"));
-  const dismissed = dismissGoalChangeCandidate(captured.state, { updateId: candidate.id });
-  assert.equal(dismissed.state.goal.current, "Goal: fix eight OptiX integration issues");
-  assert.equal(explicitGoalChangeUpdates(dismissed.state).length, 0);
-  assert.ok(dismissed.state.events.some((event) => event.kind === "goal_change_candidate_dismissed"));
-});
-
-test("applying a versioned Goal candidate defaults to the extracted scope and retains its source context", () => {
-  const state = withGoal("Goal: old task");
-  const prompt = `# 任务
-继续 msmodeling 修复，Goal v2：在 hub 和 optix 两侧修复 8 个已知问题，落实归口判据。验收 AC1-AC10。
-# 仓库与现状
-Only change the two named repositories and preserve completed survey evidence.`;
-  const captured = captureHumanPrompt(state, prompt, { source: "message_end", messageId: "goal-v2-source" });
-  const candidate = explicitGoalChangeUpdates(captured.state)[0];
-  assert.ok(candidate);
-  const applied = applyGoalChange(captured.state, { updateId: candidate.id });
-  assert.match(applied.state.goal.current, /在 hub 和 optix 两侧修复 8 个已知问题/);
-  assert.equal(applied.state.goal.sourceUpdateId, candidate.id);
-  assert.match(buildGoalDetails(applied.state), /Human message that established Current Goal/);
-});
-
-test("explicit Goal replacement must be top-level and directive fragments stay atomic", () => {
-  let state = withGoal("Goal: implement feature");
-  state = captureHumanPrompt(state, "用 rg 不用 grep，用 fd 不用 find，不用每次都 cd，你当前就在 cwd", { source: "message_end", messageId: "rule-1" }).state;
-  const first = state.sessionDirectives.map((item) => item.text);
-  assert.ok(first.some((text) => /rg/.test(text)));
-  assert.ok(first.some((text) => /fd/.test(text)));
-  assert.ok(first.some((text) => /cd/.test(text)));
-  assert.ok(first.length >= 3 && first.length <= 5, "one long message becomes a few actionable directives, not one clipped blob");
-  state = captureHumanPrompt(state, "用 rg 不用 grep，用 fd 不用 find，不用每次都 cd，你当前就在 cwd", { source: "message_end", messageId: "rule-2" }).state;
-  assert.ok(state.sessionDirectives.length <= first.length + 1, "repeated constraints are deduplicated instead of filling the directive ledger");
-  assert.ok(state.sessionDirectives.some((item) => (item.reaffirmations ?? 1) >= 2));
 });
 
 test("ask-user-question choices are kept as authoritative decisions and retained as authoritative decisions", () => {
@@ -714,14 +499,6 @@ test("questionnaire UI and validation errors are events, not Human decisions", (
   assert.equal(mistakenDecision.kind, "questionnaire_error");
 });
 
-test("explicit Human work instructions persist separately from ordinary updates", () => {
-  let state = withGoal("Goal: ship the feature");
-  state = captureHumanPrompt(state, "用 rg 不用 grep，用 fd 不用 find，不用 cd，你当前就在 cwd").state;
-  state = captureHumanPrompt(state, "The API health route is /healthz.").state;
-  state = captureHumanPrompt(state, "The current tests use Vitest.").state;
-  state = captureHumanPrompt(state, "Please inspect the backend config.").state;
-});
-
 test("material decisions and checkpoints work without a DAG", () => {
   let state = withGoal();
   state = recordDecision(state, { summary: "Do not reset shared DB", rationale: "No disposable test DB exists", evidence: "No test DB URL in config" }).state;
@@ -761,73 +538,11 @@ test("reopening a prerequisite resets downstream dependents but preserves unrela
 test("DAG is optional for Goal continuity", () => {
   const state = withGoal();
   assert.equal(state.plan.tasks.length, 0);
-  assert.deepEqual(availableCapabilities(state), [], "a simple Goal should not expose capability groups by default");
+  assert.deepEqual(availableCapabilities(state), ["planning", "routes", "acceptance", "history", "goal_details", "issue_review"]);
 });
-
-test("changing Goal archives old history by version without deleting evidence or leaking old directives", () => {
-  let state = withPlan(withGoal());
-  state = recordDecision(state, { summary: "Use local parser", rationale: "Initial scope", evidence: "Only local input requested" }).state;
-  state = recordCheckpoint(state, { summary: "Before parser refactor", ref: "git:deadbeef" }).state;
-  state = recordFailure(state, { tool: "bash", error: "old goal failed" });
-  state = captureHumanPrompt(state, "Actually, I need online visual editing instead of local parsing.").state;
-  const changed = applyGoalChange(state, { updateId: "U1", newGoal: "Implement online visual editing" }).state;
-  assert.equal(changed.decisions.length, 1);
-  assert.equal(changed.checkpoints.length, 1);
-  assert.equal(changed.trace.failures.length, 1);
-  assert.equal(changed.decisions[0].goalVersion, 1);
-  assert.equal(changed.goal.version, 2);
-  assert.equal(changed.goalChanges[0].decisions[0].summary, "Use local parser");
-  assert.equal(changed.goalChanges[0].checkpoints[0].ref, "git:deadbeef");
-  assert.doesNotMatch(buildIssueReview(changed, "new issue"), /old goal failed/);
-});
-
 
 test("GoalRun rejects obsolete schema versions instead of migrating or silently reinterpreting them", () => {
   assert.throws(() => normalizeGoalRunState({ schemaVersion: 6, goal: { original: "obsolete" }, plan: emptyDagState() }), /Unsupported.*schema/);
-});
-
-test("explicit Goal label updates current Goal and scopes old directives to the previous version", () => {
-  let state = withGoal("Start the app");
-  state = captureHumanPrompt(state, "用 rg，不要用 grep；本轮先不提交").state;
-  const changed = captureHumanPrompt(state, "好，我来更新。目标：操作 c4916005012b879ab0c15ef03652eb6e 页面");
-  assert.equal(changed.kind, "goal_changed");
-  assert.equal(changed.state.goal.current, "操作 c4916005012b879ab0c15ef03652eb6e 页面");
-  assert.equal(changed.state.goal.version, 2);
-  assert.equal(changed.state.sessionDirectives[0].goalVersion, 1);
-  assert.ok(changed.state.events.some((event) => event.kind === "goal_changed"));
-});
-
-test("direct Goal replacement carries unquoted constraints into the new Goal version", () => {
-  let state = withGoal("Goal: inspect the current implementation");
-  state = captureHumanPrompt(state, "Goal: integrate the upstream plugin and remove the obsolete adapter\nConstraint: only change OptiX integration files.\n不要改动共享通用逻辑。").state;
-  assert.equal(state.goal.version, 2);
-  assert.equal(state.goal.current, "integrate the upstream plugin and remove the obsolete adapter");
-  assert.ok(state.sessionDirectives.some((item) => item.goalVersion === 2 && /only change OptiX integration files/i.test(item.text)));
-  assert.ok(state.sessionDirectives.some((item) => item.goalVersion === 2 && /不要改动共享通用逻辑/.test(item.text)));
-});
-
-test("direct Goal replacement captures explicitly labelled acceptance criteria and excludes the section from Current Goal", () => {
-  const first = withGoal("Goal: inspect current implementation");
-  const changed = captureHumanPrompt(first, `Goal: integrate upstream auto_aisbench plugin
-Constraints:
-- Only change OptiX integration files.
-Acceptance criteria:
-- The adapter is removed from the Hub path.
-- Existing relevant tests pass.`);
-  assert.equal(changed.kind, "goal_changed");
-  assert.equal(changed.state.goal.current, "integrate upstream auto_aisbench plugin");
-  assert.deepEqual(changed.state.goal.criteria.map((item) => item.text), [
-    "The adapter is removed from the Hub path.",
-    "Existing relevant tests pass.",
-  ]);
-  assert.ok(changed.state.sessionDirectives.some((item) => item.goalVersion === 2 && /Only change OptiX integration files/.test(item.text)));
-});
-
-test("mixed Human messages project directive clauses once and keep the remaining issue summary", () => {
-  const captured = captureHumanPrompt(
-    withGoal("Goal: repair the build"),
-    "Use rg instead of grep. The actual blocker is that cargo build cannot find the linker; investigate the toolchain.",
-  );
 });
 
 test("new evidence can explicitly supersede a prior decision without deleting its history", () => {
@@ -854,75 +569,6 @@ test("stale task IDs in decisions return the current valid IDs", () => {
     () => recordDecision(state, { summary: "Attach decision to a stale task", affectedTaskIds: ["renderer"] }),
     /Unknown affected task ids: renderer\. Current task IDs: api, ui, smoke\./,
   );
-});
-
-test("directive retention keeps hard constraints when the bounded ledger fills", () => {
-  const preferences = Array.from({ length: 28 }, (_, i) => `Prefer tool-${i} when convenient`).join("。 ");
-  const prompt = `Only modify msmodeling/optix integration files.。${preferences}`;
-  const captured = captureHumanPrompt(withGoal("Goal: keep the integration stable"), prompt);
-  assert.equal(captured.state.sessionDirectives.length, 25, "hard constraints have a separate retention budget from soft preferences");
-  assert.ok(captured.state.sessionDirectives.some((item) => /Only modify msmodeling\/optix integration files/.test(item.text)));
-});
-
-test("explicit hard constraints survive many later preferences and remain available in Goal details", () => {
-  const prompt = `Goal: enforce the dispatch safety boundary
-
-Restrictions
-- Yellow-zone tokens are read-only and cannot push.
-- Never inherit daemon credentials into task processes.
-- PID identity must be checked before killing a process.
-- Never claim a process was killed unless evidence confirms it.
-- Other layers must not silently clamp values.
-- A run without finished must be hard-killed on restart.
-- Do not return credentials to task subprocesses.
-- Results return to blue only through the fixed daemon endpoint.
-- The yellow zone must leave no process residue.
-- Keep the two tokens distinct.
-- Use the exact configured outbound route only.`;
-  let state = captureHumanPrompt(emptyGoalRunState(), prompt).state;
-  for (let index = 0; index < 30; index += 1) {
-    state = captureHumanPrompt(state, `Prefer compact output format ${index} when convenient.`).state;
-  }
-  for (let index = 0; index < 5; index += 1) {
-    state = captureHumanPrompt(state, `Never print temporary debug token ${index} in the final output.`).state;
-  }
-  const retainedHard = state.sessionDirectives.filter((item) => item.hard === true);
-  assert.equal(retainedHard.length, 16, "hard constraints are retained separately from soft preferences");
-  assert.equal(retainedHard.filter((item) => item.pinned === true).length, 11, "explicit restriction-section clauses remain pinned");
-
-  const details = buildGoalDetails(state);
-  assert.match(details, /Hard Human constraints \(full retained text/);
-  assert.match(details, /exact configured outbound route/);
-});
-
-test("Chinese 硬性限制 headings pin every safety clause before later preferences", () => {
-  const prompt = `Goal: repair the dispatch safety boundary
-
-硬性限制
-- 黄区不得 git push。
-- 任务子进程不得继承 daemon 凭据。
-- 其他层不得静默 clamp。
-- PID 复用时必须先验证进程身份。
-
-当前状态：正在修复回传路径。`;
-  let state = captureHumanPrompt(emptyGoalRunState(), prompt).state;
-  const pinned = state.sessionDirectives.filter((item) => item.pinned === true);
-  assert.equal(pinned.length, 4);
-  for (let i = 0; i < 8; i += 1) state = captureHumanPrompt(state, `Prefer short status output ${i} when convenient.`).state;
-});
-
-test("numbered Goal requirements pin explicit hard clauses but not ordinary workflow steps", () => {
-  const prompt = `Goal: improve the dispatcher
-1. Only modify the dispatcher and its tests.
-2. Never persist the token to disk.
-3. First inspect the current code.
-4. Then implement the smallest useful change.`;
-  const state = captureHumanPrompt(emptyGoalRunState(), prompt).state;
-  const pinnedText = state.sessionDirectives.filter((item) => item.pinned).map((item) => item.text);
-  assert.ok(pinnedText.some((item) => /Only modify the dispatcher/.test(item)));
-  assert.ok(pinnedText.some((item) => /Never persist the token/.test(item)));
-  assert.ok(!pinnedText.some((item) => /First inspect the current code/.test(item)));
-  assert.ok(!pinnedText.some((item) => /Then implement the smallest/.test(item)));
 });
 
 test("ready pending tasks can be completed directly, but dependency gates still apply", () => {
@@ -1029,7 +675,7 @@ test("ordinary task status updates preserve approval while material Human constr
   assert.equal(dagApprovalStatus(state).approved, true);
   state = transitionTasks(state, "start", [{ id: "api" }], updateTasks).state;
   assert.equal(dagApprovalStatus(state).approved, true);
-  state = captureHumanPrompt(state, "Please keep the API read-only during this work.").state;
+  state = observeHumanInput(state, "read-only-human-entry").state;
   assert.equal(dagApprovalStatus(state).approved, false);
   assert.throws(() => transitionTasks(state, "done", [{ id: "api", evidence: "API reviewed." }], updateTasks), /no current correlated Human approval/);
 });
@@ -1050,15 +696,7 @@ test("reported acceptance does not hide a blocked Goal task", () => {
   state = transitionTasks(state, "block", [{ id: "smoke", reason: "External service credentials are not available." }], updateTasks).state;
   assert.match(summarizePlanStatus(state), /stateVersion:/);
   assert.match(summarizePlanStatus(state), /Outcome caveat:/);
-  assert.match(buildStateSnapshot(state).goalOutcomeCaveat, /smoke/);
-});
-
-test("Goal details prioritizes hard scope directives over newer low-priority preferences", () => {
-  const state = withGoal("Goal: improve the integration");
-  state.sessionDirectives = [
-    { id: "S1", goalVersion: 1, text: "Only modify msmodeling/optix integration files.", at: "2026-10-20T00:00:00.000Z", reaffirmations: 1 },
-    ...Array.from({ length: 8 }, (_, i) => ({ id: `S${i + 2}`, goalVersion: 1, text: `Prefer ${["rg", "fd", "amend", "short scripts", "small patches", "focused tests", "clear logs", "compact results"][i]} when convenient.`, at: `2026-10-24T00:0${i}:00.000Z`, reaffirmations: 1 })),
-  ];
+  assert.match(buildStateSnapshot(state).caveat, /smoke/);
 });
 
 test("acceptance is explicit, evidence-bearing, and never calls an Agent report independently verified", () => {
@@ -1090,27 +728,6 @@ test("Goal criteria and DAG task completion remain separate states", () => {
 });
 
 
-test("Goal details do not echo identical Goal text as update, directive, and event history", () => {
-  const prompt = "Goal: preserve public API and produce a tested build";
-  let state = withGoal(prompt);
-  state = captureHumanPrompt(state, prompt, { source: "message_end", messageId: "user-1" }).state;
-  state.sessionDirectives.push({ id: "S1", goalVersion: 1, text: prompt, at: new Date().toISOString() });
-  const details = buildGoalDetails(state);
-  assert.equal((details.match(/preserve public API and produce a tested build/g) ?? []).length, 1);
-  assert.doesNotMatch(details, /Recent structured events/);
-  assert.ok(details.length < 1000);
-  assert.equal(buildRecentEvents(state).filter((event) => event.kind === "human_update").length, 0);
-});
-
-test("initial Goal is not duplicated as a session directive", () => {
-  const longGoal = `Goal: You must preserve the public API and use rg for repository search. ${"Additional acceptance constraint. ".repeat(20)}`;
-  const state = withGoal(longGoal);
-  assert.equal(state.sessionDirectives.length, 0);
-  assert.match(buildGoalDetails(state), /Additional acceptance constraint/,
-    "the full retained Goal remains available through the focused details tool");
-  assert.equal(buildStateSnapshot(state).goal.currentTruncated, true);
-});
-
 test("route review signal requires a repeated failure signature, not merely several unrelated errors", async () => {
   const { shouldSurfaceIssueReview } = await import("../src/goal-run.mjs");
   let state = withGoal();
@@ -1127,14 +744,14 @@ test("route review signal requires a repeated failure signature, not merely seve
 test("compact state snapshot returns a cursor and only new current-Goal events", () => {
   let state = withGoal("Goal: implement API smoke test");
   const initial = buildStateSnapshot(state, null, { contextFrame: { active: false, depth: 0, id: null } });
-  assert.equal(initial.v, 6);
+  assert.equal(initial.v, 8);
   assert.deepEqual(initial.contextFrame, { active: false, depth: 0, id: null });
   const framed = buildStateSnapshot(state, null, { contextFrame: { active: true, depth: 1, id: "frame-1" } });
   assert.deepEqual(framed.contextFrame, { active: true, depth: 1, id: "frame-1" });
   assert.equal(initial.goal.version, 1);
-  assert.equal(initial.goal.currentTruncated, false);
-  assert.equal(initial.plan, null);
-  assert.equal(initial.delta.hasNewEvents, true);
+  assert.equal(initial.goal.currentTruncated, undefined);
+  assert.equal(initial.plan, undefined);
+  assert.equal(initial.delta, undefined);
   const cursor = initial.cursor;
   state = recordDecision(state, { summary: "Use existing health endpoint", rationale: "Avoid duplicate route", evidence: "src/api/health.ts" }).state;
   const delta = buildStateSnapshot(state, cursor);
@@ -1144,6 +761,7 @@ test("compact state snapshot returns a cursor and only new current-Goal events",
   const unchanged = buildStateSnapshot(state, delta.cursor);
   assert.equal(unchanged.unchanged, true);
   assert.equal(unchanged.delta, undefined);
+  assert.deepEqual(unchanged.contextFrame, { active: false, depth: 0, id: null });
   assert.ok(JSON.stringify(unchanged).length < 220, "unchanged cursor response is only a small revision envelope");
 });
 
@@ -1153,30 +771,29 @@ test("composite state cursor detects revision changes even when event sequence d
   state.stateRevision += 1; // e.g. a persisted state/trace update without a user-facing event
   const changed = buildStateSnapshot(state, first.cursor);
   assert.equal(changed.unchanged, undefined);
-  assert.equal(changed.delta.stateChanged, true);
-  assert.equal(changed.delta.hasNewEvents, false);
+  assert.deepEqual(changed.delta.events, []);
   assert.notEqual(changed.cursor, first.cursor);
 });
 
 test("compact state reports a history gap and recovers with a bounded current snapshot", () => {
   let state = withGoal("Goal: preserve event history bounds");
-  const oldCursor = "R0-E0";
+  const oldCursor = "R0-E0-C0";
   for (let i = 0; i < 100; i++) state = recordDecision(state, { summary: `Decision ${i}`, rationale: "test", evidence: `e${i}` }).state;
   const snapshot = buildStateSnapshot(state, oldCursor);
   assert.equal(snapshot.delta.historyGap, true);
-  assert.ok(snapshot.delta.events.length <= 8);
-  assert.ok(snapshot.delta.omitted > 0);
-  assert.equal(snapshot.delta.cursorAhead, false);
+  assert.ok(snapshot.delta.events.length <= 4);
+  assert.equal(snapshot.delta.cursorAhead, undefined);
 });
 
 test("state snapshot never leaks previous-Goal events into the active delta", () => {
   let state = withGoal("Goal: local parser");
   state = recordDecision(state, { summary: "Use local parser", rationale: "initial scope" }).state;
   const beforeChange = buildStateSnapshot(state).cursor;
-  state = captureHumanPrompt(state, "Goal: online visual editing instead").state;
+  state = observeHumanInput(state, "replacement-human").state;
+  state = setGoal(state, { expectedVersion: 1, current: "Goal: online visual editing instead", sourceIds: ["replacement-human"], constraints: [] }).state;
   const afterChange = buildStateSnapshot(state, beforeChange);
   assert.equal(afterChange.goal.version, 2);
-  assert.ok(afterChange.delta.events.some((event) => event.kind === "goal_changed"));
+  assert.ok(afterChange.delta.events.some((event) => event.kind === "goal_replaced"));
   assert.ok(!afterChange.delta.events.some((event) => event.summary.includes("Use local parser")));
 });
 
@@ -1200,7 +817,8 @@ test("triage rejects unknown and previous-Goal evidence references without chang
   let state = withGoal("Goal: original");
   state = recordFailure(state, { tool: "bash", error: "old failure" });
   const oldEvent = state.events.at(-1).id;
-  state = captureHumanPrompt(state, "Goal: new goal").state;
+  state = observeHumanInput(state, "replacement-human").state;
+  state = setGoal(state, { expectedVersion: 1, current: "Goal: new goal", sourceIds: ["replacement-human"], constraints: [] }).state;
   assert.throws(() => triageIssue(state, { evidenceRefs: [oldEvent] }), /belongs to Goal v1, not current Goal v2/);
   assert.throws(() => triageIssue(state, { evidenceRefs: ["E999"] }), /not in retained history/);
   assert.throws(() => triageIssue(state, {}), /Provide a concise issue/);
@@ -1224,53 +842,10 @@ test("recovered trace entries become cursor-addressable events without duplicate
 test("state cursor ahead is explicit and still returns a bounded recovery snapshot", () => {
   let state = withGoal("Goal: cursor validation");
   state = recordDecision(state, { summary: "A material choice", rationale: "test" }).state;
-  const snapshot = buildStateSnapshot(state, "R999-E999");
+  const snapshot = buildStateSnapshot(state, "R999-E999-C999");
   assert.equal(snapshot.delta.cursorAhead, true);
-  assert.equal(snapshot.delta.hasNewEvents, true);
   assert.ok(snapshot.delta.events.some((event) => event.kind === "decision_recorded"));
-  assert.ok(snapshot.delta.omitted >= 0);
-});
-
-test("Goal references to acceptance ID ranges are not treated as defined criteria", () => {
-  const state = withGoal("Goal: repair OptiX. Acceptance AC1-AC10 must be satisfied.");
-  assert.equal(acceptanceStatus(state).status, "criteria_not_defined");
-  const snapshot = buildStateSnapshot(state);
-  assert.equal(snapshot.acceptance.referencedRangeWithoutDefinitions, true);
-});
-
-test("acceptance range warning detects a mismatch even when unrelated criteria exist", () => {
-  const state = withGoal("Goal: repair. Acceptance AC1-AC10 must be satisfied.");
-  state.goal.nextAcceptanceNumber = 7;
-  defineAcceptanceCriteria(state, ["criterion seven", "criterion eight", "criterion nine", "criterion ten", "criterion eleven", "criterion twelve"]);
-  assert.equal(buildStateSnapshot(state).acceptance.referenceMismatch.range, "AC1-AC10");
-});
-
-test("capture ledger stores fingerprints, while a long current-Goal source survives later updates", () => {
-  let state = withGoal("Goal: initial target");
-  const filler = `Context note ${"retain provenance without duplicating raw prompts ".repeat(42)}\n`;
-  const source = `# Task\nContinue integration work, Goal v2: deliver the adapter-free OptiX flow.\n${filler}\nAcceptance criteria\n- The adapter-free path has a focused integration test.\n- The documented CLI path works from a clean checkout.`;
-  const captured = captureHumanPrompt(state, source, { source: "message_end", messageId: "long-goal-source" });
-  const candidate = explicitGoalChangeUpdates(captured.state)[0];
-  assert.ok(candidate);
-  assert.ok(candidate.sourceText.length > 1800, "pending candidate keeps the bounded full source, not only the 1800-char update preview");
-  const applied = applyGoalChange(captured.state, { updateId: candidate.id });
-  state = applied.state;
-  assert.deepEqual(state.goal.criteria.map((item) => item.text), [
-    "The adapter-free path has a focused integration test.",
-    "The documented CLI path works from a clean checkout.",
-  ], "acceptance criteria after the short update preview are still parsed from the source message");
-  assert.equal(state.goal.sourceUpdateText, source);
-  assert.ok(state.captureLedger.every((item) => !Object.hasOwn(item, "text")), "duplicate-detection ledger stores fingerprints, not raw prompt bodies");
-  for (let index = 0; index < 14; index++) {
-    state = captureHumanPrompt(state, `Progress update ${index}: reviewed one additional implementation detail.`).state;
-  }
-  assert.ok(state.goal.updates.some((item) => item.id === candidate.id), "the current Goal source update remains addressable beyond the recent-update window");
-  assert.match(buildGoalDetails(state), /The adapter-free path has a focused integration test/);
-  assert.ok(state.captureLedger.every((item) => item.preview.length <= 140));
-});
-
-test("state snapshot reports when Subagents are registered but not model-visible", () => {
-  const state = withGoal("Goal: inspect four independent code paths");
+  assert.ok(snapshot.delta.events.length <= 4);
 });
 
 test("triage accepts bounded longer issue context without schema-retry churn and marks its preview", () => {
@@ -1308,28 +883,11 @@ test("Goal outcome projection distinguishes incomplete and failed acceptance", (
   assert.equal(goalOutcomeStatus(emptyGoalRunState()).status, "no_goal");
 });
 
-test("capability availability is state-derived and does not expose irrelevant groups for a simple Goal", () => {
-  assert.deepEqual(availableCapabilities(withGoal("Goal: fix one typo in one file")), []);
-  const complex = withGoal("Goal: coordinate multiple independent workstreams; define acceptance criteria and preserve decision checkpoints.");
-  assert.deepEqual(availableCapabilities(complex), ["planning", "acceptance", "history"]);
-  const detailed = captureHumanPrompt(complex, "Please show the full original prompt details.").state;
-  assert.ok(availableCapabilities(detailed).includes("goal_details"));
-  const failed = recordFailure(complex, { tool: "bash", error: "test failed", at: "2026-10-27T00:00:00.000Z" });
-  assert.ok(availableCapabilities(failed).includes("issue_review"));
-  assert.ok(!availableCapabilities(failed).includes("conventions"));
-});
-
-test("planning activation recognizes explicit multi-part Goals but ignores examples and simple Goals", () => {
-  assert.match(planningActivationSignal("Goal: harden dispatch. 1. Restrict the token. 2. Add a fixed return path. 3. Test recovery."), /numbered actionable/);
-  assert.match(planningActivationSignal("Goal: coordinate multiple independent workstreams"), /multi-stage\/workstream/);
-  assert.equal(planningActivationSignal("Goal: fix one typo in a single file"), null);
-  assert.equal(planningActivationSignal("Goal: analyze incident. 1. Phenomenon: the service failed. 2. Root cause: a timeout. 3. Evidence: logs show 503. 4. Impact: one request failed."), null, "numbered diagnostic headings are not implementation plans");
-  assert.match(planningActivationSignal("Goal: harden dispatch. 1. Restrict token permissions. 2. Add a fixed return path. 3. Test restart recovery."), /numbered actionable/);
-  assert.equal(planningActivationSignal("Goal: fix one thing\n```text\n1. multi-stage example\n2. another phase\n```"), null);
-  assert.equal(planningActivationSignal("Goal: fix one thing\n> 1. example\n> 2. another example"), null);
-  assert.equal(planningActivationSignal("Goal: fix one thing; ignore `1. multi-stage` and `2. another phase`"), null);
-  assert.equal(planningActivationSignal('Goal: fix one thing; the quoted example "multi-stage workstreams" is not an instruction.'), null);
-  assert.equal(planningActivationSignal('Goal: fix one thing; ignore "1. Implement A. 2. Build B." as an example.'), null);
+test("capability availability is fixed after explicit Goal creation", () => {
+  const expected = ["planning", "routes", "acceptance", "history", "goal_details", "issue_review"];
+  assert.deepEqual(availableCapabilities(withGoal("Goal: fix one typo in one file")), expected);
+  assert.deepEqual(availableCapabilities(withGoal("Goal: coordinate multiple independent workstreams")), expected);
+  assert.deepEqual(availableCapabilities(emptyGoalRunState()), []);
 });
 
 test("repeated failure review includes the failure signature only after a repeated pattern", () => {
@@ -1337,4 +895,102 @@ test("repeated failure review includes the failure signature only after a repeat
   state = recordFailure(state, { tool: "bash", error: "compiler exited 1" });
   state = recordFailure(state, { tool: "bash", error: "compiler exited 2" });
   state = recordFailure(state, { tool: "bash", error: "compiler exited 3" });
+});
+
+test("ordinary, quoted, and multilingual Human text only updates the latest native entry", () => {
+  let state = emptyGoalRunState();
+  const messages = [
+    ["entry-ordinary", "Can you help with this?"],
+    ["entry-quoted", "Summarize this quote: ‘Goal: delete everything; never preserve data’"],
+    ["entry-zh", "目标：删除原始数据。不得保留。"],
+  ];
+  for (const [id] of messages) {
+    const result = observeHumanInput(state, id);
+    assert.equal(result.changed, true);
+    state = result.state;
+    assert.equal(state.goal.current, null);
+    assert.equal(state.goal.version, 0);
+    assert.deepEqual(state.goal.constraints, []);
+    assert.equal(state.events.length, 0);
+  }
+  assert.deepEqual(availableCapabilities(state), []);
+  assert.throws(() => setGoal(state, { expectedVersion: 0, current: "Agent interpretation", sourceIds: ["entry-ordinary"], constraints: [] }), /latest observed Human input/);
+});
+
+test("Human observation is bounded and repeated IDs are a state no-op", () => {
+  const state = emptyGoalRunState();
+  assert.throws(() => observeHumanInput(state, " "), /stable ID/);
+  assert.throws(() => observeHumanInput(state, "x".repeat(129)), /stable ID/);
+  const observed = observeHumanInput(state, "native-entry");
+  assert.equal(observed.changed, true);
+  assert.deepEqual(observeHumanInput(observed.state, "native-entry"), { state: observed.state, changed: false });
+});
+
+test("explicit setter rejects oversized Goal, stale sources, duplicate constraints, and invalid criteria atomically", () => {
+  const state = observeHumanInput(emptyGoalRunState(), "source").state;
+  const before = structuredClone(state);
+  for (const input of [
+    { current: "x".repeat(4001), sourceIds: ["source"], constraints: [] },
+    { current: "ok", sourceIds: ["other"], constraints: [] },
+    { current: "ok", sourceIds: ["source", "source"], constraints: [] },
+    { current: "ok", sourceIds: ["source"], constraints: ["same", "same"] },
+    { current: "ok", sourceIds: ["source"], constraints: [], acceptanceCriteria: ["pass", "pass"] },
+    { current: "ok", sourceIds: ["source"], constraints: [], acceptanceCriteria: [""] },
+  ]) {
+    assert.throws(() => setGoal(state, { expectedVersion: 0, ...input }));
+    assert.deepEqual(state, before);
+  }
+  assert.throws(() => setGoal(state, { expectedVersion: 1, current: "ok", sourceIds: ["source"], constraints: [] }), /Stale Goal version/);
+});
+
+test("changing acceptance criteria on an active DAG requires DAG revision and leaves state untouched", () => {
+  const state = withPlan(withGoal());
+  const before = structuredClone(state);
+  assert.throws(() => setGoal(state, { expectedVersion: 1, current: state.goal.current,
+    sourceIds: state.goal.sourceIds, constraints: [], acceptanceCriteria: ["Different criterion"] }), /revisePlanState/);
+  assert.deepEqual(state, before);
+});
+
+test("new Human input locks approval until explicitly acknowledged without rebinding semantic approval", () => {
+  let state = withPlan(withGoal());
+  const requestId = state.plan.approvalRequest.id;
+  assert.equal(dagApprovalStatus(state).approved, true);
+  state = observeHumanInput(state, "newest-entry").state;
+  assert.equal(dagApprovalStatus(state).approved, false);
+  state = setGoal(state, { expectedVersion: 1, current: state.goal.current,
+    sourceIds: [...state.goal.sourceIds, "newest-entry"], constraints: [] }).state;
+  assert.equal(dagApprovalStatus(state).approved, true);
+  assert.equal(state.plan.approvalRequest.id, requestId);
+});
+
+test("same-text constraint changes preserve evidence but invalidate approval; replacement guards unknown identity", () => {
+  let state = withPlan(withGoal());
+  state.goal.criteria[0].status = "reported_pass";
+  state.goal.criteria[0].evidence = "verified";
+  const changed = setGoal(state, { expectedVersion: 1, current: state.goal.current,
+    sourceIds: state.goal.sourceIds, constraints: ["Preserve data"] }).state;
+  assert.equal(changed.goal.criteria[0].status, "reported_pass");
+  assert.equal(changed.goal.criteria[0].evidence, "verified");
+  assert.equal(dagApprovalStatus(changed).approved, false);
+  changed.plan.execution = { requestId: "native-unknown", status: "unknown", taskIds: ["api"] };
+  const before = structuredClone(changed);
+  assert.throws(() => setGoal(changed, { expectedVersion: 1, current: "Replacement",
+    sourceIds: changed.goal.sourceIds, constraints: [] }), /execution or competitor identity is unresolved/);
+  assert.deepEqual(changed, before);
+});
+
+test("context-aware cursor and default snapshot stay compact", () => {
+  const state = withGoal("An explicitly selected semantic Goal");
+  const cursor = stateCursor(state, 7);
+  assert.match(cursor, /^R\d+-E\d+-C7$/);
+  const frame = { active: true, depth: 2, id: "frame-x", secretContents: "must not leak" };
+  const snapshot = buildStateSnapshot(state, null, { contextRevision: 7, contextFrame: frame });
+  assert.equal(snapshot.v, 8);
+  assert.deepEqual(snapshot.contextFrame, { active: true, depth: 2, id: "frame-x" });
+  assert.equal("runtime" in snapshot, false);
+  assert.equal("sourceIds" in snapshot.goal, false);
+  assert.equal("acceptance" in snapshot, false);
+  const unchanged = buildStateSnapshot(state, cursor, { contextRevision: 7, contextFrame: frame });
+  assert.equal(unchanged.unchanged, true);
+  assert.deepEqual(unchanged.contextFrame, snapshot.contextFrame);
 });
