@@ -1177,9 +1177,11 @@ function registerStateSnapshotTool(pi: any) {
       const ctx = getContext(rest);
       if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
       if (params?.maxEvents !== undefined && (!Number.isInteger(params.maxEvents) || params.maxEvents < 1 || params.maxEvents > 8)) throw new Error("maxEvents must be an integer from 1 to 8. No state changed.");
+      const activeFrame = contextState.frames.at(-1);
       const snapshot = buildStateSnapshot(state, params?.cursor ?? null, {
         ...toolInventory(pi),
         compassActive: activeCapabilities(),
+        contextFrame: activeFrame ? { active: true, depth: contextState.frames.length, id: activeFrame.id } : { active: false, depth: 0, id: null },
       });
       if (Number.isInteger(params?.maxEvents) && snapshot.delta?.events?.length > params.maxEvents) {
         snapshot.delta.omitted += snapshot.delta.events.length - params.maxEvents;

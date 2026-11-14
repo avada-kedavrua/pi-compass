@@ -1126,8 +1126,11 @@ test("route review signal requires a repeated failure signature, not merely seve
 
 test("compact state snapshot returns a cursor and only new current-Goal events", () => {
   let state = withGoal("Goal: implement API smoke test");
-  const initial = buildStateSnapshot(state);
+  const initial = buildStateSnapshot(state, null, { contextFrame: { active: false, depth: 0, id: null } });
   assert.equal(initial.v, 6);
+  assert.deepEqual(initial.contextFrame, { active: false, depth: 0, id: null });
+  const framed = buildStateSnapshot(state, null, { contextFrame: { active: true, depth: 1, id: "frame-1" } });
+  assert.deepEqual(framed.contextFrame, { active: true, depth: 1, id: "frame-1" });
   assert.equal(initial.goal.version, 1);
   assert.equal(initial.goal.currentTruncated, false);
   assert.equal(initial.plan, null);

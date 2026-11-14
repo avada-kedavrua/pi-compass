@@ -4,7 +4,7 @@ The tool surface is progressive. `compass_state` is the compact default read; us
 
 ## Goal state and work plans
 
-- `compass_state` returns the compact Goal/plan/acceptance/capability state and composite cursor deltas. `compass_goal_read`, `compass_history_recent` and `compass_triage` are bounded on-demand reads; triage may refer to existing event IDs rather than requiring copied logs.
+- `compass_state` returns the compact Goal/plan/acceptance/capability state, the current `contextFrame` summary and composite cursor deltas. `contextFrame.active=true` means the last committed native context boundary entered a same-session frame; `active=false` means the root scope is current. `compass_goal_read`, `compass_history_recent` and `compass_triage` are bounded on-demand reads; triage may refer to existing event IDs rather than requiring copied logs.
 - `compass_plan_create` is optional. Tasks explicitly select `parent`, `code` or `subagent`; only read-only Subagent tasks can be auto-dispatched. `dispatchReason` must justify the extra semantic call. Code and parent tasks are not silently delegated.
 - `compass_plan_status` reads readiness and stable task IDs. `compass_plan_revise` checks the current state version and unresolved execution state. `compass_task(action=...)` validates task identities, dependencies and lifecycle preconditions. Subagent tasks are started by Compass after eligible plan/task mutation boundaries; do not start them manually.
 - `compass_execution(action=status|resolve)` is for failed or unresolved native batches. An unknown child must first be checked through native pi-subagents status; never infer it stopped or retry it automatically.

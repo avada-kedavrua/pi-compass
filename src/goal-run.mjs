@@ -1826,6 +1826,7 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
     stateRevision: revision,
     goalOutcome: outcome,
     goal: { version, current: clip(state.goal.current, 240), currentTruncated: state.goal.current.length > 240, originalTruncated: state.goal.originalTruncated === true, differsFromOriginal: state.goal.current !== state.goal.original },
+    contextFrame: runtime?.contextFrame ?? { active: false, depth: 0, id: null },
     plan,
     ...(state.routeSet ? { routeSet: routeSetStatus(state) } : {}),
     acceptance: {
