@@ -38,7 +38,7 @@ function savedRecord(index, state, saved) {
   const head = saved.binding ? state.values[saved.binding] : null;
   // Ref writes deliberately change the current shared head; saved.valueState is
   // a return baseline, not a requirement that the parent value stay unchanged.
-  if (head) return record(index, id, binding, "parent", valueContent(index, head), head);
+  if (head) return record(index, id, binding, "parent", valueContent(index, head, id), head);
   const entry = index.byId.get(saved.id);
   if (!readable(entry)) return null;
   const edit = saved.editId === null ? null : index.byId.get(saved.editId);
@@ -84,7 +84,7 @@ function* candidates(index, state, scope, ids) {
           const identity = `${key}:${head.version}`;
           if (!selected(id) || seenHeads.has(identity)) continue;
           seenHeads.add(identity);
-          yield record(index, id, key, "history", valueContent(index, head), head);
+          yield record(index, id, key, "history", valueContent(index, head, id), head);
         }
       } else if (entry.type === "context_edit" && entry.replacement) {
         const source = index.byId.get(entry.targetId);
@@ -96,7 +96,7 @@ function* candidates(index, state, scope, ids) {
         const id = logicalSource(index, entry.id);
         if (!selected(id)) continue;
         const head = snapshotHead(entry);
-        yield record(index, id, entry.details.key, "history", valueContent(index, head), head);
+        yield record(index, id, entry.details.key, "history", valueContent(index, head, id), head);
       } else if (readable(entry)) {
         const id = logicalSource(index, entry.id);
         // A value-view wrapper is an observation about a source, not a new raw

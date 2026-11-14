@@ -11,7 +11,6 @@ import {
   buildSubagentDelegationRequest,
   buildTaskPrompt,
   hasCompleteUsageMetrics,
-  isRetryableProviderFailure,
   providerFallbackReason,
   normalizeProviderDiagnostics,
   parseSubagentDelegationResponse,
@@ -122,18 +121,18 @@ test("delegation request uses the public structured event contract and a bounded
 
 test("provider diagnostics and explicit account exhaustion drive one DeepSeek fallback without treating vague quota text as proof", () => {
   assert.equal(FALLBACK_MODEL, "jrt/deepseek-v4.1-flash");
-  assert.equal(isRetryableProviderFailure({ status: "failed", error: "HTTP 429 insufficient quota" }), true);
+  assert.equal(providerFallbackReason({ status: "failed", error: "HTTP 429 insufficient quota" }), "primary_account_quota_exhausted");
   assert.equal(providerFallbackReason({ status: "failed", error: "primary request failed", providerDiagnostics: { errorCount: 2, lastError: { kind: "rate_limited", message: "Provider request was rate-limited.", at: 10 } } }), "primary_provider_rate_limited");
   assert.equal(providerFallbackReason({ status: "failed", error: "primary request failed", providerDiagnostics: { errorCount: 1, lastError: { kind: "transient_other", message: "Transient provider request error.", at: 10 } } }), "primary_provider_transient_error");
   assert.equal(providerFallbackReason({ status: "failed", error: "Account has insufficient quota", providerDiagnostics: { errorCount: 1, lastError: { kind: "unknown", message: "Provider request failed.", at: 10 } } }), "primary_account_quota_exhausted", "clear account exhaustion uses the user's requested backup even though upstream deliberately labels it unknown");
-  assert.equal(isRetryableProviderFailure({ status: "failed", error: "The prompt mentions quota but no provider failure is specified." }), false);
-  assert.equal(isRetryableProviderFailure({ status: "failed", error: "Billing information was included in the request." }), false);
-  assert.equal(isRetryableProviderFailure({ status: "failed", error: "provider temporarily unavailable (503)" }), true);
-  assert.equal(isRetryableProviderFailure({ status: "failed", error: "Subagent run timed out after 600000ms", providerDiagnostics: { lastError: { kind: "transient_other" } } }), false);
-  assert.equal(isRetryableProviderFailure({ status: "failed", error: "ECONNRESET", providerDiagnostics: { lastError: { kind: "transient_other" } } }), false);
-  assert.equal(isRetryableProviderFailure({ status: "timed_out", error: "HTTP 429 insufficient quota" }), false);
-  assert.equal(isRetryableProviderFailure({ status: "failed", error: "Task could not find the expected route" }), false);
-  assert.equal(isRetryableProviderFailure({ status: "failed", error: "invalid structured output" }), false);
+  assert.equal(providerFallbackReason({ status: "failed", error: "The prompt mentions quota but no provider failure is specified." }), null);
+  assert.equal(providerFallbackReason({ status: "failed", error: "Billing information was included in the request." }), null);
+  assert.equal(providerFallbackReason({ status: "failed", error: "provider temporarily unavailable (503)" }), "primary_provider_unavailable");
+  assert.equal(providerFallbackReason({ status: "failed", error: "Subagent run timed out after 600000ms", providerDiagnostics: { lastError: { kind: "transient_other" } } }), null);
+  assert.equal(providerFallbackReason({ status: "failed", error: "ECONNRESET", providerDiagnostics: { lastError: { kind: "transient_other" } } }), null);
+  assert.equal(providerFallbackReason({ status: "timed_out", error: "HTTP 429 insufficient quota" }), null);
+  assert.equal(providerFallbackReason({ status: "failed", error: "Task could not find the expected route" }), null);
+  assert.equal(providerFallbackReason({ status: "failed", error: "invalid structured output" }), null);
   assert.equal(normalizeProviderDiagnostics({ errorCount: 1, lastError: { kind: "unknown", message: "safe message", at: 12 }, retry: { phase: "backoff", attempt: 1, maxAttempts: 3, delayMs: 100, scheduledAt: 13 } }).lastError.kind, "unknown");
   assert.equal(normalizeProviderDiagnostics({ errorCount: -1, lastError: { kind: "secret_kind", message: "raw" } }).lastError, null);
 });

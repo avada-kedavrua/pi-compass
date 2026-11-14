@@ -1,6 +1,6 @@
 import {
   VALUE_MESSAGE_TYPE, adoptValue, bindingKey, contentVersion, copyValue, currentValue, dataBlocks, isValueMessage, logicalSource, questionnaireContent,
-  nativeValueViews, rawMessage as messageOf, releaseFrameValues, renderValue, validateValue, valueContent, valueMessage, writeValue,
+  nativeValueViews, rawMessage as messageOf, releaseFrameValues, renderValue, validateValue, valueBinding, valueContent, valueMessage, writeValue,
 } from "./context-values.mjs";
 import { analyzeRepeatedSelections, rankVerifiedSources, readObservationIdentity, readOnlyObservation, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
 import { loadContextArtifact, writeContextArtifact } from "./context-artifacts.mjs";
@@ -38,12 +38,9 @@ function ensureContent(content) {
 function ensureVersion(version) {
   if (typeof version !== "string" || !/^[a-f0-9]{24}$/.test(version)) fail("A current source version is required.");
 }
-function ensureBinding(key, scopes, label, sourceId = null) {
-  if (typeof key !== "string" || key.length < 3 || key.length > 129) fail(`Invalid ${label} binding.`);
-  const separator = key.indexOf("/");
-  const remainder = separator < 0 ? "" : key.slice(separator + 1);
-  if (separator < 1 || !scopes.has(key.slice(0, separator)) || !remainder || remainder.includes("/")
-    || (sourceId !== null && remainder !== sourceId)) fail(`Invalid ${label} binding.`);
+function ensureBinding(key, scopes, sourceId = null) {
+  const binding = valueBinding(key);
+  if (!scopes.has(binding.owner) || (sourceId !== null && binding.sourceId !== sourceId)) fail("Value binding is not in an active scope or names a different source.");
 }
 
 export function emptyContextState() {
@@ -59,33 +56,34 @@ export function normalizeContextState(raw) {
   let parent = "root";
   for (const frame of raw.frames) {
     if (!object(frame) || typeof frame.id !== "string" || !frame.id || scopes.has(frame.id) || frame.parent !== parent || typeof frame.boundaryId !== "string" || !(frame.summaryId === null || typeof frame.summaryId === "string")) fail("Invalid frame stack or parent summary reference.");
-    if (!Array.isArray(frame.saved) || !Array.isArray(frame.refs) || !Array.isArray(frame.copies)) fail("Invalid frame source lists.");
+    if (!Array.isArray(frame.saved) || !Array.isArray(frame.refs) || !Array.isArray(frame.copies)
+      || frame.saved.some((item) => !object(item)) || frame.refs.some((item) => !object(item)) || frame.copies.some((item) => !object(item))) fail("Invalid frame source lists.");
     const frameScopes = new Set([...scopes, frame.id]);
     ensureIds(frame.saved.map((item) => item.id), "saved source IDs");
     ensureIds(frame.refs.map((item) => item.id), "reference capture IDs");
     ensureIds(frame.copies.map((item) => item.id), "copy capture IDs");
     for (const item of frame.saved) {
       if (typeof item.visible !== "boolean" || !(item.editId === null || typeof item.editId === "string")) fail("Invalid saved source reference.");
-      if (item.binding !== null && item.binding !== undefined) ensureBinding(item.binding, scopes, "saved source", item.logicalId ?? item.id);
+      if (item.binding !== null && item.binding !== undefined) ensureBinding(item.binding, scopes, item.logicalId ?? item.id);
     }
     for (const item of frame.refs) {
       ensureVersion(item.version);
-      ensureBinding(item.key, scopes, "reference capture", item.id);
+      ensureBinding(item.key, scopes, item.id);
     }
     for (const item of frame.copies) {
       ensureVersion(item.version);
-      if (item.viewKey !== null && item.viewKey !== undefined) ensureBinding(item.viewKey, frameScopes, "copy view", item.id);
+      if (item.viewKey !== null && item.viewKey !== undefined) ensureBinding(item.viewKey, frameScopes, item.id);
     }
     scopes.add(frame.id);
     parent = frame.id;
   }
   for (const pin of raw.pins) {
     if (!object(pin) || typeof pin.id !== "string" || !scopes.has(pin.scope) || !object(raw.values[pin.key]) || (pin.goalVersion !== undefined && (!Number.isSafeInteger(pin.goalVersion) || pin.goalVersion < 1))) fail("Invalid pin owner or value.");
-    ensureBinding(pin.key, scopes, "pin", pin.id);
+    ensureBinding(pin.key, scopes, pin.id);
   }
   if (Object.keys(raw.values).length > MAX_SOURCES) fail("Too many active value bindings; retire or spill unused values.");
   for (const [key, head] of Object.entries(raw.values)) {
-    ensureBinding(key, scopes, "value");
+    ensureBinding(key, scopes);
     validateValue(head);
   }
   for (const watch of Object.values(raw.watches)) {
@@ -287,7 +285,7 @@ function planCall({ next, index, boundary, operation, turnIds }) {
   for (const [id, item] of index.active) if (item.messages.length && (turnIds.has(id) || !kept.has(id))) entries.push(nativeEdit(id, null));
   for (const copy of copies.filter((item) => item.materialize)) {
     const head = next.values[copy.key];
-    entries.push(valueMessage({ id: copy.id, key: copy.key, head, content: valueContent(index, head) }));
+    entries.push(valueMessage({ id: copy.id, key: copy.key, head, content: valueContent(index, head, copy.id) }));
   }
   entries.push(nativeMessage(`Frame ${frame.id}; context revision ${next.revision + 1}.\nTask: ${operation.task}\nInputs: ref=${refs.map((ref) => ref.id).join(", ") || "none"}; private copy=${copies.map((copy) => copy.id).join(", ") || "none"}. Return explicitly; exports default to none. Environment effects remain.`, { frame: frame.id, action: "call" }));
   return entries;
@@ -319,7 +317,7 @@ function planReturn({ next, index, boundary, operation }) {
     const sharedPin = changed && next.pins.some((pin) => pin.id === saved.logicalId && pin.key !== saved.binding);
     const raw = index.byId.get(saved.id);
     const forkedView = changed && (sharedPin || (raw.customType === VALUE_MESSAGE_TYPE && raw.details.key !== saved.binding));
-    const value = head ? { id: saved.logicalId, key: saved.binding, head, content: valueContent(index, head) } : null;
+    const value = head ? { id: saved.logicalId, key: saved.binding, head, content: valueContent(index, head, saved.logicalId) } : null;
     let content = saved.visible ? historicalContent(index, saved.id, saved.editId) : null;
     if (changed) {
       if (forkedView) content = sharedPin ? content : null;
@@ -858,7 +856,7 @@ export function pinnedContextOverlay(branch, state, messages = [], goalVersion) 
     if (seen.has(pin.key)) continue;
     seen.add(pin.key);
     const head = normalized.values[pin.key];
-    const value = { id: pin.id, key: pin.key, head, content: valueContent(index, head) };
+    const value = { id: pin.id, key: pin.key, head, content: valueContent(index, head, pin.id) };
     const rendered = renderValue(value);
     // Exact envelope equality only proves that the outgoing data is present.
     // Never use content equality to attribute, edit or delete another message.

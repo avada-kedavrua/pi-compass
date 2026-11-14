@@ -52,7 +52,6 @@ export function dagApprovalBinding(state) {
       goal: (state?.decisions ?? [])
         .filter((item) => item.goalVersion === version)
         .map((item) => ({ id: item.id, summary: item.summary, rationale: item.rationale, evidence: item.evidence, affectedTaskIds: item.affectedTaskIds ?? [], supersededBy: item.supersededBy ?? null })),
-      plan: (state?.plan?.decisions ?? []).map((item) => ({ id: item.id, summary: item.summary, rationale: item.rationale, evidence: item.evidence, affectedTasks: item.affectedTasks ?? [] })),
     },
   };
   return createHash("sha256").update(JSON.stringify(definition)).digest("hex");
@@ -69,7 +68,6 @@ export function createDagApprovalRequest(state) {
   const decisions = [
     ...(state.humanDecisions ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => item.summary || item.text),
     ...(state.decisions ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => `${item.id}: ${item.summary}${item.supersededBy ? ` (superseded by ${item.supersededBy})` : ""}`),
-    ...(state.plan.decisions ?? []).map((item) => `${item.id}: ${item.summary}`),
   ].filter(Boolean);
   const question = DAG_APPROVAL_QUESTION;
   const preview = [

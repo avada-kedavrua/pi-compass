@@ -1,11 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { planContextBoundary, restoreContextState, searchContext } from "../src/context-core.mjs";
+import { contentVersion, valueContent } from "../src/context-values.mjs";
 import { SessionManager, applyOperation, assertPaired, contextPreview, modelText, queueOperation, sourceVersion, toolExchange, user, value } from "./helpers/context-host.mjs";
 
 function host() { const manager = SessionManager.inMemory("/context-values"); user(manager, "parent"); return manager; }
 function capture(manager, id, mode) { return { id, mode, version: sourceVersion(manager, id) }; }
 function search(manager, id) { return searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { ids: [id] }).hits[0]; }
+
+test("value binding follows immutable source identity, independently of provenance", () => {
+  for (const field of ["content", "operation", "snapshot", "questionnaire"]) {
+    const content = field === "snapshot" ? [{ type: "text", text: "payload" }] : "payload";
+    const entry = field === "operation"
+      ? { id: "write", type: "message", message: { role: "toolResult", toolName: "compass_context", details: { contextOperation: { action: "replace", ids: ["source"], content } } } }
+      : field === "snapshot"
+        ? { id: "snapshot", type: "custom_message", customType: "pi-compass-v2.value", details: { derived: true, sourceId: "source" }, content: [{ type: "text", text: "header" }, ...content] }
+        : { id: "source", type: "custom_message", customType: "test-value", content };
+    const index = { byId: new Map([[entry.id, entry]]) };
+    const head = { entryId: entry.id, field, version: contentVersion(content), kind: "memory", readOnly: false, rendered: true, handling: "active", caveats: [], sources: ["independent-evidence"] };
+    if (field !== "questionnaire") assert.deepEqual(valueContent(index, head, "source"), content);
+    assert.throws(() => valueContent(index, head, "alias"), /Value binding does not match/);
+  }
+});
 
 test("an inner copy cannot write through an outer ref binding", () => {
   const manager = host();

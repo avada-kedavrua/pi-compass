@@ -1,12 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildContinuityContext,
   createOrRevisePlan,
   emptyDagState,
   readyTasks,
   taskAssessmentBinding,
-  recordContinuityNote,
   updateTasks,
 } from "../src/dag-core.mjs";
 
@@ -156,80 +154,6 @@ test("task updates retain a timestamped activity trail", () => {
   assert.match(updated.activity[0].at, /^\d{4}-\d{2}-\d{2}T/);
   assert.deepEqual(updated.activity[0].changes.map((change) => [change.id, change.from, change.to]), [["inspect-api", "pending", "blocked"]]);
 });
-
-test("decision notes and checkpoints are retained for continuity", () => {
-  let state = plan();
-  let result = recordContinuityNote(state, {
-    kind: "decision",
-    summary: "Keep subagents read-only",
-    rationale: "Concurrent writes have collided in this repository before.",
-    evidence: "Prior session showed source edits from the wrong workspace.",
-    affectedTasks: ["inspect-api"],
-  });
-  state = result.state;
-  assert.match(result.message, /Recorded D1/);
-  result = recordContinuityNote(state, {
-    kind: "checkpoint",
-    summary: "All existing tests passed before the refactor",
-    ref: "git:abc1234",
-    evidence: "npm test: 681 passed.",
-  });
-  assert.match(result.message, /git:abc1234/);
-  assert.equal(result.state.decisions[0].id, "D1");
-  assert.equal(result.state.checkpoints[0].id, "C1");
-  assert.match(buildContinuityContext(result.state), /Keep subagents read-only/);
-  assert.match(buildContinuityContext(result.state), /git:abc1234/);
-});
-
-test("continuity context reminds the Agent to relate new issues to Goal and history without adding a DAG for simple tasks", () => {
-  assert.equal(buildContinuityContext(emptyDagState()), "");
-  const state = plan();
-  const context = buildContinuityContext(state);
-  assert.match(context, /Goal: Create a repeatable full-stack smoke test/);
-  assert.match(context, /Continuity check for a material new issue/);
-  assert.match(context, /not a mandatory extra tool call/);
-});
-
-test("a new Goal does not inherit unrelated decisions and checkpoints", () => {
-  let state = plan();
-  state = recordContinuityNote(state, { kind: "decision", summary: "Old-goal decision", rationale: "Old context." }).state;
-  state = recordContinuityNote(state, { kind: "checkpoint", summary: "Old-goal checkpoint", ref: "git:old" }).state;
-  const next = createOrRevisePlan(state, {
-    goal: "A different goal",
-    acceptanceCriteria: ["New goal criterion"],
-    tasks: [
-      { id: "new-a", title: "New A", acceptance: "A done", dependsOn: [] },
-      { id: "new-b", title: "New B", acceptance: "B done", dependsOn: ["new-a"] },
-    ],
-  });
-  assert.equal(next.revision, 1);
-  assert.equal(next.decisions.length, 0);
-  assert.equal(next.checkpoints.length, 0);
-  assert.match(buildContinuityContext(next), /A different goal/);
-  assert.doesNotMatch(buildContinuityContext(next), /Old-goal decision/);
-});
-
-
-test("continuity snapshot stays bounded for a large Goal and graph", () => {
-  let state = createOrRevisePlan(emptyDagState(), {
-    goal: "A complex Goal ".repeat(100),
-    acceptanceCriteria: Array.from({ length: 20 }, (_, index) => `Acceptance criterion ${index} `.repeat(20)),
-    tasks: Array.from({ length: 30 }, (_, index) => ({
-      id: `task-${index}`,
-      title: `Task ${index} `.repeat(20),
-      acceptance: `Task acceptance ${index}`,
-      dependsOn: index === 0 ? [] : [`task-${index - 1}`],
-    })),
-  });
-  state = recordContinuityNote(state, {
-    kind: "decision",
-    summary: "A material design decision",
-    rationale: "Why it was selected. ".repeat(50),
-    evidence: "Evidence. ".repeat(50),
-  }).state;
-  assert.ok(buildContinuityContext(state).length <= 3600);
-});
-
 
 test("re-submitting an identical plan does not create a false revision", () => {
   const first = plan();

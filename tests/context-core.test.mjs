@@ -18,13 +18,16 @@ function host() {
 }
 function capture(manager, id, mode = "ref") { return { id, mode, version: sourceVersion(manager, id) }; }
 
-test("context normalization rejects missing and non-canonical reference bindings", () => {
+test("context normalization rejects malformed and non-canonical bindings", () => {
   const missing = emptyContextState();
   missing.frames = [{ id: "frame-1", parent: "root", boundaryId: "boundary", summaryId: null, saved: [], refs: [{ id: "source", version: "a".repeat(24) }], copies: [] }];
-  assert.throws(() => normalizeContextState(missing), /reference capture binding/);
+  assert.throws(() => normalizeContextState(missing), /Invalid context value binding/);
   const nonCanonical = structuredClone(missing);
   nonCanonical.frames[0].refs[0].key = "root/other/source";
-  assert.throws(() => normalizeContextState(nonCanonical), /reference capture binding/);
+  assert.throws(() => normalizeContextState(nonCanonical), /Invalid context value binding/);
+  const malformed = emptyContextState();
+  malformed.frames = [{ id: "frame-1", parent: "root", boundaryId: "boundary", summaryId: null, saved: [null], refs: [], copies: [] }];
+  assert.throws(() => normalizeContextState(malformed), /Invalid frame source lists/);
 });
 
 test("same-session call preserves reserved state, scopes inputs, and restores raw parent records", () => {

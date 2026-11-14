@@ -57,22 +57,38 @@ export function validateValue(head) {
   if (!Array.isArray(head.sources) || head.sources.length > 32 || head.sources.some((id) => typeof id !== "string")) fail("Invalid context value provenance.");
   if (head.readStatus !== undefined && (!head.readStatus || typeof head.readStatus !== "object" || !["complete", "failed", "truncated", "unknown"].includes(head.readStatus.status) || typeof head.readStatus.sourceId !== "string" || !/^[a-f0-9]{24}$/.test(head.readStatus.payloadVersion) || typeof head.readStatus.path !== "string" || typeof head.readStatus.fullSkillFile !== "boolean" || typeof head.readStatus.exchangeComplete !== "boolean" || !head.readStatus.range || !Number.isSafeInteger(head.readStatus.range.startLine))) fail("Invalid immutable read-status qualification.");
 }
-export function valueContent(index, head) {
+export function valueBinding(key) {
+  if (typeof key !== "string" || key.length > 129) fail("Invalid context value binding.");
+  const separator = key.indexOf("/");
+  const owner = key.slice(0, separator);
+  const sourceId = key.slice(separator + 1);
+  if (separator < 1 || !sourceId || sourceId.includes("/")) fail("Invalid context value binding.");
+  return { owner, sourceId };
+}
+
+// Binding identity comes from the immutable native source/write record, never
+// provenance: a derived value may intentionally cite entirely different sources.
+export function valueContent(index, head, sourceId) {
   validateValue(head);
+  if (typeof sourceId !== "string" || !sourceId) fail("A logical value source is required.");
   const entry = index.byId.get(head.entryId);
   if (!entry) fail(`Value source ${head.entryId} is not on the active branch.`);
   let content;
   if (head.field === "operation") {
     const operation = entry.message?.details?.contextOperation;
     if (entry.message?.role !== "toolResult" || entry.message.toolName !== "compass_context" || !["replace", "spill", "move"].includes(operation?.action)) fail("Value has no matching persisted write operation.");
+    if (!Array.isArray(operation.ids) || !operation.ids.some((id) => logicalSource(index, id) === sourceId)) fail("Value binding does not match its persisted write source.");
     content = operation.action === "spill" ? operation.pointer : operation.action === "move" ? operation.remaining : operation.content;
   } else if (head.field === "questionnaire") {
+    if (entry.id !== sourceId) fail("Value binding does not match its native questionnaire source.");
     content = questionnaireContent(entry);
     if (!content) fail("Questionnaire source is not a genuine structured Human answer.");
   } else if (head.field === "snapshot") {
     if (entry.type !== "custom_message" || entry.customType !== VALUE_MESSAGE_TYPE || !entry.details?.derived || !Array.isArray(entry.content)) fail("Value has no matching native data snapshot.");
+    if (entry.details.sourceId !== sourceId) fail("Value binding does not match its native snapshot source.");
     content = entry.content.slice(1);
   } else {
+    if (entry.id !== sourceId) fail("Value binding does not match its native content source.");
     const edit = head.editId ? index.byId.get(head.editId) : null;
     if (head.editId && (edit?.type !== "context_edit" || edit.targetId !== head.entryId || edit.replacement === null)) fail(`Value edit ${head.editId} is stale.`);
     content = normalizeContent(entry, edit ? edit.replacement.content : rawMessage(entry)?.content);
@@ -139,14 +155,15 @@ export function snapshotHead(entry) {
 export function currentValue(state, index, id, { allowHidden = false, key: selectedKey } = {}) {
   const sourceId = logicalSource(index, id);
   const key = selectedKey ?? bindingKey(state, index, sourceId);
-  if (!key.endsWith(`/${sourceId}`) || !["root", ...state.frames.map((frame) => frame.id)].includes(key.split("/")[0])) fail("Value binding is not in an active scope.");
-  const copy = state.frames.flatMap((frame) => frame.copies.map((item) => ({ ...item, owner: frame.id }))).find((item) => item.id === sourceId && key === `${item.owner}/${sourceId}`);
+  const binding = valueBinding(key);
+  if (binding.sourceId !== sourceId || (binding.owner !== "root" && !state.frames.some((frame) => frame.id === binding.owner))) fail("Value binding is not in an active scope.");
+  const copy = state.frames.find((frame) => frame.id === binding.owner)?.copies.find((item) => item.id === sourceId);
   let item = index.valueViews.get(key) ?? index.active.get(copy?.viewId ?? index.byId.get(sourceId)?.id);
   if (state.values[key]?.pointerVersion && item?.messages?.length && contentVersion(item.messages[0].content) === state.values[key].pointerVersion) item = undefined;
   if (!allowHidden && !item?.messages.length) fail(`Value ${sourceId} is omitted; load it before this operation.`);
   const head = state.values[key] ?? (item?.messages.length ? defaultHead(index, sourceId, item) : null);
   if (!head) fail(`Value ${sourceId} has no recoverable version.`);
-  const content = valueContent(index, head);
+  const content = valueContent(index, head, sourceId);
   const viewKey = item?.sourceEntry.customType === VALUE_MESSAGE_TYPE ? item.sourceEntry.details.key : copy?.viewKey ?? key;
   if (item?.messages.length) {
     const rendered = head.rendered || item.sourceEntry.customType === VALUE_MESSAGE_TYPE;
@@ -177,7 +194,7 @@ export function writeValue(state, index, value, operation, resultEntryId) {
   };
   validateValue(head);
   // The payload is already persisted in Pi's tool result, not duplicated in control state.
-  valueContent(index, head);
+  valueContent(index, head, value.id);
   state.values[value.key] = head;
   return head;
 }

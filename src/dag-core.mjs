@@ -2,8 +2,6 @@ import { createHash } from "node:crypto";
 
 const TASK_STATUSES = new Set(["pending", "in_progress", "done", "blocked"]);
 const MAX_PLAN_HISTORY = 8;
-const MAX_DECISIONS = 8;
-const MAX_CHECKPOINTS = 5;
 const MAX_ACTIVITY = 8;
 const ALLOWED_EXECUTORS = new Set(["parent", "code", "subagent"]);
 const ALLOWED_AGENTS = new Set(["scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"]);
@@ -16,14 +14,10 @@ export function emptyDagState() {
     revision: 0,
     stateVersion: 0,
     planHistory: [],
-    decisions: [],
-    checkpoints: [],
     activity: [],
     executionHistory: [],
     approvalRequest: null,
     approval: null,
-    nextDecisionNumber: 1,
-    nextCheckpointNumber: 1,
   };
 }
 
@@ -56,12 +50,8 @@ function withStateDefaults(state) {
     tasks: Array.isArray(source.tasks) ? source.tasks : [],
     stateVersion: Number.isInteger(source.stateVersion) ? source.stateVersion : 0,
     planHistory: Array.isArray(source.planHistory) ? source.planHistory : [],
-    decisions: Array.isArray(source.decisions) ? source.decisions : [],
-    checkpoints: Array.isArray(source.checkpoints) ? source.checkpoints : [],
     activity: Array.isArray(source.activity) ? source.activity : [],
     executionHistory: Array.isArray(source.executionHistory) ? source.executionHistory.slice(-8) : [],
-    nextDecisionNumber: Number.isInteger(source.nextDecisionNumber) ? source.nextDecisionNumber : 1,
-    nextCheckpointNumber: Number.isInteger(source.nextCheckpointNumber) ? source.nextCheckpointNumber : 1,
   };
 }
 
@@ -205,8 +195,7 @@ export function createOrRevisePlan(currentState, input) {
   assertAcyclic(tasks);
   const delta = planDelta(previous, goal, acceptanceCriteria, tasks);
 
-  // The Goal is the boundary for carrying task evidence and continuity history forward.
-  // A different Goal starts a fresh continuity record; prior-goal decisions are not injected.
+  // Task evidence belongs to this Goal; a replacement Goal starts fresh.
   const sameGoal = previous.goal === goal;
   const oldById = new Map((sameGoal ? previous.tasks : []).map((task) => [task.id, task]));
   const preservedTasks = tasks.map((task) => {
@@ -241,8 +230,6 @@ export function createOrRevisePlan(currentState, input) {
   // A revision identifies a material change within this Goal, not another plan() call.
   const revision = changedGoal ? 1 : previous.revision + (delta.material ? 1 : 0);
   const baseHistory = changedGoal ? [] : previous.planHistory;
-  const baseDecisions = changedGoal ? [] : previous.decisions;
-  const baseCheckpoints = changedGoal ? [] : previous.checkpoints;
   const baseActivity = changedGoal ? [] : previous.activity;
   const changeReason = clipped(input.changeReason, 500);
   let planHistory = baseHistory;
@@ -269,12 +256,8 @@ export function createOrRevisePlan(currentState, input) {
     revision,
     stateVersion: previous.stateVersion + (delta.material ? 1 : 0),
     planHistory,
-    decisions: baseDecisions,
-    checkpoints: baseCheckpoints,
     activity: baseActivity,
     executionHistory: changedGoal ? [] : (previous.executionHistory ?? []).slice(-8),
-    nextDecisionNumber: changedGoal ? 1 : previous.nextDecisionNumber,
-    nextCheckpointNumber: changedGoal ? 1 : previous.nextCheckpointNumber,
   };
 }
 
@@ -374,161 +357,4 @@ export function updateTasks(state, updates) {
     }].slice(-MAX_ACTIVITY);
   }
   return next;
-}
-
-export function recordContinuityNote(state, input) {
-  const next = withStateDefaults(state);
-  if (!next.goal) throw new Error("Create a Goal DAG before recording a decision or checkpoint.");
-  const kind = input.kind;
-  if (kind !== "decision" && kind !== "checkpoint") {
-    throw new Error('kind must be "decision" or "checkpoint".');
-  }
-  const summary = clipped(text(input.summary, "summary"), 400);
-  const rationale = clipped(input.rationale, 500);
-  const evidence = clipped(input.evidence, 500);
-  const ref = clipped(input.ref, 300);
-  const affectedTasks = input.affectedTasks ?? [];
-  if (!Array.isArray(affectedTasks) || affectedTasks.some((id) => typeof id !== "string" || !id.trim())) {
-    throw new Error("affectedTasks must be an array of task ids.");
-  }
-  const knownIds = new Set(next.tasks.map((task) => task.id));
-  const normalizedAffected = [...new Set(affectedTasks.map((id) => id.trim()))];
-  const unknown = normalizedAffected.filter((id) => !knownIds.has(id));
-  if (unknown.length) throw new Error(`Unknown affected task ids: ${unknown.join(", ")}.`);
-
-  if (kind === "decision") {
-    const id = `D${next.nextDecisionNumber}`;
-    next.nextDecisionNumber += 1;
-    next.decisions = [...next.decisions, {
-      id,
-      at: now(),
-      summary,
-      rationale,
-      evidence,
-      affectedTasks: normalizedAffected,
-    }].slice(-MAX_DECISIONS);
-    return {
-      state: next,
-      message: `Recorded ${id}: ${summary}${rationale ? `\nRationale: ${clipped(rationale, 260)}` : "\nRationale not recorded."}${evidence ? `\nEvidence: ${clipped(evidence, 260)}` : ""}`,
-    };
-  }
-
-  const id = `C${next.nextCheckpointNumber}`;
-  next.nextCheckpointNumber += 1;
-  next.checkpoints = [...next.checkpoints, {
-    id,
-    at: now(),
-    summary,
-    ref,
-    evidence,
-    affectedTasks: normalizedAffected,
-  }].slice(-MAX_CHECKPOINTS);
-  return {
-    state: next,
-    message: `Recorded checkpoint ${id}: ${summary}${ref ? `\nReference: ${ref}` : "\nNo recoverable code reference supplied; this is a planning marker, not a rollback point."}${evidence ? `\nEvidence: ${clipped(evidence, 260)}` : ""}`,
-  };
-}
-
-function compactTask(task, includeEvidence = false) {
-  let line = `${task.id} (${task.status}): ${task.title}`;
-  if (task.reason) line += ` — reason: ${clipped(task.reason, 160)}`;
-  if (includeEvidence && task.evidence) line += ` — evidence: ${clipped(task.evidence, 180)}`;
-  return line;
-}
-
-export function buildContinuityContext(state) {
-  const current = withStateDefaults(state);
-  if (!current.goal || current.tasks.length === 0) return "";
-
-  const ready = readyTasks(current);
-  const inProgress = current.tasks.filter((task) => task.status === "in_progress");
-  const blocked = current.tasks.filter((task) => task.status === "blocked");
-  const doneCount = current.tasks.filter((task) => task.status === "done").length;
-  const lines = [
-    "[Compass continuity snapshot — current branch state; compact index, not a new Goal]",
-    `Goal: ${clipped(current.goal, 900)}`,
-    `Plan revision: ${current.revision}; progress: ${doneCount}/${current.tasks.length} tasks done.`,
-  ];
-
-  if (current.acceptanceCriteria.length) {
-    lines.push("Acceptance:");
-    for (const criterion of current.acceptanceCriteria.slice(0, 3)) lines.push(`- ${clipped(criterion, 150)}`);
-    if (current.acceptanceCriteria.length > 3) lines.push(`- … ${current.acceptanceCriteria.length - 3} more in the planning capability details.`);
-  }
-  if (inProgress.length) lines.push(`In progress: ${inProgress.slice(0, 3).map((task) => compactTask(task)).join("; ")}`);
-  if (ready.length) lines.push(`Ready: ${ready.slice(0, 4).map((task) => `${task.id}: ${clipped(task.title, 80)}`).join("; ")}`);
-  if (blocked.length) lines.push(`Blocked: ${blocked.slice(0, 2).map((task) => compactTask(task)).join("; ")}`);
-  if (!inProgress.length && !ready.length && !blocked.length && doneCount === current.tasks.length) lines.push("DAG tasks are all marked done; check the original Goal acceptance before claiming overall completion.");
-
-  const recentPlanChanges = current.planHistory.slice(-1).reverse();
-  if (recentPlanChanges.length) {
-    lines.push("Recent plan changes:");
-    for (const change of recentPlanChanges) {
-      lines.push(`- r${change.revision} (${change.at}): ${clipped(change.summary, 220)}; why: ${clipped(change.reason || "not recorded", 220)}${change.reasonMissing ? " [reason missing]" : ""}`);
-    }
-  }
-  const recentDecisions = current.decisions.slice(-2).reverse();
-  if (recentDecisions.length) {
-    lines.push("Recent material decisions:");
-    for (const decision of recentDecisions) {
-      const affected = decision.affectedTasks?.length ? `; tasks: ${decision.affectedTasks.join(", ")}` : "";
-      lines.push(`- ${decision.id} (${decision.at}): ${clipped(decision.summary, 180)}; why: ${clipped(decision.rationale || "not recorded", 160)}; evidence: ${clipped(decision.evidence || "not recorded", 160)}${affected}`);
-    }
-  }
-  const recentCheckpoints = current.checkpoints.slice(-1).reverse();
-  if (recentCheckpoints.length) {
-    lines.push("Recent checkpoints (references only; Compass does not roll code back):");
-    for (const checkpoint of recentCheckpoints) {
-      lines.push(`- ${checkpoint.id} (${checkpoint.at}): ${clipped(checkpoint.summary, 180)}; ref: ${clipped(checkpoint.ref || "none — not directly recoverable", 180)}; evidence: ${clipped(checkpoint.evidence || "not recorded", 140)}`);
-    }
-  }
-  const recentActivity = current.activity.slice(-1).reverse();
-  if (recentActivity.length) {
-    lines.push("Recent task-state changes:");
-    for (const activity of recentActivity) {
-      const changes = (activity.changes ?? []).slice(0, 5).map((change) => `${change.id} ${change.from}→${change.to}${change.reason ? ` (${clipped(change.reason, 90)})` : change.from === change.to && change.evidence ? ` [evidence: ${clipped(change.evidence, 90)}]` : ""}`).join("; ");
-      lines.push(`- ${activity.at}: ${changes || "state updated"}`);
-    }
-  }
-
-  lines.push("Continuity check for a material new issue: compare it with the original Goal, current plan, and recent decisions/changes. Ask whether it is already planned, whether a recent decision or edit introduced it, and whether to continue, make a local fix, replan, or return to a genuinely recoverable checkpoint. Preserve unaffected completed work. Ask Human only for unresolved material intent/permission/trade-offs. This is reasoning guidance, not a mandatory extra tool call.");
-  const result = lines.join("\n");
-  const maxChars = 3600;
-  return result.length > maxChars ? `${result.slice(0, maxChars - 70)}\n[Older/less relevant continuity details omitted; open planning capability for details if needed.]` : result;
-}
-
-export function summarizeDag(state) {
-  const current = withStateDefaults(state);
-  if (!current.goal) return "No Compass DAG exists in this session.";
-  const lines = [
-    `Goal: ${current.goal}`,
-    `Revision: ${current.revision}`,
-    "Acceptance:",
-    ...current.acceptanceCriteria.map((item) => `- ${item}`),
-    "Tasks:",
-  ];
-  for (const task of current.tasks) {
-    const deps = task.dependsOn.length ? ` <- ${task.dependsOn.join(", ")}` : "";
-    lines.push(`- [${task.status}] ${task.id}: ${task.title}${deps}`);
-    if (task.writeScope) lines.push(`  Write scope: ${task.writeScope}`);
-    if (task.evidence) lines.push(`  Evidence: ${task.evidence}`);
-    if (task.reason) lines.push(`  Reason: ${task.reason}`);
-  }
-  const ready = readyTasks(current);
-  lines.push(`Ready now: ${ready.length ? ready.map((task) => task.id).join(", ") : "none"}`);
-
-  for (const change of current.planHistory.slice(-3)) {
-    lines.push(`Plan change r${change.revision} (${change.at}): ${clipped(change.summary, 260)}; why: ${clipped(change.reason, 300)}${change.reasonMissing ? " [reason missing]" : ""}`);
-  }
-  for (const decision of current.decisions.slice(-3)) {
-    lines.push(`Decision ${decision.id} (${decision.at}): ${clipped(decision.summary, 260)}${decision.rationale ? `; why: ${clipped(decision.rationale, 300)}` : "; rationale not recorded"}${decision.evidence ? `; evidence: ${clipped(decision.evidence, 300)}` : ""}`);
-  }
-  for (const checkpoint of current.checkpoints.slice(-2)) {
-    lines.push(`Checkpoint ${checkpoint.id} (${checkpoint.at}): ${clipped(checkpoint.summary, 260)}; ref: ${clipped(checkpoint.ref || "none — not directly recoverable", 220)}${checkpoint.evidence ? `; evidence: ${clipped(checkpoint.evidence, 260)}` : ""}`);
-  }
-  for (const activity of current.activity.slice(-2)) {
-    const changes = (activity.changes ?? []).map((change) => `${change.id} ${change.from}→${change.to}`).join("; ");
-    lines.push(`Recent task activity (${activity.at}): ${changes}${activity.omittedCount ? `; ${activity.omittedCount} more state changes omitted` : ""}`);
-  }
-  return lines.join("\n");
 }

@@ -437,8 +437,6 @@ export function normalizeGoalRunState(raw) {
     ...state.plan,
     acceptanceCriteria: Array.isArray(state.plan.acceptanceCriteria) ? state.plan.acceptanceCriteria : [],
     planHistory: Array.isArray(state.plan.planHistory) ? state.plan.planHistory.slice(-8) : [],
-    decisions: Array.isArray(state.plan.decisions) ? state.plan.decisions.slice(-MAX_DECISIONS) : [],
-    checkpoints: Array.isArray(state.plan.checkpoints) ? state.plan.checkpoints.slice(-MAX_CHECKPOINTS) : [],
     activity: Array.isArray(state.plan.activity) ? state.plan.activity.slice(-8) : [],
     executionHistory: Array.isArray(state.plan.executionHistory) ? state.plan.executionHistory.slice(-8).filter((item) => item && typeof item === "object" && typeof item.requestId === "string").map((item) => ({
       requestId: item.requestId.slice(0, 128),

@@ -394,7 +394,3 @@ export function providerFallbackReason(response) {
   }
   return null;
 }
-
-export function isRetryableProviderFailure(response) {
-  return providerFallbackReason(response) !== null;
-}
