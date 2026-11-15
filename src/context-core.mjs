@@ -357,6 +357,7 @@ function planPins({ next, index, operation }) {
   if (!operation.ids.length) fail("Select sources to pin or unpin.");
   const scope = operation.scope ?? next.frames.at(-1)?.id ?? "root";
   if (!["root", ...next.frames.map((frame) => frame.id)].includes(scope)) fail(`Pin scope ${scope} is not active.`);
+  if (operation.action === "pin" && operation.lifetime === "goal" && operation.goalVersion === 0) fail("Create a semantic Goal before requesting Goal-scoped retention.");
   const entries = [];
   for (const id of operation.ids) {
     source(index, id);
@@ -377,7 +378,7 @@ function planPins({ next, index, operation }) {
       validateValue(head);
       entries.push(...writeView(next, value, head, value.content));
       next.pins = next.pins.filter((pin) => pin.key !== value.key || pin.scope !== scope);
-      next.pins.push({ id: value.id, key: value.key, scope, ...(operation.lifetime === "session" ? {} : { goalVersion: operation.goalVersion ?? 1 }) });
+      next.pins.push({ id: value.id, key: value.key, scope, ...(operation.lifetime === "session" || operation.goalVersion === 0 ? {} : { goalVersion: operation.goalVersion ?? 1 }) });
     } else next.pins = next.pins.filter((pin) => pin.key !== value.key || pin.scope !== scope);
   }
   if (next.pins.length > MAX_PINS) fail("At most 64 sources may be pinned.");
@@ -902,7 +903,7 @@ export function planObservationBoundary({ state: input, branch, boundary, goalVe
       handling: "active", caveats: [], sources: [id], pointerVersion: contentVersion(pointer),
     };
     next.values[key] = head;
-    next.pins.push({ id, key, scope: "root", goalVersion });
+    next.pins.push({ id, key, scope: "root", ...(goalVersion > 0 ? { goalVersion } : {}) });
     entries.push(nativeEdit(id, pointer), valueMessage({ id, key, head, content }));
   }
   if (!entries.length && !expired.length) return null;

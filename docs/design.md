@@ -8,7 +8,7 @@ Lower the total practical cost of completing arbitrary Goals without reducing co
 
 ## Ownership
 
-- **Agent:** semantic interpretation, decomposition, route choice, attention selection, caveat interpretation, and final integration.
+- **Agent:** interpret Human intent; explicitly create/reaffirm/replace the semantic Goal and declare constraints/acceptance; choose decomposition, capabilities, route, attention, caveats and final integration. Runtime never guesses these from natural language.
 - **Pi:** session tree, message persistence, branching, compaction, and append-only context projection edits.
 - **Compass:** Goal/version state, explicit Human constraints and decisions, evidence references, deterministic eligibility/validation, acceptance status, and bounded continuity projection.
 - **Code Mode:** deterministic tool batching, parsing, validation, and aggregation in the parent context.
@@ -22,7 +22,9 @@ Do not introduce a second scheduler, second session store, or duplicate conventi
 - Verification intensity is proportional to risk and acceptance requirements; it is not a mandatory ritual after every operation.
 - A child result is evidence, not final Goal acceptance.
 - Missing, stale, partial, or contradictory evidence stays unknown/inconclusive; never upgrade it to pass.
-- Human instructions and hard constraints remain authoritative and Goal-version scoped.
+- Human instructions remain authoritative. Goal text and constraints are Agent interpretations backed by native Human source IDs, not new Human messages or Human approval. The first semantic Goal remains Original Goal; raw original instructions stay in Pi.
+- New native Human input pauses further approved DAG progression until an explicit Agent interpretation reviews it. Reaffirming unchanged semantics preserves approval; changing material definitions requires new approval. Terminal native evidence is still consumed.
+- Goal replacement rejects unresolved native execution/competitor identities and resets Goal-specific work without a separate Goal-change archive. No candidate registry, prose classifier or schema migration is retained.
 
 ## Messages contract
 
@@ -37,6 +39,6 @@ A RouteSet is a set of alternative strategies for the same Goal version and base
 - Pi baseline: 1.5.2 for the current `context_with_system`, native boundary and installed projection behavior. Pi 0.87.0 introduced Context Edit, but Compass uses only the validated boundaries supported by the installed host.
 - pi-subagents: the installed structured delegation contract owns child execution, status and cancellation; Compass does not assume extension inheritance.
 - Node.js: `>=22.16.0`.
-- GoalRun schema/API: v7; current-only state normalization rejects obsolete schemas rather than migrating them.
+- GoalRun schema/API: v8; context schema v4. Start a new session or select a supported native branch when old GoalRun snapshots are present; unsupported schemas fail visibly without migration or reset.
 
 Historical v0.9.0 architecture and implementation boundaries are in [`architecture-v0.9.0.md`](./architecture-v0.9.0.md). Historical v0.8.0 implementation details remain in [`design-v0.8.0.md`](./design-v0.8.0.md).

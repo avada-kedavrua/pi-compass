@@ -883,6 +883,36 @@ test("Goal outcome projection distinguishes incomplete and failed acceptance", (
   assert.equal(goalOutcomeStatus(emptyGoalRunState()).status, "no_goal");
 });
 
+test("Human answers observed before Goal creation never acquire a fictitious future Goal owner", () => {
+  let state = captureHumanDecision(emptyGoalRunState(), { source: "ask_user_question", sourceEntryId: "native-question", sourceCallId: "native-call", text: "Read-only investigation first" }).state;
+  state = normalizeGoalRunState(state);
+  assert.equal(state.humanDecisions[0].goalVersion, 0);
+  state = observeHumanInput(state, "human-goal").state;
+  state = setGoal(state, { expectedVersion: 0, current: "Investigate safely", sourceIds: ["human-goal"], constraints: [] }).state;
+  assert.equal(normalizeGoalRunState(state).humanDecisions[0].goalVersion, 0);
+});
+
+test("stale acceptance identities cannot cross a Goal replacement", () => {
+  let state = defineAcceptanceCriteria(withGoal("Ship feature A"), ["A behaves correctly"]).state;
+  const staleId = state.goal.criteria[0].id;
+  state = observeHumanInput(state, "human-feature-b").state;
+  state = setGoal(state, { expectedVersion: 1, current: "Ship feature B", sourceIds: ["human-feature-b"], constraints: [], acceptanceCriteria: ["B behaves correctly"] }).state;
+  const before = structuredClone(state);
+  assert.notEqual(state.goal.criteria[0].id, staleId);
+  assert.throws(() => recordAcceptanceResult(state, { criterionId: staleId, status: "reported_pass", evidence: "Old feature evidence" }), /Unknown or stale acceptance criterion/);
+  assert.deepEqual(state, before);
+});
+
+test("bounded event deltas declare omitted retained events", () => {
+  let state = withGoal("Investigate bounded event output");
+  const cursor = buildStateSnapshot(state).cursor;
+  for (let index = 0; index < 9; index++) state = recordDecision(state, { summary: `Decision ${index}`, rationale: "New evidence" }).state;
+  const snapshot = buildStateSnapshot(state, cursor);
+  assert.equal(snapshot.delta.events.length, 8);
+  assert.equal(snapshot.delta.omitted, 1);
+  assert.equal(snapshot.delta.historyGap, undefined);
+});
+
 test("capability availability is fixed after explicit Goal creation", () => {
   const expected = ["planning", "routes", "acceptance", "history", "goal_details", "issue_review"];
   assert.deepEqual(availableCapabilities(withGoal("Goal: fix one typo in one file")), expected);

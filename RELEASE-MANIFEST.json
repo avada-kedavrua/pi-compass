@@ -1,7 +1,7 @@
 {
   "name": "pi-compass-v2",
   "version": "0.10.0",
-  "goalRunSchemaVersion": 7,
+  "goalRunSchemaVersion": 8,
   "minimumPiVersion": "1.5.2",
   "testedPiRuntime": "Pi 1.5.2 installed projection/runner/import checks; not live provider acceptance",
   "piSubagentsPinned": "0.88.1",

@@ -160,11 +160,12 @@ function median(values) {
 }
 
 export function buildTaskPrompt({ goal, task, constraints = [] }) {
-  const boundedGoal = String(goal ?? "").trim().slice(0, 2400);
-  const boundedConstraints = (Array.isArray(constraints) ? constraints : [])
-    .filter((item) => typeof item === "string" && item.trim())
-    .slice(0, 12)
-    .map((item) => item.trim().slice(0, 240));
+  const boundedGoal = String(goal ?? "").trim();
+  if (boundedGoal.length > 4000 || !Array.isArray(constraints) || constraints.length > 24
+    || constraints.some((item) => typeof item !== "string" || !item.trim() || item.length > 600)) {
+    throw new Error("Delegation Goal/constraints exceed the explicit Goal contract; no instruction was silently truncated.");
+  }
+  const boundedConstraints = constraints.map((item) => item.trim());
   return [
     "You are a read-only child agent executing one explicitly assigned Compass DAG task.",
     "Do not edit, write, delete, install, commit, or run commands that mutate files or external state.",

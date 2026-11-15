@@ -73,17 +73,36 @@ async function setup(laterHandler, earlierContextHandler, cwd = "/context-integr
 test("installed runner chains frame entry and return; only committed metadata becomes active", async () => {
   const host = await setup();
   const { manager, tools, runner } = host;
+  const statuses = [];
+  async function readState(cursor) {
+    const native = runner.createContext();
+    const ctx = { cwd: native.cwd, sessionManager: native.sessionManager, hasUI: true, ui: { setStatus(key, text) { statuses.push({ key, text }); } } };
+    return JSON.parse((await tools.get("compass_state").execute("frame-state", cursor ? { cursor } : {}, undefined, undefined, ctx)).content[0].text);
+  }
+  const rootState = await readState();
+  assert.equal(rootState.goal, null, "frame use must not implicitly create a Goal");
   const proposal = await host.turn({ action: "call", expectedRevision: 0, task: "LOCAL PROCEDURE" }, { apply: false });
   assert.deepEqual(restoreContextState(manager.getBranch()), emptyContextState(), "returning drafts is not committing them");
   const beforeCommit = await tools.get("compass_context").execute("read-state", { action: "search", expectedRevision: 0 }, undefined, undefined, runner.createContext());
   assert.equal(JSON.parse(beforeCommit.content[0].text).revision, 0);
+  assert.equal((await readState(rootState.cursor)).contextFrame.active, false, "queued entry is not a committed frame");
   appendDrafts(manager, proposal.entries);
   await runner.emitContext(manager.buildSessionProjection().messages);
+  const entered = await readState(rootState.cursor);
+  assert.equal(entered.contextFrame.active, true);
+  assert.equal(entered.contextFrame.depth, 1);
+  assert.equal(entered.unchanged, undefined);
+  assert.notEqual(entered.cursor, rootState.cursor, "native context revision participates in the cursor");
+  assert.match(statuses.at(-1).text, /^frame 1 · /, "Human footer reflects the committed frame without polling");
   assert.match(modelText(manager), /LOCAL PROCEDURE/);
   assert.doesNotMatch(modelText(manager), /PARENT ONLY/);
   assertPaired(manager);
   const returned = await host.turn({ action: "return", expectedRevision: 1, result: "SELECTED RESULT" });
   assert.equal(returned.continue, true);
+  const restored = await readState(entered.cursor);
+  assert.equal(restored.contextFrame.active, false);
+  assert.equal(restored.contextFrame.depth, 0);
+  assert.equal(statuses.at(-1).text, "frame: root");
   assert.match(modelText(manager), /PARENT ONLY/);
   assert.match(modelText(manager), /SELECTED RESULT/);
   assert.doesNotMatch(modelText(manager), /LOCAL PROCEDURE/);

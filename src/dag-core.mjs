@@ -16,6 +16,8 @@ export function emptyDagState() {
     planHistory: [],
     activity: [],
     executionHistory: [],
+    execution: null,
+    executionDrift: null,
     approvalRequest: null,
     approval: null,
   };

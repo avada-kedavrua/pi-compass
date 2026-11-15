@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
-import { normalizeGoalRunState, goalOutcomeStatus, acceptanceStatus } from "../src/goal-run.mjs";
+import { normalizeGoalRunState, goalOutcomeStatus, acceptanceStatus, GOAL_RUN_API_VERSION } from "../src/goal-run.mjs";
 
 const isRecord = (value) => value && typeof value === "object" && !Array.isArray(value);
 const addCount = (map, key, amount = 1) => { map[key] = (map[key] ?? 0) + amount; };
@@ -141,7 +141,7 @@ export async function analyzeSession(file) {
     if (record.type === "custom_message" && record.customType === "pi-compass-v2.goalrun-state" && typeof record.content === "string") {
       try { rawGoalState = JSON.parse(record.content); } catch { /* not a valid state snapshot */ }
     }
-    if (isRecord(rawGoalState) && rawGoalState.schemaVersion === 7) {
+    if (isRecord(rawGoalState) && rawGoalState.schemaVersion === GOAL_RUN_API_VERSION) {
       summary.goalStateRecords += 1;
       summary.finalState = compactGoalState(rawGoalState);
     }

@@ -85,16 +85,15 @@ if (manifest?.pi?.extensions?.includes("./src/index.ts") && fs.existsSync(path.j
 let release = null;
 try { release = JSON.parse(fs.readFileSync(path.join(packageRoot, "RELEASE-MANIFEST.json"), "utf8")); } catch { /* reported below */ }
 const minimumPi = parseVersion(release?.minimumPiVersion);
-if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 7 && minimumPi) {
+if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 8 && minimumPi) {
   add("PASS", "Release identity", `Package/manifest ${release.version}; GoalRun v${release.goalRunSchemaVersion}; Pi minimum ${release.minimumPiVersion}`);
 } else add("FAIL", "Release identity", "RELEASE-MANIFEST.json must match the package and current GoalRun schema and declare a valid Pi minimum");
 const goalRunPath = path.join(packageRoot, "src", "goal-run.mjs");
 const requiredGoalRunExports = [
-  "GOAL_RUN_API_VERSION", "GOAL_RUN_RELEASE", "applyGoalChange", "dismissGoalChangeCandidate", "availableCapabilities", "acceptanceStatus", "goalOutcomeStatus", "planningActivationSignal",
-  "buildGoalDetails", "buildIssueReview", "buildRecentEvents", "buildStateSnapshot", "stripConventionSections", "triageIssue",
+  "GOAL_RUN_API_VERSION", "GOAL_RUN_RELEASE", "setGoal", "observeHumanInput", "stateCursor", "availableCapabilities", "acceptanceStatus", "goalOutcomeStatus",
+  "buildGoalDetails", "buildIssueReview", "buildRecentEvents", "buildStateSnapshot", "triageIssue",
   "defineAcceptanceCriteria", "recordAcceptanceResult", "shouldSurfaceIssueReview",
-  "captureHumanPrompt", "captureHumanDecision", "recordHumanQuestionnaireFailure", "emptyGoalRunState",
-  "explicitGoalChangeUpdates", "hasUsefulTrace",
+  "captureHumanDecision", "recordHumanQuestionnaireFailure", "emptyGoalRunState", "hasUsefulTrace",
   "mergeTrace", "normalizeGoalRunState", "recordCheckpoint", "recordDecision",
   "recordFailure", "recordWriteTarget", "recordExecutionDrift", "revisePlanState", "summarizePlanStatus",
   "transitionTasks",
@@ -102,16 +101,17 @@ const requiredGoalRunExports = [
 try {
   const goalRun = await import(pathToFileURL(goalRunPath).href);
   const missing = requiredGoalRunExports.filter((name) => !(name in goalRun) || (!["GOAL_RUN_API_VERSION", "GOAL_RUN_RELEASE"].includes(name) && typeof goalRun[name] !== "function"));
-  if (goalRun.GOAL_RUN_API_VERSION !== 7 || goalRun.GOAL_RUN_RELEASE !== manifest?.version || missing.length) {
-    add("FAIL", "GoalRun module contract", `Expected API v7 / release ${manifest?.version}; module reports API ${String(goalRun.GOAL_RUN_API_VERSION)} / release ${String(goalRun.GOAL_RUN_RELEASE)}; missing exports: ${missing.join(", ") || "none"}`);
+  if (goalRun.GOAL_RUN_API_VERSION !== 8 || goalRun.GOAL_RUN_RELEASE !== manifest?.version || missing.length) {
+    add("FAIL", "GoalRun module contract", `Expected API v8 / release ${manifest?.version}; module reports API ${String(goalRun.GOAL_RUN_API_VERSION)} / release ${String(goalRun.GOAL_RUN_RELEASE)}; missing exports: ${missing.join(", ") || "none"}`);
   } else {
-    const initial = goalRun.captureHumanPrompt(goalRun.emptyGoalRunState(), "Goal: preflight cursor contract").state;
+    const observed = goalRun.observeHumanInput(goalRun.emptyGoalRunState(), "preflight-human").state;
+    const initial = goalRun.setGoal(observed, { expectedVersion: 0, current: "Verify cursor mechanics", sourceIds: ["preflight-human"], constraints: [] }).state;
     const snapshot = goalRun.buildStateSnapshot(initial);
     const unchanged = goalRun.buildStateSnapshot(initial, snapshot.cursor);
-    if (!/^R\d+-E\d+$/.test(snapshot.cursor) || unchanged.unchanged !== true || JSON.stringify(unchanged).length > 220) {
+    if (!/^R\d+-E\d+-C\d+$/.test(snapshot.cursor) || unchanged.unchanged !== true || JSON.stringify(unchanged).length > 220) {
       add("FAIL", "State cursor contract", "Composite cursor or compact unchanged response failed the GoalRun smoke test");
     } else {
-      add("PASS", "State cursor contract", "Composite revision/event cursor and compact unchanged response work");
+      add("PASS", "State cursor contract", "Composite Goal/event/frame cursor and compact unchanged response work");
     }
     add("PASS", "GoalRun module contract", `API v${goalRun.GOAL_RUN_API_VERSION}, release ${goalRun.GOAL_RUN_RELEASE}; ${requiredGoalRunExports.length} required exports present`);
   }

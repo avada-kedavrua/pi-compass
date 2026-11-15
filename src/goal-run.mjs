@@ -34,7 +34,6 @@ export function emptyGoalRunState() {
       original: null,
       current: null,
       createdAt: null,
-      originalTruncated: false,
       sourceIds: [],
       originalSourceIds: [],
       reviewedInputId: null,
@@ -58,6 +57,7 @@ export function emptyGoalRunState() {
     triageRuns: [],
     nextTriageNumber: 1,
     projectRoot: null,
+    nativeToolSignature: null,
   };
 }
 
@@ -67,7 +67,7 @@ const clip = (value, max = 500) => {
 };
 const timestamp = () => new Date().toISOString();
 
-function normalizeHumanDecisionRecord(value, index, fallbackVersion = 1) {
+function normalizeHumanDecisionRecord(value, index, fallbackVersion = 0) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const text = clip(value.text, 2600);
   const questionnaire = normalizeQuestionnaireRecord(value.questionnaire);
@@ -78,9 +78,9 @@ function normalizeHumanDecisionRecord(value, index, fallbackVersion = 1) {
     source: clip(value.source || "unknown", 80),
     sourceEntryId: typeof value.sourceEntryId === "string" ? value.sourceEntryId.slice(0, 128) : "",
     sourceCallId: typeof value.sourceCallId === "string" ? value.sourceCallId.slice(0, 128) : "",
-    goalVersion: Number.isInteger(value.goalVersion) && value.goalVersion > 0
+    goalVersion: Number.isInteger(value.goalVersion) && value.goalVersion >= 0
       ? value.goalVersion
-      : (Number.isInteger(fallbackVersion) && fallbackVersion > 0 ? fallbackVersion : 1),
+      : (Number.isInteger(fallbackVersion) && fallbackVersion >= 0 ? fallbackVersion : 0),
     text,
     summary: clip(value.summary || text, 420),
     ...(questionnaire ? { questionnaire } : {}),
@@ -338,7 +338,6 @@ export function normalizeGoalRunState(raw) {
       original: rawGoal.original ?? null,
       current: rawGoal.current ?? null,
       createdAt: rawGoal.createdAt ?? null,
-      originalTruncated: rawGoal.originalTruncated === true,
       sourceIds: Array.isArray(rawGoal.sourceIds) ? rawGoal.sourceIds : [],
       originalSourceIds: Array.isArray(rawGoal.originalSourceIds) ? rawGoal.originalSourceIds : [],
       reviewedInputId: rawGoal.reviewedInputId ?? null,
@@ -364,6 +363,7 @@ export function normalizeGoalRunState(raw) {
       writes: Array.isArray(raw.trace?.writes) ? raw.trace.writes.slice(-MAX_WRITES) : [],
     },
     projectRoot: typeof raw.projectRoot === "string" ? raw.projectRoot : null,
+    nativeToolSignature: typeof raw.nativeToolSignature === "string" ? raw.nativeToolSignature : null,
   };
   state.triageRuns = Array.isArray(state.triageRuns) ? state.triageRuns.slice(-6) : [];
   const maxTriageNumber = state.triageRuns.reduce((max, item) => Math.max(max, Number(String(item?.id ?? "").replace(/^T/, "")) || 0), 0) + 1;
@@ -507,7 +507,10 @@ function syncAcceptanceCriteria(state, criteria, source = "plan") {
 }
 
 export function acceptanceStatus(stateValue) {
-  const state = normalizeGoalRunState(stateValue);
+  return acceptanceSummary(normalizeGoalRunState(stateValue));
+}
+
+function acceptanceSummary(state) {
   const criteria = state.goal.criteria.filter((item) => item.goalVersion === (state.goal.version ?? 1));
   if (!criteria.length) return { status: "criteria_not_defined", total: 0, passed: 0, failed: 0, blocked: 0, unverified: 0 };
   const passed = criteria.filter((item) => item.status === "reported_pass").length;
@@ -524,11 +527,13 @@ export function acceptanceStatus(stateValue) {
  * prove that an artifact or external behavior is correct.
  */
 export function goalOutcomeStatus(stateValue) {
-  const state = normalizeGoalRunState(stateValue);
+  return outcomeSummary(normalizeGoalRunState(stateValue));
+}
+
+function outcomeSummary(state, acceptance = acceptanceSummary(state)) {
   if (!state.goal.current) {
     return { status: "no_goal", evidenceLevel: "none", independentlyVerified: false, unresolvedTaskIds: [], blockedTaskIds: [], failedCriterionIds: [], blockedCriterionIds: [], unverifiedCriterionIds: [] };
   }
-  const acceptance = acceptanceStatus(state);
   const tasks = Array.isArray(state.plan?.tasks) ? state.plan.tasks : [];
   const unresolvedTaskIds = tasks.filter((task) => task.status !== "done").map((task) => task.id);
   const blockedTaskIds = tasks.filter((task) => task.status === "blocked").map((task) => task.id);
@@ -669,7 +674,6 @@ export function setGoal(stateValue, input = {}) {
     state.routeSet = null;
     state.goal.criteria = [];
     state.goal.acceptanceCriteria = [];
-    state.goal.nextAcceptanceNumber = 1;
   }
   state.goal.current = current;
   state.goal.sourceIds = [...sourceIds];
@@ -1075,10 +1079,9 @@ function parseStateCursor(value) {
   return values.every(Number.isSafeInteger) ? { revision: values[0], eventSeq: values[1], contextRevision: values[2] } : null;
 }
 
-export function stateCursor(stateValue, contextRevision = 0) {
-  const state = normalizeGoalRunState(stateValue);
-  const revision = Number.isSafeInteger(state.stateRevision) ? state.stateRevision : 0;
-  const latestEvent = Math.max(0, state.eventSeq - 1);
+export function stateCursor(state, contextRevision = 0) {
+  const revision = Number.isSafeInteger(state?.stateRevision) ? state.stateRevision : 0;
+  const latestEvent = Number.isSafeInteger(state?.eventSeq) ? Math.max(0, state.eventSeq - 1) : 0;
   const context = Number.isSafeInteger(contextRevision) && contextRevision >= 0 ? contextRevision : 0;
   return `R${revision}-E${latestEvent}-C${context}`;
 }
@@ -1102,9 +1105,11 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
   const firstSeq = state.events.length ? eventSequence(state.events[0].id) ?? latestSeq : latestSeq + 1;
   const gap = Boolean(prior && prior.eventSeq < firstSeq - 1 && prior.eventSeq < latestSeq);
   const currentEvents = state.events.filter((event) => event.goalVersion === state.goal.version);
-  const deltaEvents = prior && !gap && !ahead
-    ? currentEvents.filter((event) => (eventSequence(event.id) ?? 0) > prior.eventSeq).slice(-8)
-    : currentEvents.slice(-4);
+  const matchingEvents = prior && !gap && !ahead
+    ? currentEvents.filter((event) => (eventSequence(event.id) ?? 0) > prior.eventSeq)
+    : currentEvents;
+  const deltaEvents = matchingEvents.slice(prior && !gap && !ahead ? -8 : -4);
+  const omitted = matchingEvents.length - deltaEvents.length;
   const plan = state.plan?.goal && state.plan.tasks.length ? {
     revision: state.plan.revision,
     total: state.plan.tasks.length,
@@ -1114,8 +1119,8 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
     remaining: state.plan.tasks.filter((task) => task.status !== "done").length,
   } : undefined;
   const criteria = state.goal.criteria.filter((item) => item.goalVersion === state.goal.version);
-  const outcome = goalOutcomeStatus(state);
-  const acceptanceStatusValue = acceptanceStatus(state);
+  const acceptanceStatusValue = acceptanceSummary(state);
+  const outcome = outcomeSummary(state, acceptanceStatusValue);
   const outcomeCaveat = acceptanceStatusValue.status === "reported_satisfied" && state.plan.tasks.some((task) => task.status === "blocked")
     ? `Acceptance is Agent-reported satisfied, but DAG task(s) remain blocked: ${state.plan.tasks.filter((task) => task.status === "blocked").map((task) => task.id).join(", ")}. Explain the blocker before claiming the overall Goal outcome is achieved.`
     : null;
@@ -1128,13 +1133,11 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
     ...(outcomeCaveat ? { caveat: clip(outcomeCaveat, 320) } : {}),
     ...(state.latestHumanEntryId ? { input: { id: state.latestHumanEntryId, reviewed: state.goal.reviewedInputId === state.latestHumanEntryId } } : {}),
     ...(plan ? { plan } : {}),
-    ...(criteria.length ? { acceptance: { status: acceptanceStatus(state).status, total: criteria.length, counts: {
-      passed: criteria.filter((item) => item.status === "reported_pass").length,
-      failed: criteria.filter((item) => item.status === "failed").length,
-      blocked: criteria.filter((item) => item.status === "blocked").length,
-      unverified: criteria.filter((item) => !["reported_pass", "failed", "blocked"].includes(item.status)).length,
+    ...(criteria.length ? { acceptance: { status: acceptanceStatusValue.status, total: criteria.length, counts: {
+      passed: acceptanceStatusValue.passed, failed: acceptanceStatusValue.failed,
+      blocked: acceptanceStatusValue.blocked, unverified: acceptanceStatusValue.unverified,
     } } } : {}),
-    ...(prior ? { delta: { events: deltaEvents.map(compactEvent), ...(gap ? { historyGap: true } : {}), ...(ahead ? { cursorAhead: true } : {}) } } : {}),
+    ...(prior ? { delta: { events: deltaEvents.map(compactEvent), ...(omitted ? { omitted } : {}), ...(gap ? { historyGap: true } : {}), ...(ahead ? { cursorAhead: true } : {}) } } : {}),
   };
   return result;
 }
@@ -1204,16 +1207,7 @@ export function availableCapabilities(stateValue) {
 export function buildRecentEvents(stateValue, limit = 12) {
   const state = normalizeGoalRunState(stateValue);
   const count = Math.max(1, Math.min(20, Number.isInteger(limit) ? limit : 12));
-  const canonical = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
-  const knownGoals = [state.goal.original, state.goal.current].filter(Boolean).map(canonical);
-  const relevant = state.events.filter((item) => {
-    if (item.kind === "goal_created") return false; // Goal details are available directly from GoalRun.
-    if (item.kind !== "human_update") return true;
-    const text = canonical(item.text);
-    // Goal text is available from GoalRun itself; don't echo it as an event.
-    return !text || !knownGoals.includes(text);
-  });
-  return relevant.slice(-count).map((item) => ({
+  return state.events.filter((item) => item.kind !== "goal_created").slice(-count).map((item) => ({
     id: item.id, at: item.at, goalVersion: item.goalVersion, kind: item.kind,
     source: item.source, summary: item.summary, ref: item.ref ?? null, status: item.status ?? null,
   }));

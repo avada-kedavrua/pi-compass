@@ -1,5 +1,7 @@
 # First Live Test — Pi Compass V2 v0.9.1
 
+> Historical v0.9.x record, not current instructions. The old automatic live-test helpers were removed in v0.10; use the [current native acceptance path](../README.md#human-acceptance).
+
 The user has supplied a read-only contract report from `pi-subagents@0.84.0`. Its public delegation declaration and runtime export are byte-identical to the retained 0.83.1 baseline, and the updated offline contract checker passes. The remaining blocker is the real Pi/provider request-response cycle.
 
 ## One-command acceptance

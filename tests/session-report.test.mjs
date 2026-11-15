@@ -4,12 +4,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { analyzeSession, formatReport } from "../scripts/session-report.mjs";
-import { emptyGoalRunState, captureHumanPrompt } from "../src/goal-run.mjs";
+import { createGoalState } from "./helpers/goal-state.mjs";
 
 test("session report distinguishes top-level calls, logged nested calls, errors, and usage", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "compass-session-report-"));
   const file = path.join(dir, "sample.jsonl");
-  const goalState = captureHumanPrompt(emptyGoalRunState(), "Goal: sample report").state;
+  const goalState = createGoalState("Sample report");
   const records = [
     { type: "session", id: "sample-session", timestamp: "2026-10-26T00:00:00.000Z" },
     { type: "custom", customType: "pi-compass-v2.goalrun", data: goalState, timestamp: "2026-10-26T00:00:00.500Z" },

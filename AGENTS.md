@@ -6,7 +6,7 @@ This is an Agent-only local Pi extension. Keep changes scoped, evidence-driven, 
 
 - Goal: lower total cost to complete arbitrary Goals without lowering delivery quality.
 - Use code for deterministic mechanics: state transitions, dependency readiness, schema validation, visibility gates, duplicate detection, path-scope checks, and measurement.
-- Keep `parent`, `code`, and `subagent` executor intent explicit on DAG tasks. A Subagent task must be read-only. GoalRun schema v7 and context schema v4 are current-only; unsupported snapshots fail visibly without migration or silent reset.
+- Keep `parent`, `code`, and `subagent` executor intent explicit on DAG tasks. A Subagent task must be read-only. GoalRun schema v8 and context schema v4 are current-only; unsupported snapshots fail visibly without migration or silent reset.
 - The model chooses decomposition and executor; code validates state and safety boundaries.
 - Compass automatically dispatches only exactly Human-approved, ready `executor=subagent` + `writeScope=read-only` tasks through the documented pi-subagents structured delegation API at the `tool_result` boundary. A `before_agent_start` sweep recovers a persisted ready DAG if that boundary was missed, after checking the latest Human instruction and exact Current Goal. It consumes structured results; it never ignores child feedback.
 - Do not call the model-visible `subagent` tool recursively from a `tool_call` hook. Use the documented structured-delegation event contract from a supported event callback/application step.
@@ -16,7 +16,7 @@ This is an Agent-only local Pi extension. Keep changes scoped, evidence-driven, 
 - Fallback is one narrow retry for recognized provider quota/rate-limit or availability errors. Never retry semantic task failure, structured-output failure, child deadline or unknown dispatch outcome.
 - GoalRun is the single source of truth for current Goal state. Original Goal, Current Goal, Human constraints, decisions, plan, and acceptance must not drift into separate stores.
 - Do not build a second conventions registry. Project/repository `AGENTS.md` and explicit Human instructions own working conventions.
-- Only direct top-level Goal replacement commands may auto-change Current Goal. Embedded or quoted Goal mentions are ordinary context.
+- Only the Agent explicitly creates/reaffirms/replaces semantic Goals through compass_goal. Runtime records native Human input identity, never infers Goals, constraints, acceptance, scope candidates or capability intent from prose. New Human input pauses approved progression until the Agent reviews it; unchanged semantics preserve exact Human approval. Raw Human messages remain native Pi records.
 - Fixed operation schemas stay stable across task status/criterion changes. Runtime validates IDs and preconditions; stale references fail without mutation.
 - `compass_state` is the compact default read. Hide `compass_open` when no applicable unloaded capability remains.
 - Prefer composite cursor deltas and one compact state read over repeated full Goal/Plan/History/Acceptance reads.

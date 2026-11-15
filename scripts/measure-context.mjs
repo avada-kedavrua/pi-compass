@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks";
 import { pathToFileURL } from "node:url";
 import { piRoot } from "./register-pi-host-typebox.mjs";
 import { contentVersion, pinnedContextOverlay, planContextBoundary, planWatchBoundary, restoreContextState, searchContext } from "../src/context-core.mjs";
+import { buildStateSnapshot, emptyGoalRunState, observeHumanInput, setGoal } from "../src/goal-run.mjs";
 const { SessionManager } = await import(new URL("dist/core/session-manager.js", pathToFileURL(`${piRoot}/`)));
 
 const count = Number.parseInt(process.env.PI_COMPASS_MEASURE_MESSAGES ?? "1000", 10);
@@ -52,8 +53,14 @@ const compacted = manager.buildSessionProjection().messages;
 const overlay = sample(() => pinnedContextOverlay(manager.getBranch(), retained, compacted, 1));
 const nativeBytes = Buffer.byteLength(JSON.stringify(compacted), "utf8");
 const outgoingBytes = Buffer.byteLength(JSON.stringify([...compacted, ...overlay.result]), "utf8");
+const goalState = setGoal(observeHumanInput(emptyGoalRunState(), source.id).state, {
+  expectedVersion: 0, current: "Measure bounded Compass context operations", sourceIds: [source.id], constraints: [],
+}).state;
+const goalRead = sample(() => buildStateSnapshot(goalState));
+const unchangedRead = sample(() => buildStateSnapshot(goalState, goalRead.result.cursor));
 const result = {
   schemaVersion: 1,
+  goalStateRead: { medianMs: Number(goalRead.medianMs.toFixed(3)), bytes: Buffer.byteLength(JSON.stringify(goalRead.result), "utf8"), unchangedBytes: Buffer.byteLength(JSON.stringify(unchangedRead.result), "utf8") },
   messages: count,
   branchEntries: branch.length,
   retrieval: { medianMs: Number(retrieval.medianMs.toFixed(3)), hits: retrieval.result.hits.length, scanned: retrieval.result.scanned, truncated: retrieval.result.truncated },

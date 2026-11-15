@@ -4,6 +4,7 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 
 ## What 0.10.0 provides
 
+- Agent-owned semantic Goals through explicit `compass_goal`: native Human source references, versioned updates, declared constraints and optional acceptance. No prose classifier, Goal-change candidate registry or duplicate transcript.
 - Same-session attention frames with explicit `ref`/`copy` capture, scoped values, copy-on-write, versioned source IDs and protocol-safe return/drop/edit operations.
 - Qualified retention through native compaction boundaries. Pinned data is user-context data, not system authority; original Human messages and executed calls remain read-only.
 - On-demand active/parent/history lexical recovery, source-verified Agent ranking, exact range loads and moves, and verified project-relative artifact spill/reload.
@@ -30,7 +31,7 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 
 ## Install
 
-From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
+From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v8/context v4 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
 
 ## Local validation
 
@@ -50,12 +51,12 @@ See the canonical [local verification results](docs/architecture-v0.10.0.md#fina
 In a disposable Pi session rooted at this package (or an explicit safe fixture project):
 
 1. Run `/compass-preflight` and confirm the active registry and native dependencies.
-2. Capture a simple Goal and verify the light loadout remains light.
-3. Use `compass_context` for a small `call`/`return`, then search and pin one qualified value. Compact or navigate only through native Pi operations and verify the value remains qualified.
-4. In **another fresh disposable session, before capturing any Goal**, run `/compass-live-acceptance` only if provider cost is acceptable. It performs real read-only child work and writes a bounded report under `/tmp`.
-5. Inspect the report and session behavior. A local test pass is not a live provider acceptance result.
+2. Ask the Agent to record a simple semantic Goal via `compass_goal`; verify a DAG is not required. Send a clarification: raw text must not replace the Goal. The Agent explicitly reviews/reaffirms or updates it.
+3. Use `compass_context` for a small `call`/`return`. Check the footer changes between `frame: root` and the committed frame identity, then search and pin one qualified value. Compact or navigate only through native Pi operations and verify the value remains qualified.
+4. Only when provider cost is acceptable, ask the Agent to create a small read-only DAG: two independent inspections and a third depending on both. Review and answer the exact native Human approval questionnaire. The Agent must assess prerequisite evidence before the dependent task starts; parent/Code Mode work must stay with the parent.
+5. Inspect actual native child identities, task evidence, assessments and unknown/stale handling. Export a redacted report with `node scripts/session-report.mjs <session.jsonl> --json`. A local test pass is not live provider acceptance.
 
-Do not use a production session for the live acceptance command. It refuses non-empty Goal state, but provider calls and filesystem fixtures still have real effects.
+Use a disposable session/project: provider calls and filesystem effects remain real. The obsolete automatic live-test command/launcher was removed; acceptance uses the same Agent, native questionnaire and scheduler as ordinary work, not a synthetic dispatch bypass.
 
 ## References
 

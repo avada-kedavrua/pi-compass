@@ -1,5 +1,7 @@
 # Pi Compass V2 0.9.1 — Validation Record
 
+> Historical v0.9.x record, not current instructions. The old automatic live-test helpers were removed in v0.10; use the [current native acceptance path](../README.md#human-acceptance).
+
 Date: 2026-10-31
 
 ## 1. User-provided v0.9.0 acceptance evidence

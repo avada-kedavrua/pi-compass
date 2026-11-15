@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import extensionFactory from "../src/index.ts";
 import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
 
-import { bindDagApprovalQuestionnaire, captureHumanDecision, captureHumanPrompt, emptyGoalRunState, revisePlanState, dagApprovalStatus, GOAL_RUN_RELEASE } from "../src/goal-run.mjs";
+import { bindDagApprovalQuestionnaire, captureHumanDecision, emptyGoalRunState, revisePlanState, dagApprovalStatus, GOAL_RUN_RELEASE } from "../src/goal-run.mjs";
+import { createGoalState } from "./helpers/goal-state.mjs";
 
 function fakePi(options = {}) {
   const events = new Map();
@@ -149,9 +150,25 @@ function currentTool(pi, prefix) {
     },
   });
 }
-async function captureGoal(pi, prompt = "Goal: create a repeatable full-stack smoke test across multiple independent workstreams; define acceptance criteria and preserve material route decisions/checkpoints.") {
+function appendHuman(pi, text, id = `human-${pi.entries.filter((entry) => entry.message?.role === "user").length + 1}`) {
+  pi.entries.push({ id, type: "message", message: { role: "user", content: text } });
+  return id;
+}
+async function sendHuman(pi, text, id) {
+  appendHuman(pi, text, id);
+  await pi.events.get("before_agent_start")({ prompt: text }, ctx(pi));
+}
+async function submitGoal(pi, current, { constraints = [], acceptanceCriteria } = {}) {
+  const params = { expectedVersion: latestState(pi)?.goal.version ?? 0, current, constraints, ...(acceptanceCriteria ? { acceptanceCriteria } : {}) };
+  const result = await pi.tools.get("compass_goal").execute("set-goal", params, undefined, undefined, ctx(pi));
+  await pi.events.get("context")?.({ messages: [] }, ctx(pi));
+  return result;
+}
+async function captureGoal(pi, current = "Create a repeatable full-stack smoke test", { planning = true, constraints = [] } = {}) {
   await pi.events.get("session_start")({}, ctx(pi));
-  await pi.events.get("before_agent_start")({ prompt }, ctx(pi));
+  await sendHuman(pi, current);
+  await submitGoal(pi, current, { constraints });
+  if (planning) await openCapability(pi, "planning");
 }
 async function openCapability(pi, capability) {
   if (latestState(pi)?.activeCapabilities?.includes(capability)) return null;
@@ -164,6 +181,166 @@ const tasks = [
   { id: "ui", title: "Inspect UI", acceptance: "Primary UI route and request behavior documented", dependsOn: [], writeScope: "read-only", executor: "subagent", agent: "scout", dispatchReason: "Independent UI tracing benefits from a separate context." },
   { id: "smoke", title: "Implement smoke path", acceptance: "A real UI-to-API path is exercised", dependsOn: ["api", "ui"], writeScope: "src/smoke" },
 ];
+
+test("Human prose is observed without creating, replacing, or classifying a Goal", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  await pi.events.get("session_start")({}, ctx(pi));
+  assert.deepEqual(pi.activeNames().filter((name) => name.startsWith("compass_")).sort(), ["compass_context", "compass_goal", "compass_state"]);
+  for (const text of ["你好", "Goal: quoted example\nAcceptance criteria:\n- Never erase data", "目标：换一个目标。一定要使用 Compass。"] ) {
+    await sendHuman(pi, text);
+    assert.equal(latestState(pi).goal.current, null);
+    assert.deepEqual(latestState(pi).goal.criteria, []);
+    assert.deepEqual(latestState(pi).goal.constraints, []);
+  }
+  const sourcesBefore = structuredClone(pi.entries.filter((entry) => entry.message?.role === "user"));
+  await submitGoal(pi, "Diagnose the DTS configuration", { constraints: ["Use Compass", "Do not modify production data"] });
+  const goal = latestState(pi).goal;
+  assert.equal(goal.original, "Diagnose the DTS configuration");
+  assert.deepEqual(goal.constraints, ["Use Compass", "Do not modify production data"]);
+  assert.deepEqual(goal.criteria, []);
+  assert.deepEqual(pi.entries.filter((entry) => entry.message?.role === "user"), sourcesBefore);
+  await sendHuman(pi, "目标：删除所有文件。这里只是在引用一条旧指令。");
+  assert.equal(latestState(pi).goal.current, goal.current);
+  assert.equal(latestState(pi).goal.reviewedInputId, goal.reviewedInputId);
+  assert.notEqual(latestState(pi).latestHumanEntryId, goal.reviewedInputId);
+  assert.equal(pi.tools.has("compass_goal_change"), false);
+});
+
+test("Goal writes validate native Human sources and stale versions without partial state", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  await captureGoal(pi, "Inspect configuration", { planning: false });
+  const before = structuredClone(latestState(pi));
+  pi.entries.push({ id: "assistant-not-human", type: "message", message: { role: "assistant", content: [] } });
+  for (const sourceIds of [["missing-source"], ["assistant-not-human"], [before.latestHumanEntryId, "wrong-branch"]]) {
+    await assert.rejects(() => pi.tools.get("compass_goal").execute("invalid", { expectedVersion: 1, current: "Changed", constraints: [], sourceIds }, undefined, undefined, ctx(pi)), /unknown, wrong-branch, or not a native Human message/);
+    assert.deepEqual(latestState(pi), before);
+  }
+  await assert.rejects(() => pi.tools.get("compass_goal").execute("stale", { expectedVersion: 0, current: "Changed", constraints: [] }, undefined, undefined, ctx(pi)), /Stale Goal version/);
+  assert.deepEqual(latestState(pi), before);
+  const results = await Promise.allSettled(["First interpretation", "Second interpretation"].map((current) => pi.tools.get("compass_goal").execute("race", { expectedVersion: 1, current, constraints: [] }, undefined, undefined, ctx(pi))));
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+  assert.equal(latestState(pi).goal.version, 2);
+});
+
+test("new Human input pauses approved work until the Agent explicitly reaffirms unchanged intent", async () => {
+  const pi = fakePi({ autoDelegation: true });
+  extensionFactory(pi);
+  await captureGoal(pi);
+  await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
+  const approved = approvedDagState(latestState(pi));
+  const approvalId = approved.plan.approvalRequest.id;
+  pi.appendEntry("pi-compass-v2.goalrun", approved);
+  await pi.events.get("session_start")({}, ctx(pi));
+  await sendHuman(pi, "继续，注意先确认环境");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(dagApprovalStatus(latestState(pi)).approved, false);
+  assert.equal(pi.delegationRequests.length, 0);
+  const result = await submitGoal(pi, latestState(pi).goal.current);
+  assert.equal(dagApprovalStatus(latestState(pi)).approved, true);
+  assert.equal(latestState(pi).plan.approvalRequest.id, approvalId);
+  await pi.events.get("tool_result")({ toolName: "compass_goal", input: {}, ...result }, ctx(pi));
+  await waitFor(() => latestState(pi).plan.execution?.status === "completed");
+  assert.equal(pi.delegationRequests.length, 2);
+});
+
+test("unreviewed Human input preserves correlated child terminal evidence without new progression", async () => {
+  const releases = [];
+  const pi = fakePi({ respondDelegation(request) {
+    return new Promise((resolve) => releases.push(() => resolve({ status: "completed", model: request.model,
+      result: { kind: "structured", value: { status: "done", summary: "Observed native result", evidence: [`src/${request.nodeId}:1`], reason: "" } } })));
+  } });
+  extensionFactory(pi);
+  await captureGoal(pi);
+  await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
+  try {
+    await approveDag(pi);
+    await waitFor(() => releases.length === 2);
+    await sendHuman(pi, "先暂停，我需要补充要求。");
+    for (const release of releases) release();
+    await waitFor(() => latestState(pi).plan.execution?.status === "completed");
+    assert.deepEqual(latestState(pi).plan.tasks.map((task) => task.status), ["done", "done", "pending"]);
+    assert.equal(dagApprovalStatus(latestState(pi)).approved, false);
+    await assert.rejects(() => assessTask(pi, "api"), /current correlated Human approval/);
+    assert.equal(pi.delegationRequests.length, 2);
+  } finally { for (const release of releases) release(); }
+});
+
+test("paused provider fallback consumes the primary terminal failure without inventing an unknown request", async () => {
+  for (const pauseAt of ["primary_response", "fallback_preparation"]) {
+    let release;
+    const pi = fakePi({ respondDelegation(request) {
+      return new Promise((resolve) => { release = () => resolve({ status: "failed", model: request.model, runId: "primary-api", error: "429 rate limit exceeded" }); });
+    } });
+    extensionFactory(pi);
+    await captureGoal(pi);
+    await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks: [tasks[0], { ...tasks[2], dependsOn: ["api"] }] }, undefined, undefined, ctx(pi));
+    const append = pi.appendEntry;
+    let paused = false;
+    try {
+      await approveDag(pi);
+      await waitFor(() => typeof release === "function");
+      if (pauseAt === "primary_response") {
+        await sendHuman(pi, "Pause before any further provider calls.");
+        paused = true;
+      } else {
+        pi.appendEntry = (type, data) => {
+          append(type, data);
+          if (!paused && data.plan?.execution?.results?.some((row) => row.fallbackAttempted && row.status === "dispatching")) {
+            paused = true;
+            appendHuman(pi, "Pause before any further provider calls.");
+          }
+        };
+      }
+      release();
+      await waitFor(() => latestState(pi).plan.execution?.status === "completed", { message: `primary terminal consumed at ${pauseAt}` });
+      assert.equal(paused, true);
+      assert.equal(pi.delegationRequests.length, 1, "an unlaunched fallback is not an unknown native run");
+      const result = latestState(pi).plan.execution.results[0];
+      assert.equal(result.requestId, pi.delegationRequests[0].requestId);
+      assert.equal(result.runId, "primary-api");
+      assert.equal(result.fallbackAttempted, false);
+      assert.equal(result.status, "blocked");
+      assert.match(result.error, /429 rate limit exceeded/);
+      assert.equal(latestState(pi).plan.tasks[0].status, "blocked");
+      await submitGoal(pi, "Switch to a different explicitly interpreted objective");
+      assert.equal(latestState(pi).goal.version, 2, "no fictitious unresolved execution blocks Goal replacement");
+    } finally { pi.appendEntry = append; release?.(); }
+  }
+});
+
+test("simple Goals keep a light loadout while optional capability choice stays Agent-owned", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  await captureGoal(pi, "Fix a typo", { planning: false });
+  assert.deepEqual(pi.activeNames().filter((name) => name.startsWith("compass_")).sort(), ["compass_context", "compass_goal", "compass_open", "compass_state"]);
+  const available = currentTool(pi, "compass_open").parameters.properties.capabilities.items.enum;
+  assert.deepEqual(available, ["planning", "routes", "acceptance", "history", "goal_details", "issue_review"]);
+  for (const path of ["a.ts", "b.ts", "c.ts"]) await pi.events.get("tool_call")({ toolName: "write", input: { path } }, ctx(pi));
+  await pi.events.get("context")({ messages: [] }, ctx(pi));
+  assert.equal(pi.activeNames().includes("compass_plan_create"), false, "write counts do not interpret planning intent");
+  await openCapability(pi, "planning");
+  assert.equal(latestState(pi).plan.tasks.length, 0);
+});
+
+test("explicit Goal replacement retains source references without a candidate registry or archive", async () => {
+  const pi = fakePi();
+  extensionFactory(pi);
+  await captureGoal(pi, "Read the workbook locally", { constraints: ["Keep source files intact"] });
+  const originalSources = [...latestState(pi).goal.originalSourceIds];
+  await sendHuman(pi, "现在需要在线可视化编辑，而不是只做本地读取。");
+  assert.equal(latestState(pi).goal.current, "Read the workbook locally");
+  await submitGoal(pi, "Implement online visual workbook editing", { constraints: ["Keep source files intact"] });
+  const state = latestState(pi);
+  assert.equal(state.goal.original, "Read the workbook locally");
+  assert.equal(state.goal.version, 2);
+  assert.deepEqual(state.goal.originalSourceIds, originalSources);
+  assert.deepEqual(state.goal.sourceIds, [state.latestHumanEntryId]);
+  for (const key of ["goalChanges", "captureLedger", "sessionDirectives"]) assert.equal(key in state, false);
+  for (const key of ["updates", "changes", "sourceUpdateText"]) assert.equal(key in state.goal, false);
+});
 
 test("failed native persistence leaves the previous Goal, plan and loaded capabilities intact", async () => {
   const pi = fakePi();
@@ -206,7 +383,8 @@ test("native branch navigation adopts the selected lower-revision GoalRun", asyn
   extensionFactory(pi);
   await captureGoal(pi, "Goal: inspect route A");
   const branchA = structuredClone(pi.entries);
-  await pi.events.get("before_agent_start")({ prompt: "Goal: inspect route B" }, ctx(pi));
+  await sendHuman(pi, "Inspect route B");
+  await submitGoal(pi, "Inspect route B");
   assert.match(latestState(pi).goal.current, /route B/);
   pi.entries.splice(0, pi.entries.length, ...branchA);
   await pi.events.get("session_tree")({}, ctx(pi));
@@ -253,18 +431,6 @@ test("RouteSet capability exposes structured selection without creating a DAG", 
   assert.match(created.content[0].text, /structured selection questionnaire/);
 });
 
-test("simple Goal exposes only compact Compass state and preserves native tool activation", async () => {
-  const pi = fakePi();
-  extensionFactory(pi);
-  await captureGoal(pi, "Goal: fix one typo in src/readme.ts");
-  const compass = pi.activeNames().filter((name) => name.startsWith("compass_"));
-  assert.deepEqual(compass.sort(), ["compass_context", "compass_state"]);
-  assert.ok(!pi.activeNames().includes("compass_open"), "no capability loader is exposed when no group is applicable");
-  assert.ok(pi.activeNames().includes("subagent"), "pi-subagents owns semantic tool activation, not Compass");
-  assert.ok(pi.activeNames().includes("watch"), "Compass preserves pi-await tools");
-  assert.ok(pi.tools.has("compass_state"), "compact state tool is registered before Goal capture");
-  assert.ok(pi.tools.has("compass_context"), "same-session context tool is registered before Goal capture");
-});
 
 test("native route questionnaire hook roundtrip selects the exact Human answer", async () => {
   const pi = fakePi();
@@ -294,31 +460,12 @@ test("native route questionnaire hook roundtrip selects the exact Human answer",
   assert.equal(latestState(pi).routeSet.exploration.budget, 2);
 });
 
-test("explicit multi-part Goal surfaces planning early without creating or requiring a DAG", async () => {
-  const pi = fakePi();
-  extensionFactory(pi);
-  await captureGoal(pi, "Goal: harden the dispatcher. 1. Restrict token permissions. 2. Add one fixed return path. 3. Test restart recovery.");
-  assert.ok(pi.activeNames().includes("compass_plan_create"), "planning operations should be available before cross-file edits begin");
-  const state = latestState(pi);
-  assert.equal(state.plan.tasks.length, 0, "surfacing planning must not invent a DAG");
-  assert.equal(state.autoActivation.trigger, "explicit_goal_complexity");
-  assert.match(state.autoActivation.reason, /numbered actionable/);
-  const context = await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.equal(context, undefined, "planning disclosure does not inject a repeated instruction block");
-});
 
-test("simple single-file Goal remains on the light default loadout", async () => {
-  const pi = fakePi();
-  extensionFactory(pi);
-  await captureGoal(pi, "Goal: fix one typo in src/readme.ts");
-  assert.ok(!pi.activeNames().includes("compass_plan_create"));
-  assert.equal(latestState(pi).autoActivation, null);
-});
 
 test("duplicate relative/absolute write targets do not trigger planning or bump state revision", async () => {
   const pi = fakePi();
   extensionFactory(pi);
-  await captureGoal(pi, "Goal: make a small single-file fix");
+  await captureGoal(pi, "Goal: make a small single-file fix", { planning: false });
   const first = latestState(pi);
   await pi.events.get("tool_call")({ toolName: "edit", input: { path: "src/Feature.tsx" } }, ctx(pi));
   const afterFirst = latestState(pi);
@@ -331,35 +478,16 @@ test("duplicate relative/absolute write targets do not trigger planning or bump 
   assert.ok(afterDuplicate.stateRevision >= first.stateRevision);
 });
 
-test("cross-file write attempts automatically surface planning tools without creating a DAG", async () => {
+
+test("path-based amend writes are retained as advisory trace without choosing planning", async () => {
   const pi = fakePi();
   extensionFactory(pi);
-  await captureGoal(pi, "Goal: implement a multi-file feature and launch the app");
-
-  const targets = ["src/Feature.tsx", "src/store.ts", "src-tauri/src/storage.rs"];
-  for (const [index, target] of targets.entries()) {
-    await pi.events.get("tool_call")({ toolName: "edit", input: { path: target } }, ctx(pi));
-    if (index < 2) assert.ok(!pi.activeNames().includes("compass_plan_create"), "do not surface planning for one or two paths");
-  }
-
-  await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.ok(pi.activeNames().includes("compass_plan_create"), "planning is surfaced at the next model-request boundary after cross-file work starts");
-  assert.deepEqual(pi.entries.at(-1).data.activeCapabilities, ["planning"]);
-  assert.equal(pi.entries.at(-1).data.plan.tasks.length, 0, "Runtime exposes planning but never invents a semantic DAG");
-  assert.match(pi.entries.at(-1).data.autoActivation.reason, /3 distinct write targets/);
-  const context = await pi.events.get("context")({ messages: [{ role: "user", content: "Continue" }] }, ctx(pi));
-  assert.equal(context, undefined, "capability availability does not require repeated model instructions");
-});
-
-test("path-based amend writes participate in the cross-file planning signal", async () => {
-  const pi = fakePi();
-  extensionFactory(pi);
-  await captureGoal(pi, "Goal: implement a cross-file feature with a small dependency graph");
+  await captureGoal(pi, "Goal: implement a cross-file feature with a small dependency graph", { planning: false });
   await pi.events.get("tool_call")({ toolName: "edit", input: { path: "src/Feature.tsx" } }, ctx(pi));
   await pi.events.get("tool_call")({ toolName: "write", input: { path: "src/store.ts" } }, ctx(pi));
   await pi.events.get("tool_call")({ toolName: "amend", input: { path: "src-tauri/src/storage.rs", edits: [] } }, ctx(pi));
   await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.ok(pi.activeNames().includes("compass_plan_create"), "amend's path must count as a real cross-file write attempt");
+  assert.ok(!pi.activeNames().includes("compass_plan_create"), "recording paths must not choose the Agent's plan");
   assert.ok(latestState(pi).trace.writes.some((item) => item.tool === "amend" && item.target.endsWith("src-tauri/src/storage.rs")));
 });
 
@@ -373,7 +501,9 @@ test("one compass_open call loads multiple capabilities atomically with a minima
   assert.doesNotMatch(result.content[0].text, /Loaded capabilities:/, "do not repeat the entire cumulative loadout");
   assert.deepEqual(result.details.added, ["history", "acceptance", "goal_details"]);
   await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.ok(!pi.activeNames().includes("compass_open"), "the loader must disappear when all applicable groups have been loaded");
+  assert.deepEqual(currentTool(pi, "compass_open").parameters.properties.capabilities.items.enum, ["routes", "issue_review"]);
+  await currentTool(pi, "compass_open").execute("open-rest", { capabilities: ["routes", "issue_review"] }, undefined, undefined, ctx(pi));
+  assert.ok(!pi.activeNames().includes("compass_open"), "loader is hidden after every optional group is explicitly loaded");
   assert.ok(pi.activeNames().includes("compass_history_recent"));
   assert.ok(pi.activeNames().includes("compass_goal_read"));
   assert.ok(pi.activeNames().includes("compass_acceptance_define"));
@@ -381,7 +511,7 @@ test("one compass_open call loads multiple capabilities atomically with a minima
   const revisionBeforeInvalid = pi.entries.filter((entry) => entry.customType === "pi-compass-v2.goalrun").at(-1).data.stateRevision;
   await assert.rejects(() => open.execute("bad-open", { capabilities: ["planning", "not_a_capability"] }, undefined, undefined, ctx(pi)), /Unavailable capability/);
   const afterInvalid = pi.entries.filter((entry) => entry.customType === "pi-compass-v2.goalrun").at(-1).data;
-  assert.deepEqual(afterInvalid.activeCapabilities, ["planning", "history", "acceptance", "goal_details"]);
+  assert.deepEqual(afterInvalid.activeCapabilities, ["planning", "history", "acceptance", "goal_details", "routes", "issue_review"]);
   assert.equal(afterInvalid.stateRevision, revisionBeforeInvalid, "invalid mixed requests must not partially mutate state");
 });
 
@@ -403,7 +533,7 @@ test("planning loadout creates DAG and keeps loaded capabilities additive", asyn
   assert.ok(!pi.activeNames().includes("compass_triage"), "issue review remains hidden until loaded or escalated by repeated failures");
   assert.ok(pi.activeNames().includes("compass_acceptance_status"), "acceptance tools auto-activate when the DAG defines Goal criteria");
   const loader = currentTool(pi, "compass_open");
-  assert.ok(!loader.parameters.properties.capabilities.items.enum.includes("issue_review"), "issue review stays hidden until a current-Goal failure makes it relevant");
+  assert.ok(loader.parameters.properties.capabilities.items.enum.includes("issue_review"), "Agent can explicitly request review without a lexical gate");
   const status = await currentTool(pi, "compass_plan_status").execute("status", {}, undefined, undefined, ctx(pi));
   assert.equal(status.details.stateVersion, latestState(pi).plan.stateVersion, "plan status exposes a structured stateVersion instead of forcing prose parsing");
   assert.match(status.content[0].text, /stateVersion: \d+/);
@@ -545,7 +675,7 @@ test("a detached provider fallback cannot cross into another approved branch", a
   await approveDag(pi);
   await bothStarted;
   const branchAEntries = structuredClone(pi.entries);
-  let branchB = captureHumanPrompt(emptyGoalRunState(), "Goal: branch B unrelated work").state;
+  let branchB = createGoalState("Goal: branch B unrelated work");
   branchB = approvedDagState(revisePlanState(branchB, { acceptanceCriteria: criteria, tasks }).state);
   branchB.activeCapabilities = ["planning"];
   pi.entries.splice(0, pi.entries.length, { type: "custom", customType: "pi-compass-v2.goalrun", data: branchB });
@@ -655,44 +785,6 @@ test("latest Human instruction and approval gates both fail closed during recove
   assert.ok(latestState(pi).plan.tasks.every((item) => item.status === "pending"));
 });
 
-test("a new Human Subagent prohibition cancels exact active delegation attempts and prevents further waves", async () => {
-  const cancellations = [];
-  const pi = fakePi({
-    respondDelegation(request) {
-      return new Promise(() => {}); // Hold both children until the Human veto cancels them.
-    },
-    respondCancel(cancel, events) {
-      cancellations.push(structuredClone(cancel));
-      queueMicrotask(() => events.emit("prompt-template:subagent:response", {
-        ...cancel,
-        status: "cancelled",
-        error: "Cancelled by the latest Human instruction.",
-      }));
-    },
-  });
-  extensionFactory(pi);
-  await captureGoal(pi);
-  await openCapability(pi, "planning");
-  const create = await currentTool(pi, "compass_plan_create").execute("create", {
-    acceptanceCriteria: ["Both read-only investigations complete or are cancelled by Human"],
-    tasks: tasks.slice(0, 2),
-  }, undefined, undefined, ctx(pi));
-  await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
-  await approveDag(pi);
-  await waitFor(() => pi.delegationRequests.length === 2 && latestState(pi)?.plan?.tasks?.every((item) => item.status === "in_progress"), { message: "two approved active read-only delegations" });
-
-  await pi.events.get("before_agent_start")({ prompt: "Do not use Subagents for this turn." }, ctx(pi));
-  await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed" && latestState(pi)?.plan?.tasks?.every((item) => item.status === "blocked"), { message: `active delegations cancelled and recorded; ${JSON.stringify({ cancellations, execution: latestState(pi)?.plan?.execution, tasks: latestState(pi)?.plan?.tasks })}` });
-  assert.equal(cancellations.length, 2);
-  for (const cancel of cancellations) {
-    const request = pi.delegationRequests.find((item) => item.requestId === cancel.requestId);
-    assert.ok(request);
-    assert.equal(cancel.ownerRunId, request.ownerRunId);
-    assert.equal(cancel.nodeId, request.nodeId);
-  }
-  assert.deepEqual(latestState(pi).plan.tasks.map((item) => item.status), ["blocked", "blocked"]);
-  assert.equal(pi.delegationRequests.length, 2, "no later wave is dispatched after the Human veto");
-});
 
 test("automatic DAG scheduling advances through dependent Subagent waves only after semantic checks", async () => {
   const pi = fakePi({ autoDelegation: true });
@@ -752,7 +844,9 @@ test("restarted unresolved execution is marked unknown and can be reconciled wit
   await pi.events.get("session_start")({}, ctx(pi));
   const recovered = latestState(pi);
   assert.equal(recovered.plan.execution.status, "unknown");
-  await pi.events.get("message_end")({ message: { role: "user", id: "new-constraint", content: "Do not use subagents for this Goal." } }, ctx(pi));
+  const steering = "Do not use subagents for this Goal.";
+  appendHuman(pi, steering, "new-constraint");
+  await pi.events.get("message_end")({ message: { role: "user", id: "new-constraint", content: steering } }, ctx(pi));
   assert.equal(dagApprovalStatus(latestState(pi)).approved, false, "new Human constraints invalidate prior execution approval");
   assert.ok(pi.activeNames().includes("compass_execution"), "recovery control is only surfaced while the batch is unresolved");
   assert.equal(pi.delegationRequests.length, 0, "restoration must not automatically re-dispatch possibly active children");
@@ -854,22 +948,6 @@ test("structured runtime dispatch works while the model-visible native Subagent 
   assert.match(patch.content.at(-1).text, /structured Human question/);
 });
 
-test("an explicit Human prohibition blocks automatic Subagent dispatch", async () => {
-  const pi = fakePi({ autoDelegation: true });
-  extensionFactory(pi);
-  await captureGoal(pi, "Goal: create a repeatable full-stack smoke test across multiple independent workstreams; define acceptance criteria and preserve material route decisions/checkpoints. Do not use Subagents.");
-  await openCapability(pi, "planning");
-  const create = await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: ["Both areas are evidenced"], tasks }, undefined, undefined, ctx(pi));
-  const patch = await pi.events.get("tool_result")({ toolName: "compass_plan_create", input: {}, content: create.content, details: create.details, isError: false }, ctx(pi));
-  await approveDag(pi);
-  await waitFor(() => latestState(pi)?.plan?.execution?.status === "failed", { message: "explicit Human prohibition" });
-  const state = latestState(pi);
-  assert.equal(state.plan.execution.status, "failed");
-  assert.match(state.plan.execution.error, /Human instructions prohibit Subagent execution/);
-  assert.deepEqual(state.plan.tasks.map((item) => item.status), ["pending", "pending", "pending"]);
-  assert.equal(pi.delegationRequests.length, 0);
-  assert.match(patch.content.at(-1).text, /Before any DAG task starts, present the exact structured Human question/);
-});
 
 test("active DAG records explicit out-of-scope writes as advisory drift, but does not global-lock the Agent", async () => {
   const pi = fakePi();
@@ -941,7 +1019,8 @@ test("DAG progress never changes native Subagent activation", async () => {
   await currentTool(pi, "compass_task").execute("done-api", { action: "done", tasks: [{ id: "api", evidence: "Read API route and recorded source location" }] }, undefined, undefined, ctx(pi));
   assert.deepEqual(pi.activeNames().filter((name) => !name.startsWith("compass_")), before);
   const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
-  assert.equal(snapshot.runtime.subagents.active, true);
+  assert.equal(snapshot.runtime, undefined);
+  assert.ok(pi.activeNames().includes("subagent"));
   assert.equal(snapshot.plan.done, 1);
 });
 
@@ -1097,7 +1176,7 @@ test("Goal continuity works without a DAG; failure details are on demand, not in
   assert.equal(first, undefined, "the native Human message is not repeated in an injected anchor");
   const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
   assert.match(snapshot.goal.current, /inspect the repo and establish a smoke test/);
-  assert.equal(snapshot.plan, null);
+  assert.equal(snapshot.plan, undefined);
   await pi.events.get("tool_execution_end")({ toolName: "bash", isError: true, result: { content: [{ type: "text", text: "command exited 1" }] } }, ctx(pi));
   const second = await pi.events.get("context")({ messages }, ctx(pi));
   assert.equal(second, undefined, "a recorded failure does not trigger per-request context injection");
@@ -1143,42 +1222,13 @@ test("decision schema adds task references only when a DAG exists and accepts us
 test("runtime does not create a second conventions registry or expose convention tools", async () => {
   const pi = fakePi();
   extensionFactory(pi);
-  await captureGoal(pi, "Goal: implement a feature. My local AGENTS.md and repeated Human instructions remain the source of working conventions.");
+  await captureGoal(pi, "Goal: implement a feature. My local AGENTS.md and repeated Human instructions remain the source of working conventions.", { planning: false });
   assert.ok(!pi.activeNames().some((name) => /compass_convention/i.test(name)));
   assert.ok(![...pi.tools.keys()].some((name) => /compass_convention/i.test(name)));
-  assert.ok(!pi.activeNames().includes("compass_open"), "no loader is exposed when no capability group applies");
+  assert.ok(pi.activeNames().includes("compass_open"), "optional capabilities are available on demand without classifying the Goal text");
 });
 
-test("goal change requires a recorded explicit scope update and preserves original Goal", async () => {
-  const pi = fakePi();
-  extensionFactory(pi);
-  await captureGoal(pi, "Goal: read the workbook locally");
-  await pi.events.get("before_agent_start")({ prompt: "Actually, I need online visual editing instead of local parsing." }, ctx(pi));
-  assert.ok(pi.activeNames().includes("compass_goal_change"), "a pending scope candidate auto-exposes its resolver without another open");
-  await openCapability(pi, "goal_change");
-  const change = currentTool(pi, "compass_goal_change");
-  assert.equal(change.parameters.properties.updateId.enum, undefined, "update IDs are validated at execution without schema churn");
-  const result = await change.execute("change", { updateId: "U1", action: "apply", newGoal: "Implement online visual editing" }, undefined, undefined, ctx(pi));
-  assert.equal(latestState(pi).goal.original, "Goal: read the workbook locally");
-  assert.equal(latestState(pi).goal.current, "Implement online visual editing");
-  assert.deepEqual(latestState(pi).activeCapabilities, []);
-  assert.ok(!pi.activeNames().includes("compass_open"), "the loader is hidden again when the pending Goal-change capability is consumed and no other group applies");
-});
 
-test("versioned Goal candidate exposes apply/dismiss without an extra open call and defaults to extracted scope", async () => {
-  const pi = fakePi();
-  extensionFactory(pi);
-  await captureGoal(pi, "Goal: repair the integration defects");
-  await pi.events.get("message_end")({ message: { role: "user", id: "goal-v2", content: `# Task\nContinue the integration work, Goal v2: repair the Hub and OptiX integration, remove the obsolete adapter, and preserve the eight known defect dispositions.\n# Constraints\n- Only change the named integration paths.` } }, ctx(pi));
-  assert.equal(latestState(pi).goal.current, "Goal: repair the integration defects", "candidate does not silently replace Current Goal");
-  assert.ok(pi.activeNames().includes("compass_goal_change"), "pending candidate exposes the resolver directly");
-  const resolver = currentTool(pi, "compass_goal_change");
-  assert.deepEqual(resolver.parameters.properties.action.enum, ["apply", "dismiss"]);
-  await resolver.execute("resolve", { updateId: "U1", action: "apply" }, undefined, undefined, ctx(pi));
-  assert.match(latestState(pi).goal.current, /repair the Hub and OptiX integration/);
-  assert.match(latestState(pi).goal.current, /eight known defect dispositions/);
-  assert.equal(latestState(pi).goal.sourceUpdateId, "U1");
-});
 
 test("inactive native Subagents stay inactive without a second Compass visibility policy", async () => {
   const pi = fakePi();
@@ -1187,25 +1237,11 @@ test("inactive native Subagents stay inactive without a second Compass visibilit
   pi.setActiveTools(pi.activeNames().filter((name) => !/subagent/i.test(name)));
   assert.equal(await pi.events.get("context")({ messages: [{ role: "user", content: "Scout the gaps in parallel" }] }, ctx(pi)), undefined);
   const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
-  assert.equal(snapshot.runtime.subagents.active, false);
-  assert.match(snapshot.runtime.subagents.reason, /activation is owned by Pi/);
+  assert.equal(snapshot.runtime, undefined, "native diagnostics stay outside compact Goal state");
+  assert.ok(!pi.activeNames().includes("subagent"));
   assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)));
 });
 
-test("embedded Goal mention preserves Current Goal, acceptance criteria, and capability loadout", async () => {
-  const pi = fakePi();
-  extensionFactory(pi);
-  await captureGoal(pi, "Goal: repair eight integration issues; define acceptance criteria.");
-  await openCapability(pi, "acceptance");
-  await currentTool(pi, "compass_acceptance_define").execute("define", { criteria: ["All eight issues have a disposition", "No unrelated adapter paths change"] }, undefined, undefined, ctx(pi));
-  const before = latestState(pi);
-  await pi.events.get("message_end")({ message: { role: "user", id: "embedded-goal", content: "Please scout the four remaining gaps and preserve the current scope. The goal is to integrate auto_aisbench and then remove the adapter, but that sentence describes one implementation detail, not a replacement command." } }, ctx(pi));
-  const after = latestState(pi);
-  assert.equal(after.goal.current, before.goal.current);
-  assert.equal(after.goal.version, before.goal.version);
-  assert.deepEqual(after.goal.criteria.map((item) => item.text), before.goal.criteria.map((item) => item.text));
-  assert.ok(!currentTool(pi, "compass_open").parameters.properties.capabilities.items.enum.includes("goal_change"));
-});
 
 test("successful custom-entry persistence avoids duplicating full state in tool results and restores it", async () => {
   const first = fakePi();
@@ -1297,7 +1333,8 @@ test("Goal replacement preserves applicable loaded capability groups and avoids 
   await openCapability(pi, "history");
   await openCapability(pi, "acceptance");
   await currentTool(pi, "compass_acceptance_define").execute("define", { criteria: ["All issues are dispositioned"] }, undefined, undefined, ctx(pi));
-  await pi.events.get("message_end")({ message: { role: "user", id: "new-goal", content: "Goal: integrate the upstream plugin and remove the obsolete adapter" } }, ctx(pi));
+  await sendHuman(pi, "Goal: integrate the upstream plugin and remove the obsolete adapter", "new-goal");
+  await submitGoal(pi, "Integrate the upstream plugin and remove the obsolete adapter");
   const state = latestState(pi);
   assert.equal(state.goal.version, 2);
   assert.ok(state.activeCapabilities.includes("planning"));
@@ -1306,33 +1343,8 @@ test("Goal replacement preserves applicable loaded capability groups and avoids 
   assert.ok(pi.activeNames().includes("compass_plan_create"), "planning remains available but its task lifecycle resets for the new Goal");
   assert.ok(pi.activeNames().includes("compass_decision"), "history tools remain available across the Goal transition");
   assert.ok(pi.activeNames().includes("compass_acceptance_define"), "new Goal can define its own acceptance criteria without reopening the group");
-  assert.ok(!pi.activeNames().includes("compass_goal_change"), "the consumed Goal-change operation is no longer applicable");
 });
 
-test("message_end captures Human steering messages and applies explicit Goal replacement", async () => {
-  const pi = fakePi();
-  extensionFactory(pi);
-  await captureGoal(pi, "Goal: finish mutation delivery");
-  await pi.events.get("message_end")({ message: { role: "user", content: [{ type: "text", text: "Goal: finish mutation delivery" }] } }, ctx(pi));
-  await pi.events.get("message_end")({ message: { role: "user", content: [{ type: "text", text: "用 rg 不用 grep，用 fd 不用 find，不用 cd，你当前就在 cwd" }] } }, ctx(pi));
-  let state = pi.entries.filter((entry) => entry.customType === "pi-compass-v2.goalrun").at(-1).data;
-  assert.equal(state.goal.updates.length, 1);
-  assert.match(state.goal.updates[0].text, /用 rg 不用 grep/);
-  assert.ok(state.sessionDirectives.some((item) => /不用 cd/.test(item.text)));
-  const result = await pi.events.get("message_end")({ message: { role: "user", content: [{ type: "text", text: "那我换一个 goal，现在的 goal 就是把 pptx-forge 高质量交付" }] } }, ctx(pi));
-  state = pi.entries.filter((entry) => entry.customType === "pi-compass-v2.goalrun").at(-1).data;
-  assert.equal(state.goal.original, "Goal: finish mutation delivery");
-  assert.equal(state.goal.current, "把 pptx-forge 高质量交付");
-  assert.equal(state.goal.version, 2);
-  assert.equal(state.plan.tasks.length, 0);
-  assert.equal(state.goalChanges.at(-1).previousGoal, "Goal: finish mutation delivery");
-  assert.deepEqual(state.activeCapabilities, []);
-  const projected = await pi.events.get("context")({ messages: [{ role: "user", content: "Continue" }] }, ctx(pi));
-  assert.equal(projected, undefined);
-  const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
-  assert.doesNotMatch(JSON.stringify(snapshot.directives ?? []), /不用 cd/, "a directive from the previous Goal version must not leak into the new Goal");
-  assert.ok(state.sessionDirectives.some((directive) => directive.goalVersion === 1 && /不用 cd/.test(directive.text)), "the directive remains archived in state history");
-});
 
 test("questionnaire hooks require a persisted assistant source, not a provider-call claim", async () => {
   const pi = fakePi();
@@ -1376,8 +1388,11 @@ test("ask-user-questions answers remain available on demand without repeated inj
   const projected = await pi.events.get("context")({ messages: [{ role: "user", content: "Continue" }] }, ctx(pi));
   assert.equal(projected, undefined);
   const snapshot = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
-  assert.match(JSON.stringify(snapshot.humanDecisions), /Push origin\/main only/);
-  assert.match(JSON.stringify(snapshot.humanDecisions), /PowerPoint/);
+  assert.equal(snapshot.humanDecisions, undefined, "detailed answers are not repeated in compact state");
+  await openCapability(pi, "goal_details");
+  const details = await currentTool(pi, "compass_goal_read").execute("read-goal", {}, undefined, undefined, ctx(pi));
+  assert.match(details.content[0].text, /Push origin\/main only/);
+  assert.match(details.content[0].text, /PowerPoint/);
 });
 
 test("ask-user-question UI load failures are not recorded as Human declines", async () => {
@@ -1504,7 +1519,7 @@ test("preflight distinguishes the Subagent loader from the inactive executor", a
   assert.doesNotMatch(notice, /Subagent tools: visible/);
 });
 
-test("compact state is visible after Goal capture and reports native capability availability", async () => {
+test("compact state exposes Goal and frame without repeating native diagnostics", async () => {
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi);
@@ -1512,23 +1527,21 @@ test("compact state is visible after Goal capture and reports native capability 
   const stateTool = currentTool(pi, "compass_state");
   const first = await stateTool.execute("state", {}, undefined, undefined, ctx(pi));
   const snapshot = JSON.parse(first.content[0].text);
-  assert.equal(snapshot.v, 6);
+  assert.equal(snapshot.v, 8);
   assert.equal(snapshot.goal.version, 1);
-  assert.equal(snapshot.goalOutcome.status, "not_assessed");
-  assert.equal(snapshot.goalOutcome.independentlyVerified, false);
-  assert.equal(snapshot.runtime.codemode.registered, true);
-  assert.equal(snapshot.runtime.askUserQuestions.registered, true);
-  assert.equal(snapshot.runtime.subagents.registered, true);
-  assert.equal(snapshot.runtime.subagents.active, true, "native activation is not overridden by Compass");
-  assert.equal(snapshot.runtime.subagentLoader.registered, true);
-  assert.deepEqual(snapshot.runtime.await, {
-    watch: { registered: true, active: true },
-    status: { registered: true, active: true },
-    cancel: { registered: true, active: true },
-  });
+  assert.equal(snapshot.outcome, "not_assessed");
+  assert.equal(snapshot.runtime, undefined);
+  assert.equal(snapshot.delta, undefined);
+  assert.equal(snapshot.acceptance, undefined);
+  assert.equal(snapshot.plan, undefined);
+  assert.ok(first.content[0].text.length < 500, "fresh summary omits duplicate Goal events, diagnostics, empty arrays and zero counts");
   const unchanged = await currentTool(pi, "compass_state").execute("state2", { cursor: snapshot.cursor }, undefined, undefined, ctx(pi));
   assert.equal(JSON.parse(unchanged.content[0].text).unchanged, true);
   assert.ok(unchanged.content[0].text.length < 200, "unchanged reads return only the cursor/revision envelope");
+  const beforeInvalidRead = latestState(pi);
+  appendHuman(pi, "A clarification not yet observed by Compass.");
+  await assert.rejects(() => stateTool.execute("invalid-state", { maxEvents: 0 }, undefined, undefined, ctx(pi)), /No state changed/);
+  assert.deepEqual(latestState(pi), beforeInvalidRead, "read validation fails before observing or persisting a new input");
 });
 
 test("Human parallel scouting does not create a DAG or replace native activation", async () => {
@@ -1580,9 +1593,8 @@ test("Subagent eligibility never force-enables a native tool disabled before Com
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
   assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)));
   const state = JSON.parse((await currentTool(pi, "compass_state").execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
-  assert.equal(state.runtime.subagents.registered, true);
-  assert.equal(state.runtime.subagents.active, false);
-  assert.match(state.runtime.subagents.reason, /activation is owned by Pi\/pi-subagents and the user/);
+  assert.equal(state.runtime, undefined);
+  assert.ok(!pi.activeNames().includes("subagent"));
 });
 
 test("native tool visibility changes advance state revision without re-enabling user-disabled tools", async () => {
@@ -1599,9 +1611,9 @@ test("native tool visibility changes advance state revision without re-enabling 
   assert.ok(latestState(pi).stateRevision > beforeRevision, "native capability changes are reflected in the composite cursor revision");
   assert.ok(!pi.activeNames().some((name) => /subagent/i.test(name)), "Compass does not force-enable a tool disabled by the user");
   const after = JSON.parse((await currentTool(pi, "compass_state").execute("state-after", { cursor: initial.cursor }, undefined, undefined, ctx(pi))).content[0].text);
-  assert.equal(after.delta.stateChanged, true);
-  assert.equal(after.runtime.subagents.active, false);
-  assert.match(after.runtime.subagents.reason, /activation is owned by Pi\/pi-subagents and the user/);
+  assert.notEqual(after.cursor, initial.cursor);
+  assert.equal(after.unchanged, undefined);
+  assert.equal(after.runtime, undefined);
 });
 
 test("triage uses evidence references and returns a compact duplicate result", async () => {
@@ -1614,7 +1626,7 @@ test("triage uses evidence references and returns a compact duplicate result", a
   await pi.events.get("context")({ messages: [] }, ctx(pi));
   assert.ok(pi.activeNames().includes("compass_triage"));
   const stateTool = currentTool(pi, "compass_state");
-  const snapshot = JSON.parse((await stateTool.execute("state", {}, undefined, undefined, ctx(pi))).content[0].text);
+  const snapshot = JSON.parse((await stateTool.execute("state", { cursor: "R0-E0-C0" }, undefined, undefined, ctx(pi))).content[0].text);
   const event = snapshot.delta.events.find((item) => item.kind === "tool_failure");
   assert.ok(event);
   const triage = currentTool(pi, "compass_triage");
@@ -1623,37 +1635,4 @@ test("triage uses evidence references and returns a compact duplicate result", a
   const second = await currentTool(pi, "compass_triage").execute("triage2", { evidenceRefs: [event.id] }, undefined, undefined, ctx(pi));
   assert.match(second.content[0].text, /"duplicate":true/);
   assert.ok(second.content[0].text.length < 900);
-});
-
-test("live acceptance command verifies a real-shaped parallel/dependency DAG without overwriting a non-empty session", async (t) => {
-  const fs = await import("node:fs");
-  const os = await import("node:os");
-  const path = await import("node:path");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-compass-live-test-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "probe-project", version: "1.2.3" }));
-  fs.writeFileSync(path.join(root, "README.md"), "# Probe Project — 1.2.3\n\nSmoke test fixture.\n");
-  fs.writeFileSync(path.join(root, "alpha.txt"), "safe fixture\n");
-  const pi = fakePi({
-    respondDelegation(request) {
-      const responseBase = { status: "completed", model: `${request.model}:high`, runId: `run-${request.nodeId}`, usage: { input: 100, output: 30, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1, toolCalls: 1, durationMs: 100 } };
-      if (request.nodeId === "probe_a") return { ...responseBase, result: { kind: "structured", value: { status: "done", summary: "ls found alpha.txt.", evidence: ["alpha.txt"], reason: "" } } };
-      if (request.nodeId === "probe_b") return { ...responseBase, result: { kind: "structured", value: { status: "done", summary: "Package name probe-project version 1.2.3.", evidence: ["package.json:1-10"], reason: "" } } };
-      if (request.nodeId === "probe_c") return { ...responseBase, result: { kind: "structured", value: { status: "done", summary: "README heading: Probe Project — 1.2.3.", evidence: ["README.md:1"], reason: "" } } };
-      return { ...responseBase, result: { kind: "structured", value: { status: "done", summary: "Unexpected task.", evidence: ["fixture"], reason: "" } } };
-    },
-  });
-  extensionFactory(pi);
-  const notifications = [];
-  const command = pi.commands.get("compass-live-acceptance");
-  assert.ok(command, "live acceptance command is registered in the candidate build");
-  await command.handler("", { cwd: root, sessionManager: { getBranch: () => pi.branch(), getEntries: () => pi.branch() }, ui: { notify: (message, level) => notifications.push({ message, level }) } });
-  assert.match(notifications.at(-1).message, /Compass live acceptance: FAIL/);
-  assert.match(notifications.at(-1).message, /shared post-tool-result scheduler dispatches without compass_execution/);
-  assert.equal(pi.delegationRequests.length, 0, "the command-generated draft cannot implicitly approve itself");
-  const finalState = latestState(pi);
-  assert.ok(finalState.plan.approvalRequest, "the command leaves a concrete approval request in GoalRun");
-  assert.equal(finalState.plan.approval, null);
-  assert.deepEqual(finalState.plan.tasks.map((item) => item.status), ["pending", "pending", "pending", "pending", "pending"]);
-  assert.equal(finalState.plan.executionHistory.length, 0);
 });

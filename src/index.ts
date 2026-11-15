@@ -1,18 +1,15 @@
 import { Type } from "typebox";
 import fs from "node:fs";
-import os from "node:os";
 import { executionDriftReason } from "./write-scope.mjs";
 import { questionnaireFailureResultPatch } from "./questionnaire-integration.mjs";
+import { latestHumanSource, validateGoalSources } from "./goal-sources.mjs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { resolveLiveAcceptanceFixture } from "./live-acceptance-root.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import {
   DELEGATION_EVENTS,
   FALLBACK_MODEL,
   PRIMARY_MODEL,
   REVIEW_MODEL,
-  isSupportedDelegatedModel,
   DEFAULT_THINKING,
   DEFAULT_TIMEOUT_MS,
   MAX_WAVE_TASKS,
@@ -30,22 +27,20 @@ import {
   updateTasks,
 } from "./dag-core.mjs";
 import {
-  applyGoalChange,
+  setGoal,
+  observeHumanInput,
+  stateCursor,
   availableCapabilities,
   acceptanceStatus,
   goalOutcomeStatus,
-  planningActivationSignal,
-  stripConventionSections,
   buildGoalDetails,
   buildRecentEvents,
   buildStateSnapshot,
   GOAL_RUN_API_VERSION,
   GOAL_RUN_RELEASE,
   defineAcceptanceCriteria,
-  dismissGoalChangeCandidate,
   recordAcceptanceResult,
   shouldSurfaceIssueReview,
-  captureHumanPrompt,
   bindDagApprovalQuestionnaire,
   bindRouteSetQuestionnaire,
   captureHumanDecision,
@@ -53,7 +48,6 @@ import {
   recordTaskAssessment,
   renewDagApprovalRequest,
   emptyGoalRunState,
-  explicitGoalChangeUpdates,
   mergeTrace,
   normalizeGoalRunState,
   recordCheckpoint,
@@ -148,36 +142,6 @@ function nativeToolSetSignature(pi: any): string {
     .digest("hex");
 }
 
-// Explicit Human instructions are evaluated newest first. Earlier commands may be
-// superseded by a later instruction, including a later prohibition. Conventions
-// and quoted examples are not treated as runtime delegation requests.
-function explicitSubagentVisibilityRequest(latestInstruction = ""): string | null {
-  const version = state.goal.version ?? 1;
-  const updates = state.goal.updates.filter((item: any) => item.goalVersion === version)
-    .map((item: any) => item.sourceText || item.text)
-    .filter((value: any) => typeof value === "string" && value.trim());
-  const sources = [latestInstruction, ...updates.slice(-10).reverse(), state.goal.current].filter((value) => typeof value === "string" && value.trim());
-  for (const value of sources) {
-    if (typeof value !== "string") continue;
-    const text = stripConventionSections(value)
-      .replace(/```[\s\S]*?```/g, " ")
-      .replace(/`[^`\n]*`/g, " ")
-      .replace(/"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’/g, " ");
-    const veto = /\b(?:do not|don't|never|avoid)\s+(?:use|call|spawn|delegate to)\s+(?:native )?subagents?\b|(?:不要用|不要调用|不使用|别用|别调用|禁止使用).{0,10}子代理|(?:不要|别).{0,10}(?:并行侦察|并行调查)/i.test(text);
-    if (veto) return "human_prohibited_subagents";
-    if (/\buse (?:native )?subagents?\b|\b(?:please )?(?:call|spawn) (?:native )?subagents?\b|(?:使用|调用|启用)(?:多个)?子代理/i.test(text)) {
-      return "explicit_human_subagent_request";
-    }
-    const request = /\b(?:scout|scouting|investigate|investigation|inspect|inspection|review|explore|exploration)\b.{0,90}\bparallel(?:ly)?\b|\bparallel(?:ly)?\b.{0,90}\b(?:scout|scouting|investigate|investigation|inspect|inspection|review|explore|exploration)\b/i.test(text)
-      || /(?:并行.{0,16}(?:侦察|调查|检查|审查|探索|排查)|(?:侦察|调查|检查|审查|探索|排查).{0,16}并行|用(?:多个)?子代理并行|并行使用子代理)/i.test(text);
-    if (!request) continue;
-    const targets = sources.filter((item): item is string => typeof item === "string").join("\n");
-    const multiple = /\b(?:multiple|several|two|three|four|many|independent|separate|different)\b.{0,60}\b(?:paths?|workstreams?|tracks?|files?|modules?|areas?|components?)\b|\b(?:paths?|workstreams?|tracks?|files?|modules?|areas?|components?)\b.{0,60}\b(?:independent|separate|different)\b/i.test(targets)
-      || /(?:多个|多条|不同|独立|两个|三条|四条|多处).{0,24}(?:路径|工作流|方向|文件|模块|区域|组件|代码路径)|(?:路径|工作流|方向|文件|模块|区域|组件|代码路径).{0,24}(?:多个|多条|不同|独立)/i.test(targets);
-    if (multiple) return "explicit_human_parallel_scouting";
-  }
-  return null;
-}
 function setCompassLoadout(pi: any, compassNames: string[]) {
   if (typeof pi.setActiveTools !== "function" || typeof pi.getActiveTools !== "function") {
     throw new Error("This Pi runtime must expose getActiveTools() and setActiveTools().");
@@ -270,7 +234,7 @@ function persistTrace(pi: any, item: any) {
   try { pi.appendEntry?.(`${STATE_ENTRY_TYPE}.trace`, clone(item)); } catch { /* trace is best-effort */ }
 }
 function stateResult(text: string, details: Record<string, unknown> = {}) {
-  const cursor = `R${Number.isInteger(state.stateRevision) ? state.stateRevision : 0}-E${Math.max(0, (state.eventSeq ?? 1) - 1)}`;
+  const cursor = stateCursor(state, contextState.revision);
   return {
     content: [{ type: "text", text: `${text}\nstateCursor: ${cursor}` }],
     details: { ...details, cursor, stateRevision: state.stateRevision ?? 0 },
@@ -405,30 +369,6 @@ function dispatchOneDelegation(pi: any, generation: number, runtime: any, reques
     }
   });
 }
-function cancelActiveDelegations(pi: any, reason = "Human instruction prohibited Subagent execution.") {
-  const runtime = delegationRuntimes.get(pi);
-  if (!runtime?.pending || typeof pi?.events?.emit !== "function") return 0;
-  let requested = 0;
-  for (const pending of [...runtime.pending.values()]) {
-    if (!pending?.request || pending.cancelRequested) continue;
-    pending.cancelRequested = true;
-    pending.cancelReason = clip(reason, 240);
-    try {
-      // The structured API requires the exact attempt identity. A lost cancel
-      // acknowledgement remains unknown; never infer that the child stopped.
-      pi.events.emit(DELEGATION_EVENTS.cancel, {
-        requestId: pending.request.requestId,
-        ownerRunId: pending.request.ownerRunId,
-        nodeId: pending.request.nodeId,
-      });
-      requested += 1;
-    } catch {
-      // The existing terminal-response deadline will fail closed to unknown.
-    }
-  }
-  return requested;
-}
-
 async function probeDelegationBridge(pi: any, runtime: any, cwd: string) {
   if (runtime.bridgeConfirmed) return { ok: true, reason: "" };
   if (runtime.bridgeFailureUntil > Date.now()) return { ok: false, reason: runtime.bridgeFailureReason || "Structured-delegation bridge probe is cooling down after a failed check." };
@@ -475,18 +415,16 @@ async function probeDelegationBridge(pi: any, runtime: any, cwd: string) {
   runtime.bridgeFailureUntil = Date.now() + 30_000;
   return { ok: false, reason };
 }
-async function executionAvailability(pi: any, cwd: string, latestInstruction = "") {
+async function executionAvailability(pi: any, cwd: string) {
   const runtime = ensureDelegationRuntime(pi);
   const allNames = (() => {
     try { return typeof pi.getAllTools === "function" ? namesFrom(pi.getAllTools()) : []; }
     catch { return []; }
   })();
   const registered = allNames.some((name: string) => /^(?:subagent|subagents)$/i.test(name));
-  const humanRequest = explicitSubagentVisibilityRequest(latestInstruction);
-  if (humanRequest === "human_prohibited_subagents") return { ok: false, runtime, reason: "Human instructions prohibit Subagent execution for the current Goal; no task was dispatched." };
   if (!registered) return { ok: false, runtime, reason: "pi-subagents is not registered in this Pi session; no task was dispatched." };
-  // pi-subagents owns model-visible tool activation. Structured dispatch is a separate
-  // runtime API; explicit executor intent authorizes it unless Human vetoes.
+  // Native activation remains Pi-owned. Structured execution requires exact
+  // Human approval and an Agent interpretation of the latest Human input.
   if (!runtime?.installed) return { ok: false, runtime, reason: "The Pi event bus does not expose the structured-delegation contract; no task was dispatched." };
   const bridge = await probeDelegationBridge(pi, runtime, cwd);
   if (!bridge.ok) return { ok: false, runtime, reason: bridge.reason };
@@ -497,13 +435,9 @@ function primaryModelForTask(task: any): string {
     ? REVIEW_MODEL
     : PRIMARY_MODEL;
 }
-function executionConstraints() {
-  const version = state.goal.version ?? 1;
-  return (state.sessionDirectives ?? [])
-    .filter((item: any) => item.goalVersion === version && (item.pinned === true || item.hard === true))
-    .map((item: any) => item.text)
-    .filter((value: any) => typeof value === "string" && value.trim())
-    .slice(0, 12);
+function executionConstraints() { return state.goal.constraints; }
+function goalInputIsCurrent(ctx: any): boolean {
+  return state.goal.reviewedInputId === latestHumanSource(ctx?.sessionManager?.getBranch?.());
 }
 function executionRecordForWave(waveId: string, tasks: any[], planRevision: number, stateVersion: number, requestIds: string[], policy: any, frameScope: string | null = null) {
   return {
@@ -564,10 +498,12 @@ async function applyDelegationOutcome(pi: any, generation: number, waveId: strin
     const currentResult = execution.results[index];
     if (parsed?.status === "done" && state.plan.tasks.find((item: any) => item.id === task.id)?.status === "in_progress") {
       const evidence = parsedTaskEvidence(parsed);
-      state = transitionTasks(state, "done", [{ id: task.id, evidence }], updateTasks).state;
+      // A correlated terminal response is a fact, not approval for further work.
+      // Preserve it even if new Human input has paused semantic progression.
+      state.plan = updateTasks(state.plan, [{ id: task.id, status: "done", evidence }]);
     } else if (state.plan.tasks.find((item: any) => item.id === task.id)?.status === "in_progress") {
       const reason = clip(`${parsed?.terminalStatus ? `Subagent ${parsed.terminalStatus}: ` : ""}${parsed?.reason || parsed?.summary || "Subagent returned no valid task evidence."}`, 600);
-      state = transitionTasks(state, "block", [{ id: task.id, reason }], updateTasks).state;
+      state.plan = updateTasks(state.plan, [{ id: task.id, status: "blocked", reason }]);
     }
     execution = state.plan?.execution;
     if (!execution || execution.requestId !== waveId) return;
@@ -597,7 +533,7 @@ async function applyDelegationOutcome(pi: any, generation: number, waveId: strin
     loadoutRefreshPending = true;
   });
 }
-async function runReadySubagentWaves(pi: any, generation: number, ctx: any, latestInstruction = "") {
+async function runReadySubagentWaves(pi: any, generation: number, ctx: any) {
   if (!inCurrentBranch(pi, generation)) return;
   if (!state.goal.current || !state.plan?.tasks?.length) return;
   if (!dagApprovalStatus(state).approved) return;
@@ -631,7 +567,7 @@ async function runReadySubagentWaves(pi: any, generation: number, ctx: any, late
       }
       return;
     }
-    const availability = await executionAvailability(pi, contextCwd(ctx) || state.projectRoot || process.cwd(), latestInstruction);
+    const availability = await executionAvailability(pi, contextCwd(ctx) || state.projectRoot || process.cwd());
     if (!inCurrentBranch(pi, generation)) return;
     if (!availability.ok) {
       const existing = state.plan.execution;
@@ -703,7 +639,7 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
     // Human input can arrive while availability is being checked or the prepared
     // execution record is being persisted. Recheck the exact approval and veto
     // synchronously immediately before the first provider-facing dispatch.
-    if (!dagApprovalStatus(state).approved || explicitSubagentVisibilityRequest() === "human_prohibited_subagents") {
+    if (!dagApprovalStatus(state).approved || !goalInputIsCurrent(ctx)) {
       await serializedInBranch(pi, generation, async () => {
         const execution = state.plan?.execution;
         if (!execution || execution.requestId !== waveId || execution.status !== "dispatching") return;
@@ -712,7 +648,7 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
         state = recordExecutionEvent(state, {
           status: "failed",
           summary: "Prepared dispatch cancelled before child launch.",
-          text: "The approval became stale or a Human prohibition arrived before any child request was emitted. Tasks remain pending; no child was dispatched.",
+          text: "The approval became stale or a new Human input awaits Agent interpretation before child dispatch. Tasks remain pending; no child was dispatched.",
           ref: waveId,
         });
         persistState(pi);
@@ -735,39 +671,6 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
         await setExecutionResult(pi, generation, waveId, task.id, { status: "unknown", error: response.reason });
         continue;
       }
-      const fallbackReason = providerFallbackReason(response);
-      if (fallbackReason) {
-        const fallbackRequestId = randomUUID();
-        const persisted = await setExecutionResult(pi, generation, waveId, task.id, {
-          status: "dispatching",
-          requestId: fallbackRequestId,
-          model: FALLBACK_MODEL,
-          fallbackAttempted: true,
-          fallbackReason,
-          primaryError: clip(response.error || response.message || "Primary provider failed.", 400),
-          primaryUsage: response.usage && typeof response.usage === "object" ? response.usage : null,
-          primaryProviderDiagnostics: normalizeProviderDiagnostics(response.providerDiagnostics),
-          runId: null,
-          error: "",
-        });
-        if (!persisted || !inCurrentBranch(pi, generation)) return;
-        fallbackJobs.push({
-          task,
-          primaryError: clip(response.error || response.message || "Primary provider failed.", 400),
-          request: buildSubagentDelegationRequest({
-            task,
-            goal: state.goal.current,
-            constraints: executionConstraints(),
-            cwd: contextCwd(ctx) || state.projectRoot || process.cwd(),
-            ownerRunId: waveId,
-            requestId: fallbackRequestId,
-            model: FALLBACK_MODEL,
-            thinking: DEFAULT_THINKING,
-            timeoutMs: DEFAULT_TIMEOUT_MS,
-          }),
-        });
-        continue;
-      }
       const parsed = parseSubagentDelegationResponse(response, {
         requestId: request.requestId,
         ownerRunId: waveId,
@@ -779,17 +682,67 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
         await setExecutionResult(pi, generation, waveId, task.id, { status: "unknown", error: "Terminal response failed correlation/shape validation; no automatic retry was attempted." });
         continue;
       }
+      const fallbackReason = providerFallbackReason(response);
+      if (fallbackReason) {
+        fallbackJobs.push({
+          task, parsed, response, fallbackReason,
+          primaryError: clip(response.error || response.message || "Primary provider failed.", 400),
+          request: buildSubagentDelegationRequest({
+            task,
+            goal: state.goal.current,
+            constraints: executionConstraints(),
+            cwd: contextCwd(ctx) || state.projectRoot || process.cwd(),
+            ownerRunId: waveId,
+            requestId: randomUUID(),
+            model: FALLBACK_MODEL,
+            thinking: DEFAULT_THINKING,
+            timeoutMs: DEFAULT_TIMEOUT_MS,
+          }),
+        });
+        continue;
+      }
       await applyDelegationOutcome(pi, generation, waveId, task, parsed, false);
     }
 
     if (!inCurrentBranch(pi, generation)) return;
-    if (fallbackJobs.length && dagApprovalStatus(state).approved) {
-      const fallbackResponses = await Promise.all(fallbackJobs.map((job: any) => dispatchOneDelegation(pi, generation, availability.runtime, job.request)));
+    if (fallbackJobs.length) {
+      const fallbackResponses = await Promise.all(fallbackJobs.map(async (job: any) => {
+        const launched = await serializedInBranch(pi, generation, () => {
+          const execution = state.plan?.execution;
+          if (!execution || execution.requestId !== waveId || !dagApprovalStatus(state).approved || !goalInputIsCurrent(ctx)) return null;
+          const index = executionResultIndex(execution, job.task.id);
+          if (index < 0) return null;
+          const primary = execution.results[index];
+          execution.results[index] = { ...primary,
+            status: "dispatching", requestId: job.request.requestId, model: FALLBACK_MODEL,
+            fallbackAttempted: true, fallbackReason: job.fallbackReason, primaryError: job.primaryError,
+            primaryUsage: job.response.usage ?? null,
+            primaryProviderDiagnostics: normalizeProviderDiagnostics(job.response.providerDiagnostics),
+            runId: null, error: "",
+          };
+          persistState(pi);
+          if (!inCurrentBranch(pi, generation)) return null;
+          if (!dagApprovalStatus(state).approved || !goalInputIsCurrent(ctx)) {
+            execution.results[index] = primary;
+            persistState(pi);
+            return null;
+          }
+          // Persist identity and emit without an await gap. The wrapper releases
+          // the state queue before waiting for the provider's terminal result.
+          return { response: dispatchOneDelegation(pi, generation, availability.runtime, job.request) };
+        });
+        if (!launched) {
+          await applyDelegationOutcome(pi, generation, waveId, job.task, job.parsed, false);
+          return null;
+        }
+        return launched.response;
+      }));
       if (!inCurrentBranch(pi, generation)) return;
       for (let index = 0; index < fallbackJobs.length; index += 1) {
         if (!inCurrentBranch(pi, generation)) return;
         const job = fallbackJobs[index];
         const response = fallbackResponses[index];
+        if (!response) continue;
         if (response?.__compassUnknown) {
           unknown = true;
           await setExecutionResult(pi, generation, waveId, job.task.id, { status: "unknown", error: response.reason, fallbackAttempted: true, primaryError: job.primaryError });
@@ -911,10 +864,10 @@ async function recordAutoDispatchFailure(pi: any, generation: number, error: any
     loadoutRefreshPending = true;
   });
 }
-async function runReadySubagentWavesSafely(pi: any, generation: number, ctx: any, latestInstruction = "") {
+async function runReadySubagentWavesSafely(pi: any, generation: number, ctx: any) {
   if (!inCurrentBranch(pi, generation)) return;
   try {
-    await runReadySubagentWaves(pi, generation, ctx, latestInstruction);
+    await runReadySubagentWaves(pi, generation, ctx);
   } catch (error) {
     try {
       if (inCurrentBranch(pi, generation)) await recordAutoDispatchFailure(pi, generation, error, ctx);
@@ -942,7 +895,7 @@ function hasAutoDispatchWork() {
 // The parent turn must not wait for all child model calls. Reserve one scheduler
 // promise synchronously, then run the deterministic orchestration in the background
 // so independent parent/Code Mode work can overlap with read-only Subagents.
-function scheduleReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") {
+function scheduleReadySubagentWaves(pi: any, ctx: any) {
   let scheduler = autoSchedulers.get(pi);
   if (!scheduler) {
     scheduler = { promise: null };
@@ -956,7 +909,7 @@ function scheduleReadySubagentWaves(pi: any, ctx: any, latestInstruction = "") {
   }
   if (!hasAutoDispatchWork()) return { started: false, coalesced: false };
   const generation = branchGeneration;
-  const running = Promise.resolve().then(() => runReadySubagentWavesSafely(pi, generation, ctx, latestInstruction));
+  const running = Promise.resolve().then(() => runReadySubagentWavesSafely(pi, generation, ctx));
   scheduler.promise = running.finally(() => {
     scheduler!.promise = null;
   });
@@ -1008,7 +961,7 @@ async function handleCompassToolResult(pi: any, event: any, ctx: any) {
   return serialized(async () => {
     if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
     const toolName = String(event?.toolName ?? "");
-    if (event?.isError || !/^compass_(?:plan_create|plan_revise|task|execution)$/.test(toolName)) return;
+    if (event?.isError || !/^compass_(?:goal|plan_create|plan_revise|task|execution)$/.test(toolName)) return;
     if (toolName === "compass_execution" && event?.input?.action !== "resolve") return;
 
     if (["compass_plan_create", "compass_plan_revise"].includes(toolName) && state.plan?.approvalRequest && !dagApprovalStatus(state).approved) {
@@ -1030,11 +983,8 @@ async function handleCompassToolResult(pi: any, event: any, ctx: any) {
     const changed = executionSnapshotForToolResult() !== beforeSnapshot;
     if (!changed && !scheduled.started && !scheduled.coalesced) return;
 
-    const humanDelegationRequest = explicitSubagentVisibilityRequest();
     const summary = automaticExecutionSummary(previousHistoryIds)
-      ?? (humanDelegationRequest === "human_prohibited_subagents"
-        ? "The latest Human instruction prohibits Subagent execution for this Goal. No child will be dispatched; keep the tasks with parent/Code Mode or revise the plan only after the Human changes that constraint."
-        : readyBefore.length && scheduled.started
+      ?? (readyBefore.length && scheduled.started
           ? `Compass queued automatic dispatch for ready read-only Subagent task(s) ${readyBefore.join(", ")}. The runtime will consume their results; independent parent/Code Mode work may proceed without waiting for these children.`
           : missingRationale.length && scheduled.started
             ? `No Subagent was dispatched for ${missingRationale.join(", ")}: each task must explain in dispatchReason why a separate semantic context is worth the extra model call. Route deterministic work to code or coupled reasoning to parent.`
@@ -1161,36 +1111,76 @@ function toolInventory(pi: any) {
   };
 }
 
+function observeCurrentHumanInput(ctx: any): boolean {
+  const id = latestHumanSource(ctx?.sessionManager?.getBranch?.());
+  if (!id) return false;
+  const observed = observeHumanInput(state, id);
+  if (observed.changed) state = observed.state;
+  return observed.changed;
+}
+
+function registerGoalTool(pi: any) {
+  return registerOnce(pi, "compass_goal", {
+    label: "Set Semantic Goal",
+    description: "Explicitly create, replace, or reaffirm the Goal after interpreting Human intent. Runtime never infers a Goal from text. Submit the complete current constraint list; original Human messages remain in Pi. Source IDs default to the latest native Human message. Replacement resets Goal-specific work and fails while native runs are unresolved.",
+    promptSnippet: "You interpret Human intent; explicitly record a Goal when retained Goal state helps. Never treat your interpretation as Human approval.",
+    promptGuidelines: ["After new Human input, reaffirm or update the semantic Goal and full constraints before resuming approved DAG progression. Unchanged intent does not require a new Human approval; changed material definitions do."],
+    parameters: Type.Object({
+      expectedVersion: Type.Integer({ minimum: 0, description: "Observed Goal version; 0 before the first explicit Goal." }),
+      current: Type.String({ minLength: 1, maxLength: 4000, description: "Your semantic statement of the current Human-authorized objective, not the entire prompt." }),
+      constraints: Type.Array(Type.String({ minLength: 1, maxLength: 600 }), { maxItems: 24, uniqueItems: true, description: "Complete material Human constraints. Use [] only when none apply; do not infer approval or drop prior constraints silently." }),
+      sourceIds: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 16, uniqueItems: true, description: "Native Human source entry IDs; defaults to latest. Must include the latest Human input and stay on this branch." })),
+      acceptanceCriteria: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { maxItems: 12, uniqueItems: true, description: "Optional explicit semantic criteria. Omit to preserve existing criteria for the same Goal; a replacement starts with no criteria unless supplied." })),
+    }, { additionalProperties: false }),
+    async execute(_id: string, params: any, ...rest: any[]) {
+      return serialized(async () => {
+        const ctx = getContext(rest);
+        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
+        const branch = ctx?.sessionManager?.getBranch?.();
+        const latest = latestHumanSource(branch);
+        const candidate = latest ? observeHumanInput(state, latest).state : state;
+        const sourceIds = params?.sourceIds ?? (latest ? [latest] : []);
+        validateGoalSources(branch, sourceIds);
+        const result = noMutation(() => setGoal(candidate, { ...params, sourceIds }));
+        if (result.changed) {
+          state = result.state;
+          afterMutation(pi, contextCwd(ctx));
+        }
+        return stateResult(`Goal v${state.goal.version} ${result.changed ? result.replaced ? "replaced" : "recorded" : "unchanged"}: ${clip(state.goal.current, 240)}`, {
+          mutation: "goal_set", unchanged: !result.changed, goalVersion: state.goal.version, sourceIds: state.goal.sourceIds,
+        });
+      });
+    },
+  });
+}
+
 function registerStateSnapshotTool(pi: any) {
   return registerOnce(pi, "compass_state", {
     label: "Compact Goal State",
-    description: "Read compact Goal/plan/acceptance state and native capability availability when prior results are insufficient. Pass a previous cursor for deltas; omit it for a fresh snapshot. Exact cursors return a small unchanged envelope. This is not independent Goal verification.",
-    promptSnippet: "Read Goal continuity or event deltas on demand; do not poll.",
-    promptGuidelines: [
-      "Use compass_state only when existing messages/results do not answer the current state question; pass its returned cursor for later deltas.",
-    ],
+    description: "Read the current semantic Goal, committed frame, outcome and actionable state. Use a previous cursor for bounded event deltas; exact unchanged cursors return a tiny envelope. Full Goal evidence is on demand through compass_goal_read; native tool availability is diagnosed by /compass-preflight.",
+    promptSnippet: "Read missing Goal/frame state on demand; reuse receipts and cursors, never poll.",
     parameters: Type.Object({
-      cursor: Type.Optional(Type.String({ pattern: "^R[0-9]+-E[0-9]+$", maxLength: 32, description: "Opaque cursor returned by compass_state, e.g. R213-E166." })),
-      maxEvents: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, description: "Maximum event summaries in the delta; defaults to 8." })),
+      cursor: Type.Optional(Type.String({ pattern: "^R[0-9]+-E[0-9]+-C[0-9]+$", maxLength: 64, description: "Goal/event/context cursor returned by Compass; pass it unchanged, e.g. R213-E166-C2." })),
+      maxEvents: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
     }, { additionalProperties: false }),
     async execute(_id: string, params: any, ...rest: any[]) {
-      const ctx = getContext(rest);
-      if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-      if (params?.maxEvents !== undefined && (!Number.isInteger(params.maxEvents) || params.maxEvents < 1 || params.maxEvents > 8)) throw new Error("maxEvents must be an integer from 1 to 8. No state changed.");
-      const activeFrame = contextState.frames.at(-1);
-      const snapshot = buildStateSnapshot(state, params?.cursor ?? null, {
-        ...toolInventory(pi),
-        compassActive: activeCapabilities(),
-        contextFrame: activeFrame ? { active: true, depth: contextState.frames.length, id: activeFrame.id } : { active: false, depth: 0, id: null },
+      return serialized(async () => {
+        if (params?.maxEvents !== undefined && (!Number.isInteger(params.maxEvents) || params.maxEvents < 1 || params.maxEvents > 8)) throw new Error("maxEvents must be an integer from 1 to 8. No state changed.");
+        const ctx = getContext(rest);
+        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
+        restoreContext(ctx);
+        if (observeCurrentHumanInput(ctx)) persistState(pi);
+        const frame = contextState.frames.at(-1);
+        const snapshot = buildStateSnapshot(state, params?.cursor ?? null, {
+          contextRevision: contextState.revision,
+          contextFrame: frame ? { active: true, depth: contextState.frames.length, id: frame.id } : { active: false, depth: 0, id: null },
+        });
+        if (Number.isInteger(params?.maxEvents) && snapshot.delta?.events?.length > params.maxEvents) {
+          snapshot.delta.omitted = (snapshot.delta.omitted ?? 0) + snapshot.delta.events.length - params.maxEvents;
+          snapshot.delta.events = snapshot.delta.events.slice(-params.maxEvents);
+        }
+        return readResult(JSON.stringify(snapshot), { cursor: snapshot.cursor, unchanged: snapshot.unchanged === true, stateRevision: state.stateRevision });
       });
-      if (Number.isInteger(params?.maxEvents) && snapshot.delta?.events?.length > params.maxEvents) {
-        snapshot.delta.omitted += snapshot.delta.events.length - params.maxEvents;
-        snapshot.delta.events = snapshot.delta.events.slice(-params.maxEvents);
-      }
-      if (snapshot.unchanged) {
-        return readResult(JSON.stringify(snapshot), { cursor: snapshot.cursor, unchanged: true, stateRevision: snapshot.stateRevision });
-      }
-      return readResult(JSON.stringify(snapshot), { cursor: snapshot.cursor, hasNewEvents: snapshot.delta?.hasNewEvents ?? false, stateRevision: snapshot.stateRevision });
     },
   });
 }
@@ -1211,6 +1201,8 @@ function restoreContext(ctx: any) {
     const branch = ctx?.sessionManager?.getBranch?.();
     if (!Array.isArray(branch)) throw new Error("Native active-branch context is unavailable; no context state was reset.");
     contextState = restoreContextState(branch);
+    const frame = contextState.frames.at(-1);
+    if (ctx?.hasUI) ctx.ui?.setStatus?.("compass-frame", frame ? `frame ${contextState.frames.length} · ${frame.id}` : "frame: root");
     return contextState;
   } catch (error) {
     // Hook exceptions alone do not stop Pi's provider request. Abort through the
@@ -1227,7 +1219,7 @@ function contextOperationSchema() {
   const selection = Type.Object({ id: sourceId, version, binding: Type.Optional(binding), range: Type.Optional(range) }, { additionalProperties: false });
   return Type.Object({
     action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"] }),
-    expectedRevision: Type.Integer({ minimum: 0, description: "Context revision from the latest committed native context receipt or compass_state cursor." }),
+    expectedRevision: Type.Integer({ minimum: 0, description: "Context revision from a native receipt/search, or the numeric C segment of compass_state.cursor." }),
     task: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "Required for call: the local procedure and objective." })),
     capture: Type.Optional(Type.Array(Type.Object({ id: sourceId, mode: Type.String({ enum: ["ref", "copy"] }), version, binding: Type.Optional(binding) }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true })),
     exportIds: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Sources explicitly returned to the parent frame; default none." })),
@@ -1376,7 +1368,6 @@ function capabilitySchemaSignature(capability: string): string {
   // Operation schemas stay stable across ordinary state changes. Runtime
   // validates IDs/statuses at execution, avoiding stale-schema "tool not found".
   if (capability === "planning") return "planning-operations-v1";
-  if (capability === "goal_change") return "goal-change-v1";
   if (capability === "acceptance") return "acceptance-v1";
   if (capability === "history") return `history-v1|dag:${state.plan.tasks.length > 0}`;
   if (capability === "routes") return "routes-v1";
@@ -1511,7 +1502,6 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             const planned = noMutation(() => revisePlanState(state, { acceptanceCriteria: params.acceptanceCriteria, tasks: params.tasks }));
             state = planned.state;
             setActiveCapabilities([...activeCapabilities(), "acceptance"]);
-            state.autoActivation = null;
             afterMutation(pi, contextCwd(ctx));
             const dependencyReady = readyTasks(state.plan).map((task: any) => task.id);
             const ready = dagApprovalStatus(state).approved ? dependencyReady : [];
@@ -1970,7 +1960,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
   if (capability === "goal_details") {
     names.push(registerOnce(pi, "compass_goal_read", {
       label: "Read Goal Details",
-      description: "On-demand full original Goal, current Goal, retained hard constraints, and recent Human updates. The normal context contains a compact projection. Repeated reads of an unchanged Goal add no new evidence.",
+      description: "On-demand semantic Original/Current Goal, native Human source references, declared constraints, criteria and genuine questionnaire answers. Raw Human messages stay in Pi; an Agent-authored Goal is not Human approval.",
       promptSnippet: "Read Goal details only when the compact compass_state is insufficient; reuse the result unless Goal version/source changes or compaction removes required details.",
       parameters: Type.Object({}, { additionalProperties: false }),
       async execute(_id: string, _params: any, ...rest: any[]) {
@@ -1978,41 +1968,6 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         assertCapability("goal_details");
         return readResult(buildGoalDetails(state));
-      },
-    }));
-    return names;
-  }
-
-  if (capability === "goal_change") {
-    const updates = explicitGoalChangeUpdates(state);
-    if (!updates.length) throw new Error("Goal change capability is not available without an explicit recorded Goal/scope change.");
-    names.push(registerOnce(pi, "compass_goal_change", {
-      label: "Resolve Goal Change",
-      description: "Resolve a pending Human scope-change candidate. Use action=apply only after semantic review; use action=dismiss when the current Goal remains correct. Original Goal and prior evidence are retained. Applying archives the current DAG; no code is rolled back.",
-      promptSnippet: "A pending candidate is not an applied Goal change. Apply it only when the Human message changes the current target; otherwise dismiss it so it does not remain pending.",
-      parameters: Type.Object({
-        updateId: Type.String({ minLength: 1, maxLength: 32, description: "ID of a recorded explicit Human Goal/scope update. Runtime rejects unknown or stale IDs without mutation." }),
-        action: Type.String({ enum: ["apply", "dismiss"], description: "Apply the new Goal after review, or dismiss the candidate and retain the current Goal." }),
-        newGoal: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "Optional override for action=apply. Omit to use the proposed Goal when one was extracted; if no proposal exists, provide newGoal. Override only to clarify without narrowing scope." })),
-        acceptanceCriteria: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { maxItems: 12 })),
-      }, { additionalProperties: false }),
-      async execute(_id: string, params: any, ...rest: any[]) {
-        return serialized(async () => {
-          const ctx = getContext(rest);
-          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-          activeCheck("goal_change");
-          if (params.action === "dismiss") {
-            const result = noMutation(() => dismissGoalChangeCandidate(state, params));
-            state = result.state;
-            afterMutation(pi, contextCwd(ctx));
-            return stateResult(`Dismissed scope-change candidate ${result.updateId}; Current Goal and plan remain unchanged.`, { mutation: "goal_change_dismissed", updateId: result.updateId });
-          }
-          if (params.action !== "apply") throw new Error('action must be "apply" or "dismiss". No state changed.');
-          const result = noMutation(() => applyGoalChange(state, params));
-          state = result.state;
-          afterMutation(pi, contextCwd(ctx));
-          return stateResult(`Current Goal changed using Human update ${result.updateId}. Original Goal retained. Previous DAG archived (${result.archivedTaskCount} task summaries); ${state.goal.criteria.length} acceptance criteria captured for the new Goal; no code was rolled back.`, { mutation: "goal_change", updateId: result.updateId, acceptanceCriteria: state.goal.criteria.length, sourceUpdateId: state.goal.sourceUpdateId });
-        });
       },
     }));
     return names;
@@ -2041,24 +1996,18 @@ function ensureCurrentLoadout(pi: any, ctx: any) {
   const beforeActive = activeCapabilities();
   const active = beforeActive.filter((capability) => allowed.includes(capability));
   if (state.goal.criteria?.some((item: any) => item.goalVersion === state.goal.version) && allowed.includes("acceptance") && !active.includes("acceptance")) active.push("acceptance");
-  // Surface the resolver only when a Human message created a pending scope
-  // candidate. This does not apply the candidate; the Agent must choose apply
-  // or dismiss after reviewing the full message.
-  if (explicitGoalChangeUpdates(state).length && allowed.includes("goal_change") && !active.includes("goal_change")) active.push("goal_change");
   setActiveCapabilities(active);
   const currentLoader = ensureLoader(pi);
   const tools = registerActiveCapabilityGroups(pi);
   const activeChanged = beforeActive.join("|") !== activeCapabilities().join("|");
-  const desiredCompassNames = [...new Set([currentLoader, ...(state.goal.current ? ["compass_state", "compass_context"] : []), ...tools].filter(Boolean))];
+  const desiredCompassNames = [...new Set(["compass_goal", "compass_state", "compass_context", currentLoader, ...tools].filter(Boolean))];
   const desiredSignature = loadoutSignature(activeCapabilities());
   const visibleNames = activeNames(pi);
   const visibleCompassNames = visibleNames.filter((name) => isCompassName(name));
   const desiredSet = new Set(desiredCompassNames);
   const loadoutMismatch = desiredCompassNames.some((name) => !visibleNames.includes(name))
     || visibleCompassNames.some((name) => !desiredSet.has(name));
-  const stateToolMissing = Boolean(state.goal.current) && !visibleNames.includes("compass_state");
-  const contextToolMissing = Boolean(state.goal.current) && !visibleNames.includes("compass_context");
-  if (desiredSignature !== lastLoadoutSignature || loadoutMismatch || (Boolean(currentLoader) && !visibleNames.includes(currentLoader)) || stateToolMissing || contextToolMissing || loadoutRefreshPending) {
+  if (desiredSignature !== lastLoadoutSignature || loadoutMismatch || (Boolean(currentLoader) && !visibleNames.includes(currentLoader)) || loadoutRefreshPending) {
     setCompassLoadout(pi, desiredCompassNames);
     lastLoadoutSignature = loadoutSignature(activeCapabilities());
     loadoutRefreshPending = false;
@@ -2081,10 +2030,6 @@ function resultText(result: any): string {
 function refreshAfterHumanInput(pi: any, ctx: any) {
   state.projectRoot = contextCwd(ctx);
   loadoutRefreshPending = true;
-  // Surface planning operations early when the Human's own Goal explicitly
-  // describes multiple parts/workstreams. This only changes tool visibility:
-  // it never creates a DAG or requires the Agent to use it.
-  maybeAutoActivatePlanning(state.projectRoot);
   const revisionBeforeLoadout = state.stateRevision ?? 0;
   ensureCurrentLoadout(pi, ctx);
   // Persist the Human update exactly once. ensureCurrentLoadout may already have
@@ -2127,41 +2072,7 @@ function canonicalWriteTarget(targetValue: string, cwd?: string): string {
   return path.resolve(cwd || state.projectRoot || process.cwd(), target);
 }
 
-function maybeAutoActivatePlanning(cwd?: string): boolean {
-  if (!state.goal.current || state.plan.tasks.length || activeCapabilities().includes("planning")) return false;
-  const currentVersion = state.goal.version ?? 1;
-  const root = cwd || state.projectRoot || process.cwd();
-  const goalText = [
-    state.goal.current,
-    ...(state.goal.current === state.goal.original ? [state.goal.original] : []),
-    state.goal.sourceUpdateText,
-    ...state.goal.updates.filter((item: any) => item.goalVersion === currentVersion).slice(-2).map((item: any) => item.sourceText || item.text),
-  ].filter((value) => typeof value === "string" && value.trim()).join("\n");
-  const explicitSignal = planningActivationSignal(goalText);
-  const keys = new Set();
-  for (const item of state.trace.writes.filter((entry: any) => entry.goalVersion === currentVersion)) {
-    const target = canonicalWriteTarget(item?.target ?? "", root);
-    if (target) keys.add(target);
-  }
-  const reason = explicitSignal || (keys.size >= 3 ? `${keys.size} distinct write targets attempted` : "");
-  if (!reason) return false;
-  state.projectRoot = root;
-  setActiveCapabilities([...activeCapabilities(), "planning"]);
-  state.autoActivation = {
-    capability: "planning",
-    at: now(),
-    reason,
-    trigger: explicitSignal ? "explicit_goal_complexity" : "cross_file_writes",
-  };
-  loadoutRefreshPending = true;
-  return true;
-}
-
 function maybeEscalateIssueReview(_pi: any) {
-  // Defensive guard: an in-place extension reload can leave an older dependency
-  // module cached. The versioned module path should prevent that; if a broken
-  // install still occurs, failure recording must never throw from this hook.
-  if (typeof shouldSurfaceIssueReview !== "function") return false;
   if (!shouldSurfaceIssueReview(state) || activeCapabilities().includes("issue_review")) return false;
   const available = capabilitiesFor();
   if (!available.includes("issue_review")) return false;
@@ -2225,12 +2136,13 @@ export default function (pi: any) {
   dynamicToolSignaturesByPi.delete(pi);
   ensureDelegationRuntime(pi);
 
-  // State is a compact default read after Goal capture; detailed capability groups remain progressive.
+  // These small core tools work even before a semantic Goal has been set.
+  registerGoalTool(pi);
   registerStateSnapshotTool(pi);
   registerContextTool(pi);
   // Before a Goal exists no capability is applicable, so the capability loader stays hidden.
   ensureLoader(pi);
-  try { setCompassLoadout(pi, [loaderName]); } catch { /* preflight reports unsupported runtime */ }
+  try { setCompassLoadout(pi, ["compass_goal", "compass_state", "compass_context", loaderName].filter(Boolean)); } catch { /* preflight reports unsupported runtime */ }
 
   pi.on("session_start", async (_event: any, ctx: any) => {
     branchGeneration += 1;
@@ -2245,7 +2157,7 @@ export default function (pi: any) {
       const allowed = capabilitiesFor();
       setActiveCapabilities(activeCapabilities().filter((capability) => allowed.includes(capability)));
       const tools = registerActiveCapabilityGroups(pi);
-      setCompassLoadout(pi, [currentLoader, ...(state.goal.current ? ["compass_state", "compass_context"] : []), ...tools]);
+      setCompassLoadout(pi, ["compass_goal", "compass_state", "compass_context", currentLoader, ...tools].filter(Boolean));
       lastLoadoutSignature = loadoutSignature(activeCapabilities());
       loadoutRefreshPending = false;
       persistState(pi);
@@ -2277,32 +2189,17 @@ export default function (pi: any) {
     });
   });
 
-  // before_agent_start captures the prompt before the model sees it. message_end
-  // below catches Human steering/follow-up messages that do not start a new run.
-  pi.on("before_agent_start", async (event: any, ctx: any) => {
-    const prompt = typeof event?.prompt === "string" ? event.prompt : "";
-    const result = await serialized(async () => {
+  // Observe native identity only. Meaning, scope and constraints belong to the
+  // Agent's explicit compass_goal submission, never to prompt classifiers.
+  pi.on("before_agent_start", async (_event: any, ctx: any) => {
+    await serialized(async () => {
       if (needsRestore) { state = adoptBranchState(ctx); restoreContext(ctx); needsRestore = false; }
-      const messageId = String(event?.messageId ?? event?.message?.id ?? event?.id ?? "");
-      const captured = captureHumanPrompt(state, prompt, { source: "before_agent_start", messageId });
-      state = captured.state;
-      if (captured.captured) {
-        refreshAfterHumanInput(pi, ctx);
-        return;
-      }
-      ensureCurrentLoadout(pi, ctx);
-      return;
+      if (observeCurrentHumanInput(ctx)) refreshAfterHumanInput(pi, ctx);
+      else ensureCurrentLoadout(pi, ctx);
     });
-    // A new Human veto cancels exact active structured-delegation attempts before
-    // any recovery scheduling. Missing cancel/terminal acknowledgement stays unknown.
-    if (explicitSubagentVisibilityRequest(prompt) === "human_prohibited_subagents") {
-      cancelActiveDelegations(pi, "Latest Human instruction prohibits Subagent execution.");
-    }
-    // Recovery backstop: if a prior process persisted a plan but stopped before
-    // its tool_result scheduler ran, resume only tasks still ready for this exact
-    // Current Goal. The latest Human instruction is checked before dispatch.
-    scheduleReadySubagentWaves(pi, ctx ?? {}, prompt);
-    return result;
+    // Recovery can dispatch only an already approved Goal interpretation of the
+    // latest native Human input. A fresh message pauses, rather than guesses.
+    scheduleReadySubagentWaves(pi, ctx ?? {});
   });
 
   pi.on("message_end", async (event: any, ctx: any) => {
@@ -2310,27 +2207,17 @@ export default function (pi: any) {
     const human = message?.role === "user";
     const nativeWatch = message?.role === "custom" && ["watch-condition", "watch-lost"].includes(message.customType);
     if (!human && !nativeWatch) return;
-    const text = messageText(message);
-    if (!text) return;
     await serialized(async () => {
       if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
       restoreContext(ctx);
       if (nativeWatch) {
-        const watchRelease = releaseWatchMessages(contextState, text);
-        if (watchRelease) {
-          pi.appendEntry(CONTEXT_STATE_TYPE, watchRelease.entry.data);
+        const released = releaseWatchMessages(contextState, messageText(message));
+        if (released) {
+          pi.appendEntry(CONTEXT_STATE_TYPE, released.entry.data);
           restoreContext(ctx);
         }
-        return;
-      }
-      const captured = captureHumanPrompt(state, text, { source: "message_end", messageId: String(message?.id ?? event?.messageId ?? "") });
-      if (!captured.captured) return;
-      state = captured.state;
-      refreshAfterHumanInput(pi, ctx);
+      } else if (observeCurrentHumanInput(ctx)) refreshAfterHumanInput(pi, ctx);
     });
-    if (human && explicitSubagentVisibilityRequest(text) === "human_prohibited_subagents") {
-      cancelActiveDelegations(pi, "Latest Human instruction prohibits Subagent execution.");
-    }
   });
 
   // Goal state is reconciled by revision, not blindly overwritten by whichever
@@ -2460,7 +2347,6 @@ export default function (pi: any) {
     const cwd = state.projectRoot || process.cwd();
     let writeAdded = false;
     let driftChanged = false;
-    let activated = false;
     const canonicalTargets = rawTargets.map((rawTarget) => canonicalWriteTarget(rawTarget, cwd));
     const hasActivePlan = Boolean(state.plan?.goal && state.plan.tasks.length && state.plan.goal === state.goal.current);
     for (const target of canonicalTargets) {
@@ -2475,13 +2361,12 @@ export default function (pi: any) {
       const drift = driftReason ? recordExecutionDrift(state, { tool: event?.toolName, target, reason: driftReason }) : { state, changed: false };
       if (drift.changed) { state = drift.state; driftChanged = true; }
     }
-    activated = maybeAutoActivatePlanning(cwd);
     // Path-scope drift is advisory evidence. Compass does not coordinate
     // worktrees or act as a global write lock; the Agent/native executor owns
     // filesystem coordination.
     // Repeated identical writes/drift are no-ops. Observable path violations are
     // retained as advisory evidence.
-    if (writeAdded || driftChanged || activated) persistState(pi);
+    if (writeAdded || driftChanged) persistState(pi);
   }));
   pi.on("tool_result", async (event: any, ctx: any) => {
     const questionnaireFailure = questionnaireFailureResultPatch(event);
@@ -2576,7 +2461,7 @@ export default function (pi: any) {
       const subagentInstalled = inventory.subagents.registered || inventory.subagentLoader.registered;
       const subagentVisible = inventory.subagents.active;
       const checks = [
-        { label: "GoalRun module export contract", ok: GOAL_RUN_API_VERSION === 7 && GOAL_RUN_RELEASE === PACKAGE_VERSION && typeof shouldSurfaceIssueReview === "function" && typeof buildStateSnapshot === "function" && typeof triageIssue === "function" },
+        { label: "GoalRun module export contract", ok: GOAL_RUN_API_VERSION === 8 && GOAL_RUN_RELEASE === PACKAGE_VERSION && typeof shouldSurfaceIssueReview === "function" && typeof buildStateSnapshot === "function" && typeof triageIssue === "function" },
         { label: "Pi active-tool read/write", ok: dynamic },
         { label: "Stable-name schema replacement", ok: schemaReplacement },
         { label: "Compass loader", ok: allNames.some((name) => name === "compass_open") || availableCapabilities(state).every((name) => activeCapabilities().includes(name)) },
@@ -2596,145 +2481,9 @@ export default function (pi: any) {
       const awaiting = inventory.await;
       lines.push(`pi-await: watch=${awaiting.watch.active}; watches=${awaiting.status.active}; unwatch=${awaiting.cancel.active}. External conditions use native watch wakes; Subagents use their native completion mechanism.`);
       lines.push("Structured-delegation surface check confirms only that Compass can emit/listen on the in-process event bus; a real Subagent request/response smoke test is still required to prove installed pi-subagents compatibility and model availability.");
-      lines.push("Compass capability groups are exposed only when state or explicit task structure makes them applicable. The model-visible native Subagent tool may remain hidden; separately, Compass auto-dispatches only tasks explicitly routed as executor=subagent with read-only scope. It never infers a DAG from tool visibility, and an explicit Human prohibition blocks dispatch.");
+      lines.push("The Agent explicitly sets semantic Goals and opens optional capability groups. Native Subagent activation remains Pi-owned. Automatic dispatch requires an exactly Human-approved read-only DAG and an Agent interpretation of the latest native Human input; no natural-language classifier grants permission.");
       ctx.ui?.notify?.(lines.join("\n"), checks.every((check) => check.ok) ? "info" : "warning");
     },
   });
 
-  // Development-only live acceptance command. It refuses non-empty sessions and
-  // runs a disposable read-only DAG, so it cannot overwrite an existing Goal.
-  pi.registerCommand("compass-live-acceptance", {
-    description: "Run a real three-child read-only DAG acceptance test in a disposable Pi session; optional argument selects a project root; expect model usage/cost",
-    handler: async (_args: string, ctx: any) => {
-      const cwd = contextCwd(ctx) || process.cwd();
-      const compassRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-      const fixture = resolveLiveAcceptanceFixture({ args: _args, cwd, compassRoot });
-      if (!fixture) {
-        ctx.ui?.notify?.(
-          "Live acceptance needs a readable project root containing package.json, README.md, and at least one safe visible entry. Start Pi in such a directory or pass one explicitly: /compass-live-acceptance /path/to/project. No Goal state changed.",
-          "warning",
-        );
-        return;
-      }
-      const { root: acceptanceRoot, rootEntries, packageMeta, readmeHeading } = fixture;
-      if (fixture.usedFallback) {
-        ctx.ui?.notify?.(`Current directory is not a package root; using the Compass package as the read-only acceptance fixture: ${acceptanceRoot}`, "info");
-      }
-
-      let priorGoal = false;
-      await serialized(async () => {
-        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-        priorGoal = Boolean(state.goal.current || state.goal.original || state.plan?.tasks?.length || executionUnresolved(state.plan?.execution));
-        if (priorGoal) return;
-        state = captureHumanPrompt(emptyGoalRunState(), "Goal: Validate the live pi-subagents structured-delegation and DAG scheduler in this disposable session. Do not modify files.", { source: "compass_live_acceptance" }).state;
-        state.projectRoot = acceptanceRoot;
-        const plan = revisePlanState(state, {
-          acceptanceCriteria: [
-            "Two independent read-only Subagent tasks complete in one parallel wave.",
-            "A dependent read-only Subagent task starts only after both prerequisites complete.",
-            "Code Mode and parent-owned tasks remain undispatched by Compass.",
-          ],
-          changeReason: "Disposable live acceptance fixture; no product files are changed.",
-          tasks: [
-            { id: "probe_a", title: "Inspect visible directory entries", acceptance: "Use ls to report at least one exact non-hidden top-level entry name; evidence must include the name.", output: "One exact visible entry name with evidence", dependsOn: [], executor: "subagent", agent: "scout", writeScope: "read-only", dispatchReason: "Verify the real child tool loop independently of metadata inspection." },
-            { id: "probe_b", title: "Read package metadata", acceptance: `Read package.json and report exact name=${String(packageMeta.name).slice(0, 100)} and version=${String(packageMeta.version).slice(0, 60)}; evidence must reference package.json.`, output: "Exact package name/version and evidence", dependsOn: [], executor: "subagent", agent: "scout", writeScope: "read-only", dispatchReason: "Independently verify package metadata in a separate child context." },
-            { id: "probe_c", title: "Read README heading after prerequisites", acceptance: `Read README.md and report the first heading exactly: ${readmeHeading.slice(0, 160)}; evidence must reference README.md:1.`, output: "Exact README first heading and evidence", dependsOn: ["probe_a", "probe_b"], executor: "subagent", agent: "scout", writeScope: "read-only", dispatchReason: "Validate dependency-gated follow-up in a fresh semantic child context." },
-            { id: "probe_code", title: "Keep deterministic work in Code Mode", acceptance: "This fixture node must remain pending and must not be auto-dispatched.", dependsOn: [], executor: "code", writeScope: "read-only" },
-            { id: "probe_parent", title: "Keep coupled decisions with parent", acceptance: "This fixture node must remain pending and must not be auto-dispatched.", dependsOn: [], executor: "parent", writeScope: "read-only" },
-          ],
-        });
-        state = plan.state;
-        persistState(pi);
-      });
-      if (priorGoal) {
-        ctx.ui?.notify?.("Live acceptance refused to protect existing session state. Start a new disposable Pi session, then run /compass-live-acceptance [project-root]; no state changed.", "warning");
-        return;
-      }
-
-      const startedAt = Date.now();
-      // Exercise the same post-tool-result scheduling handler used by normal plan/task
-      // mutations. This proves the runtime can start the DAG without a separate
-      // model-issued compass_execution call; the fake-Pi suite separately verifies
-      // Pi's event registration and dispatch timing.
-      const schedulerTriggerResult = await handleCompassToolResult(pi, {
-        toolName: "compass_plan_create",
-        input: { liveAcceptance: true },
-        isError: false,
-        content: [{ type: "text", text: "Disposable live acceptance plan created." }],
-        details: {},
-      }, ctx);
-      const scheduler = autoSchedulers.get(pi);
-      if (scheduler?.promise) await scheduler.promise;
-      await serialized(async () => { persistState(pi); });
-      const tasks = state.plan?.tasks ?? [];
-      const history = state.plan?.executionHistory ?? [];
-      const firstWave = history[0];
-      const secondWave = history[1];
-      const taskById = new Map(tasks.map((task: any) => [task.id, task]));
-      const entryEvidence = String(taskById.get("probe_a")?.evidence ?? "");
-      const metadataEvidence = String(taskById.get("probe_b")?.evidence ?? "");
-      const headingEvidence = String(taskById.get("probe_c")?.evidence ?? "");
-      const checks = [
-        { name: "probe bridge accepted the structured request contract", pass: history.length >= 1 && history.every((batch: any) => batch.source === "runtime") },
-        { name: "shared post-tool-result scheduler dispatches without compass_execution", pass: ["scheduled", "already_running"].includes(schedulerTriggerResult?.details?.autoDispatch) && history.length >= 1 },
-        { name: "two independent tasks share first parallel wave", pass: Boolean(firstWave && firstWave.taskIds.includes("probe_a") && firstWave.taskIds.includes("probe_b")) },
-        { name: "dependent task starts in a later wave", pass: Boolean(secondWave && secondWave.taskIds.includes("probe_c") && firstWave?.requestId !== secondWave?.requestId) },
-        { name: "child A evidence matches a real safe directory entry", pass: rootEntries.some((name) => entryEvidence.includes(name)) },
-        { name: "child B evidence confirms actual package metadata", pass: metadataEvidence.includes(String(packageMeta.name)) && metadataEvidence.includes(String(packageMeta.version)) && /package\.json/i.test(String(taskById.get("probe_b")?.evidence ?? "")) },
-        { name: "child C evidence confirms README heading after dependencies", pass: headingEvidence.includes(readmeHeading) && /README\.md/i.test(headingEvidence) },
-        { name: "Code Mode task remains undispatched", pass: taskById.get("probe_code")?.status === "pending" },
-        { name: "parent task remains undispatched", pass: taskById.get("probe_parent")?.status === "pending" },
-        { name: "all three real Subagent tasks completed with evidence", pass: ["probe_a", "probe_b", "probe_c"].every((id) => taskById.get(id)?.status === "done" && String(taskById.get(id)?.evidence ?? "").trim()) },
-      ];
-      const allMetrics = history.flatMap((batch: any) => batch.taskMetrics ?? []);
-      checks.push({ name: "each child reports observed tool activity and a supported model", pass: ["probe_a", "probe_b", "probe_c"].every((id) => {
-        const metric = allMetrics.find((item: any) => item.id === id);
-        const observedTools = Array.isArray(metric?.observedTools) && metric.observedTools.length > 0;
-        const reportedToolCalls = Number.isFinite(metric?.toolCalls) && metric.toolCalls > 0;
-        const observedCount = Number.isFinite(metric?.observedToolCount) && metric.observedToolCount > 0;
-        return Boolean(metric && (observedTools || reportedToolCalls || observedCount) && isSupportedDelegatedModel(metric.model, [PRIMARY_MODEL, FALLBACK_MODEL]));
-      }) });
-      checks.push({ name: "usage and cost fields preserve known/unknown values", pass: allMetrics.length >= 3 && ["probe_a", "probe_b", "probe_c"].every((id) => {
-        const metric = allMetrics.find((item: any) => item.id === id);
-        if (!metric) return false;
-        const fields = [metric.cost, metric.durationMs, metric.input, metric.output, metric.toolCalls];
-        const fieldsAreKnownOrUnknown = fields.every((value: any) => value === null || (Number.isFinite(value) && value >= 0));
-        const completeClaimIsHonest = metric.metricsComplete !== true || fields.every((value: any) => Number.isFinite(value) && value >= 0);
-        return fieldsAreKnownOrUnknown && completeClaimIsHonest;
-      }) && history.every((batch: any) => Number.isFinite(batch.wallDurationMs) && batch.wallDurationMs >= 0) });
-      const report = {
-        schemaVersion: 1,
-        generatedAt: now(),
-        compassRelease: GOAL_RUN_RELEASE,
-        schedulerTrigger: "shared-post-tool-result-handler",
-        explicitCompassExecutionCalls: 0,
-        cwd,
-        package: { name: String(packageMeta.name), version: String(packageMeta.version) },
-        result: checks.every((check) => check.pass) ? "PASS" : "FAIL",
-        durationMs: Date.now() - startedAt,
-        checks,
-        waves: history.map((batch: any) => ({ requestId: batch.requestId, taskIds: batch.taskIds, status: batch.status, wallDurationMs: batch.wallDurationMs, sumDurationMs: batch.sumDurationMs, estimatedParallelSavingsMs: batch.estimatedParallelSavingsMs, totalCost: batch.totalCost, fallbackCount: batch.fallbackCount, metricsComplete: batch.metricsComplete, policyMode: batch.policyMode, policyReason: batch.policyReason })),
-        taskMetrics: allMetrics,
-        taskResults: ["probe_a", "probe_b", "probe_c", "probe_code", "probe_parent"].map((id) => ({ id, status: taskById.get(id)?.status ?? "missing", evidence: clip(taskById.get(id)?.evidence ?? "", 800), reason: clip(taskById.get(id)?.reason ?? "", 300) })),
-        note: "Contains only bounded smoke-test output, model usage metrics, and safe filenames/evidence; no settings or credentials are included.",
-      };
-      const requestedReportDir = typeof process.env.PI_COMPASS_LIVE_REPORT_DIR === "string" ? process.env.PI_COMPASS_LIVE_REPORT_DIR.trim() : "";
-      const allowedReportPrefix = path.join(os.tmpdir(), "pi-compass-live-evidence-");
-      const resolvedReportDir = requestedReportDir ? path.resolve(requestedReportDir) : "";
-      const reportPath = resolvedReportDir.startsWith(allowedReportPrefix)
-        ? path.join(resolvedReportDir, "live-acceptance.json")
-        : path.join(os.tmpdir(), `pi-compass-live-acceptance-${Date.now()}.json`);
-      try {
-        fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-        fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-        fs.chmodSync(reportPath, 0o600);
-      } catch { /* The TUI summary remains usable if /tmp is unavailable. */ }
-      const totalCostComplete = history.every((batch: any) => Number.isFinite(batch.totalCost));
-      const totalCost = history.reduce((sum: number, batch: any) => sum + (Number.isFinite(batch.totalCost) ? batch.totalCost : 0), 0);
-      const totalWall = history.reduce((sum: number, batch: any) => sum + (batch.wallDurationMs || 0), 0);
-      const totalSavings = history.reduce((sum: number, batch: any) => sum + (batch.estimatedParallelSavingsMs || 0), 0);
-      const lines = [`Compass live acceptance: ${report.result}`, ...checks.map((check) => `${check.pass ? "PASS" : "FAIL"} ${check.name}`), `Subagent batches=${history.length}; ${totalCostComplete ? `total reported cost=$${totalCost.toFixed(4)}` : `reported cost incomplete (known subtotal=$${totalCost.toFixed(4)})`}; combined batch wall=${Math.round(totalWall / 1000)}s; estimated wait saved=${Math.round(totalSavings / 1000)}s; duration=${Math.round(report.durationMs / 1000)}s.`, `Fallback attempts=${history.reduce((sum: number, batch: any) => sum + (batch.fallbackCount || 0), 0)}; usage metrics=${history.every((batch: any) => batch.metricsComplete) ? "complete" : "partial"}.`, `Report: ${reportPath}`];
-      ctx.ui?.notify?.(lines.join("\n"), report.result === "PASS" ? "info" : "warning");
-    },
-  });
 }

@@ -19,7 +19,8 @@ import {
 import { emptyDagState, createOrRevisePlan, taskAssessmentBinding, updateTasks } from "../src/dag-core.mjs";
 import { bindDagApprovalQuestionnaire, captureHumanDecision } from "../src/goal-run.mjs";
 import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
-import { emptyGoalRunState, captureHumanPrompt, normalizeGoalRunState, recordExecutionDrift, recordExecutionEvent, transitionTasks, revisePlanState } from "../src/goal-run.mjs";
+import { normalizeGoalRunState, recordExecutionDrift, recordExecutionEvent, transitionTasks, revisePlanState } from "../src/goal-run.mjs";
+import { createGoalState } from "./helpers/goal-state.mjs";
 
 const task = (id, overrides = {}) => ({
   id,
@@ -188,7 +189,7 @@ test("provider diagnostics survive bounded response parsing and GoalRun normaliz
     result: { kind: "structured", value: { status: "done", summary: "Found provider behavior.", evidence: ["docs/provider.md:8"], reason: "" } },
     providerDiagnostics: { errorCount: 2, lastError: { kind: "unknown", message: "Safe fixed description", at: 10 }, retry: { phase: "in_flight", attempt: 2, maxAttempts: 3, delayMs: 0, scheduledAt: 11 } },
   }, { requestId: "req-provider", ownerRunId: "wave-provider", nodeId: "provider" });
-  let state = captureHumanPrompt(emptyGoalRunState(), "Goal: inspect provider behavior").state;
+  let state = createGoalState("Goal: inspect provider behavior");
   state.plan = { ...state.plan, goal: state.goal.current, revision: 1, tasks: [task("provider"), task("provider-note", { executor: "parent", dependsOn: ["provider"] })] };
   state.plan.execution = {
     requestId: "wave-provider", taskIds: ["provider"], planRevision: state.plan.revision, status: "completed",
@@ -251,10 +252,14 @@ test("child prompt preserves Goal and hard constraints while explicitly forbiddi
   assert.match(prompt, /Task ID: auth/);
   assert.match(prompt, /Why a separate Subagent context is justified/);
   assert.match(prompt, /structured result/);
+  const constraints = Array.from({ length: 24 }, (_, index) => `Constraint ${index}: ${"retain this material restriction ".repeat(10)}`);
+  const complete = buildTaskPrompt({ goal: "Goal ".repeat(600), task: task("full"), constraints });
+  for (const constraint of constraints) assert.ok(complete.includes(constraint.trim()), "declared constraints must not be silently dropped or clipped");
+  assert.throws(() => buildTaskPrompt({ goal: "Inspect", task: task("oversized"), constraints: [...constraints, "one more"] }), /no instruction was silently truncated/);
 });
 
 test("material DAG revisions are refused while a Subagent batch is unresolved", () => {
-  let state = captureHumanPrompt(emptyGoalRunState(), "Goal: inspect and update two scoped areas").state;
+  let state = createGoalState("Goal: inspect and update two scoped areas");
   const tasks = [
     task("a", { executor: "code", writeScope: "src/a.ts" }),
     task("b", { executor: "code", writeScope: "src/b.ts" }),
@@ -270,7 +275,7 @@ test("material DAG revisions are refused while a Subagent batch is unresolved", 
 });
 
 test("execution events and usage metadata survive GoalRun normalization", () => {
-  let state = captureHumanPrompt(emptyGoalRunState(), "Goal: inspect two independent read-only areas").state;
+  let state = createGoalState("Goal: inspect two independent read-only areas");
   state.plan = createOrRevisePlan(state.plan, {
     goal: state.goal.current,
     acceptanceCriteria: ["Both areas are understood"],
@@ -299,7 +304,7 @@ test("execution events and usage metadata survive GoalRun normalization", () => 
 });
 
 test("GoalRun normalization preserves unknown usage/cost fields as null", () => {
-  let state = captureHumanPrompt(emptyGoalRunState(), "Goal: inspect usage metadata").state;
+  let state = createGoalState("Goal: inspect usage metadata");
   state.plan = createOrRevisePlan(state.plan, { goal: state.goal.current, acceptanceCriteria: ["Usage metadata preserved"], tasks: [task("a"), task("b")] });
   state.plan.execution = {
     requestId: "wave-missing-metrics", taskIds: ["a"], planRevision: state.plan.revision, status: "completed",
@@ -328,7 +333,7 @@ function approvePlan(state) {
 }
 
 test("runtime drift records a compact warning once and the next Goal anchor explains recovery", () => {
-  let state = captureHumanPrompt(emptyGoalRunState(), "Goal: implement two related changes").state;
+  let state = createGoalState("Goal: implement two related changes");
   state = revisePlanState(state, { acceptanceCriteria: ["Both changes pass"], tasks: [task("a", { executor: "code", writeScope: "src/a.ts" }), task("b", { executor: "code", writeScope: "src/b.ts" })] }).state;
   state = approvePlan(state);
   const first = recordExecutionDrift(state, { tool: "edit", target: "/tmp/project/src/a.ts", reason: "No writable task is in progress." });
