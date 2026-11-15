@@ -29,8 +29,8 @@ const transition = sample(() => planWatchBoundary({
 }));
 const contextBytes = Buffer.byteLength(JSON.stringify(context), "utf8");
 const stateBytes = Buffer.byteLength(JSON.stringify(state), "utf8");
-const frameWindow = Math.min(count, 128);
-manager.appendCompaction("Synthetic parent summary for a bounded active window.", branch[count - frameWindow].id, 0, {}, true);
+const frameWindow = count;
+// Exercise the long-session path directly: frame snapshots store native references, not payload copies.
 const operation = { action: "call", expectedRevision: 0, task: "Measure an empty-capture attention frame" };
 const call = { role: "assistant", content: [{ type: "toolCall", id: "measure-frame", name: "compass_context", arguments: operation }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: 0 };
 const reply = { role: "toolResult", toolCallId: "measure-frame", toolName: "compass_context", content: [], details: { contextOperation: operation }, isError: false, timestamp: 0 };

@@ -1,48 +1,40 @@
 ---
 name: pi-compass
-description: Use Compass V2 for same-session attention frames, scoped context recovery, native waits/children, Human-approved DAG work, route comparison, and evidence-based Goal acceptance. Load when a Goal needs explicit context isolation, retained source data, delegated read-only work, competing routes, or acceptance tracking.
+description: Use Compass for retained Goal/evidence state, same-session attention frames, source recovery, optional Human-approved DAGs, and route comparison. Load when these reduce the work needed for a real task, not to exercise every capability.
 ---
 
-# Compass V2 operating guide
+# Compass: Agent operating guide
 
-Use Compass as a small control surface around Pi's native session, tools, waits, and child execution. Do not create another session, transcript, scheduler, conventions registry, or policy store.
+Work normally. Compass changes retained state and future context, not Pi's raw history or filesystem. Use the smallest useful operation; no obligatory Goal, frame, DAG, review or ceremony.
 
-## Ownership
+## Goal and evidence
 
-- **Agent:** understand the Goal, choose attention and routes, interpret caveats, decide whether decomposition or delegation is worth its cost, and integrate results.
-- **Pi:** owns the session tree, raw append-only history, compaction, context projection, and native extension boundaries.
-- **Compass:** owns Goal/version state, explicit Human constraints and decisions, scoped values, deterministic versions, DAG approval/readiness, evidence references, and acceptance status.
-- **Code Mode:** deterministic batching, parsing, validation, and aggregation in the parent session.
-- **pi-subagents:** native isolated child execution. Compass automatic DAG dispatch requires explicit `executor=subagent`, read-only scope, exact Human approval and readiness. Independently authorized native scouting does not require adopting a DAG.
-- **pi-await:** native watch lifecycle and wakes. Do not poll or implement a second observer.
+- When Goal tracking helps, `compass_goal({expectedVersion:0,current,constraints,acceptanceCriteria?})` creates your semantic interpretation. Human sources default to the latest native input. Submit the complete constraint list; your interpretation is not Human approval.
+- Reaffirm/update the Goal after material Human input before resuming an approved DAG. Same objective/constraints can preserve exact approval; replacement reports which Goal-specific work was reset. Do not treat old criterion IDs as new-Goal evidence.
+- Reuse mutation receipts. Read `compass_state({cursor})` only when state is missing; use returned cursors unchanged. Native tool diagnostics belong to `/compass-preflight`, not routine Goal reads.
+- `compass_open` loads missing groups once: `acceptance`, `history`, `goal_details`, `planning`, `routes`, `issue_review`. Open only what the next step needs. No need to open planning to retain evidence.
+- Acceptance is optional and may be recorded whenever evidence is available. Define concrete criteria, use returned IDs, then record `reported_pass|failed|blocked|inconclusive` with real evidence. No independent verification is inferred from your report. Status returns current full criterion text/evidence; no mandatory reread after every record.
 
-## Default path
+## Retain or recover context
 
-1. Keep simple work light. When Goal tracking is useful, explicitly call `compass_goal` with your semantic objective, complete constraints, optional criteria and `expectedVersion` (0 for creation). Native Human sources default to the latest input; runtime never interprets prose. After new Human input, review it and reaffirm the unchanged Goal/constraints or explicitly replace them before approved DAG work resumes. This is not Human approval. Do not create a DAG, route race, reviewer, watchdog, or retained slot merely because one exists.
-2. If attention isolation reduces total work, call `compass_context` with an explicit `call` and capture list. Capture defaults to none. Use `ref` for a shared binding and `copy` for a private copy-on-write value. Return explicitly; do not assume turn completion pops a frame. The native footer and `compass_state.contextFrame` show committed root/frame identity; a queued call is not an entered frame.
-3. Search only when needed. Use returned stable `id`, `binding`, and `version` exactly. Candidate recovery is bounded and lexical across active/parent/history scope. For semantic selection, interpret the candidates in the parent and pass `rankedSources` in your chosen order; runtime verifies sources/versions/ranges, not meaning. No embedding store or extra model loop is implied. For repeated reads, use bounded `compare`; move an earlier read with `verifiedAgainst` only when exact source/range/payload evidence passes. Subsets need a shared native file revision; retain the entire earlier superset and its unrefreshed caveats. Failed/truncated later reads and ambiguous paths are not permission to relocate.
-4. Pin only material data with an explicit scope, kind, caveat, and lifetime. Before a Goal exists, default retention is session-scoped; explicit Goal lifetime requires a semantic Goal. A pin is qualified context data, never system authority. Original Human messages and executed calls remain read-only. Use `load` for a version/range-checked data copy and `move` for a whole working value or selected Agent-text range. A tool-result range stays a qualified data copy beside its complete execution envelope. Use `spill` only when a verified project artifact is worth the filesystem cost.
-5. Use native `watch`, `watches`, and `unwatch` for waiting. A repeating watch is still live after one wake. A frame blocks return only for its own live watches; cancel or explicitly transfer them. Treat `WATCH_SETTLED`, `WATCH_LOST`, timeout, error, and cancellation as different states.
-6. Use native Code Mode or pi-subagents for execution. Never silently convert `parent`, `code`, or `subagent` intent. A missing or unknown child response is unknown; do not retry or duplicate-dispatch it.
+1. `compass_context({action:"search",query,sourceScope?})` returns the context revision and bounded sources with exact `id`, `binding`, `version` and ranges. No prior state call is needed. Default scope is active; use parent/history/all for omitted sources. Keywords match **any** term by default and rank by matched count; use `match:"all"` for conjunction. This is literal recovery, not semantic inference. Do not slice away IDs/versions needed for the next operation.
+2. Pin material instructions/evidence with `action:"pin",expectedRevision,ids`. Pins are qualified context, not extra system authority. Lifetime defaults to the current Goal, or session when no Goal exists; set session explicitly when required. Use `mark` with version, handling and reason to record active/handled/retired state. Retirement unpins; it is not deletion of raw history.
+3. `load` makes a version/range-checked data copy; `move` relocates an eligible value/range. Original Human instructions and executed calls remain immutable. `replace` edits eligible working data; `drop` needs every selected source's version and preserves complete tool exchanges.
+4. Spill only when a verified artifact is worth its filesystem and recovery cost: `spill` needs IDs/version, a new project-relative path and purpose; Compass writes/readbacks the artifact. `load` verifies its receipt. Do not prewrite the destination. Failed later commits can leave an artifact; no filesystem rollback is implied.
 
-## DAG and Human approval
+Search may run in Code Mode. **All context mutations must be direct standalone calls**, not nested or parallel with another tool. Supply `expectedRevision` from search/receipt or the cursor's C segment. Validation errors happen before queued when possible. `queued` means no context commit yet; the native boundary then emits a correlated `applied` or `rejected` receipt with the actual revision. Use that receipt; do not poll. A boundary can still reject a queued operation if another extension changed its preconditions.
 
-A DAG is optional and starts as a draft. Before any task progression or automatic child dispatch:
+## Same-session attention frame
 
-1. Present the exact concrete questionnaire, including Goal/plan version, tasks, dependencies, executor, read/write scope, outputs, dispatch rationale, and acceptance criteria.
-2. Wait for a genuine structured Human answer correlated to the persisted assistant exchange. Text saying “approved”, partial/custom answers, UI/validation errors, and answers with substantive conditions are not approval.
-3. Any material Goal, task, dependency, executor, scope, output, or acceptance change requires a new approval. Status/evidence updates do not.
-4. Complete a task, then submit an explicit semantic assessment against its approved criterion with evidence and unresolved caveats. Only a current passing assessment unlocks dependents. Completion, assessment, independent review, and final Goal acceptance are distinct.
-5. Keep parent/code tasks with the parent. Compass may automatically dispatch only approved, ready, explicit read-only Subagent tasks. Human prohibition, unavailable native delegation, unknown runs, and stale approval fail closed.
+- `call` needs a local task and optional capture list; capture/export defaults are empty. `ref` shares an enclosing value and writes survive failure; `copy` is private and forks on write. Pins remain qualified inputs. A frame does not launch another Agent/session or roll back files.
+- Work locally, then explicitly `return` with result/export IDs. Turn completion does not pop. Only selected outputs and material external/Human facts survive return; local process is released.
+- Native watches belong to their arm identity. Cancel or transfer live frame-owned watches to root/parent before return. A repeating wake is not terminal. Use native `watch/watches/unwatch`; never poll or create a second timer loop.
 
-## Routes and exploration
+## Optional plans and alternatives
 
-Alternatives are a RouteSet, not sibling DAG tasks. Select one route by default. Use `propose_exploration` to display the exact scope, budget, baseline and routes; only the correlated, unqualified native Human answer authorizes it. Never supply an Agent-authored questionnaire result as Human evidence. Register exact competitor identities after authorization. Compare competitors against shared acceptance criteria and caveats; never stop the first route merely because it finishes first. Request cancellation only after the acceptance gate passes, and track request, acknowledgement, terminal, and unknown cancellation separately. Filesystem/worktree coordination remains the Agent's responsibility.
+- DAG tasks explicitly choose parent/code/subagent. Keep coupled reasoning with parent, deterministic batching in Code Mode, and bounded semantic investigation in read-only Subagents. `dispatchReason` explains why another context is worth it.
+- A draft does not execute. The plan tool-result supplies **exact questionnaire arguments**: pass them unchanged to the native question tool, including previews. Text, partial/custom conditions and UI errors are not approval. Material definitions require new approval; status/evidence updates do not.
+- Compass dispatches approved ready read-only Subagent tasks through pi-subagents. Do not manually dispatch/start them again. Native results are evidence; explicitly assess completed prerequisites against their criterion and unresolved caveats before dependents unlock. Unknown runs require native status reconciliation, not retry.
+- Route alternatives are not DAG siblings. `create` requires baselineRef, shared criteria and 2–3 routes. Use the returned exact selection questionnaire; `select` cannot self-approve. `result` records a **registered native competitor**, requiring runId/routeId/correlationId and complete shared-criterion evidence, not just a route-level opinion. Existing RouteSet mutations require its current stateVersion. Exploration needs exact Human scope/budget authorization; competitor cancellation is acceptance/identity-gated.
 
-## Root-cause and recovery
-
-When something fails, first reproduce or collect the native event/result, then identify the earliest faulty boundary. Preserve the raw Pi exchange and cite stable source/event IDs. Keep failed, partial, stale, altered, and unknown evidence qualified. Use the actionable error's next step: reload an externally changed source, re-arm a lost watch from its saved call, reconcile a terminal child using native status, renew approval after material change, or revise the route after contradictory evidence. Do not hide a failure by resetting state or by claiming rollback of filesystem effects.
-
-## Acceptance
-
-A local test pass proves only the behavior exercised by that test. An Agent-reported criterion pass is not independent verification. Before claiming a Goal complete, use current receipts or compact state when needed, verify material acceptance criteria and caveats, and retain evidence references. Distinguish local implementation evidence from real Pi/provider acceptance; source tests do not prove provider availability, token/cache behavior or semantic quality.
+On failure, preserve native IDs and qualifications. Use current receipts to correct the failed precondition; source inspection should not be necessary for ordinary usage. Report unknowns and boundaries honestly. A local test or Agent report is not live provider acceptance or proof of lower total cost.

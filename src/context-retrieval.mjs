@@ -113,6 +113,14 @@ function* uniqueCandidates(index, state, scope, ids) {
   const seen = new Set();
   for (const candidate of candidates(index, state, scope, ids)) {
     if (!candidate) continue;
+    const entry = index.byId.get(candidate.id);
+    const group = index.groups?.get(candidate.id);
+    const request = group && rawMessage(index.byId.get(group.ids[0]));
+    const native = rawMessage(entry);
+    const nested = native?.nestedCalls;
+    const directSearch = native?.toolName === "compass_context" && request?.content?.some?.((part) => part.type === "toolCall" && part.name === "compass_context" && part.arguments?.action === "search");
+    const nestedSearch = native?.toolName === "codemode" && nested?.complete === true && nested.calls?.length > 0 && nested.calls.every((call) => call.name === "compass_context" && call.arguments?.action === "search");
+    if (!ids?.size && (directSearch || nestedSearch)) continue;
     const key = `${candidate.binding}:${candidate.version}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -134,22 +142,32 @@ export function selectSourceRange(content, range) {
   const text = lines.slice(startLine - 1, endLine).join("\n");
   return { content: typeof content === "string" ? text : [{ ...block, text }], range: { part, startLine, endLine } };
 }
-export function searchSources(index, state, { query = "", ids = [], scope = "active", limit = 8 } = {}) {
+export function searchSources(index, state, { query = "", ids = [], scope = "active", limit = 8, match = "any" } = {}) {
   scopes(scope);
   if (typeof query !== "string" || query.length > 400 || !Number.isInteger(limit) || limit < 1 || limit > 16) fail("Search requires query <=400 characters and limit 1..16.");
   if (!Array.isArray(ids) || ids.length > 256 || ids.some((id) => typeof id !== "string")) fail("Invalid source IDs.");
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!["any", "all"].includes(match)) fail("match must be any or all.");
+  const terms = [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
   const hits = [];
   let scanned = 0;
   let truncated = false;
+  let matches = 0;
   for (const candidate of uniqueCandidates(index, state, scope, new Set(ids))) {
-    if (scanned === MAX_SCAN || hits.length === limit) { truncated = true; break; }
+    if (scanned === MAX_SCAN || (!terms.length && hits.length === limit)) { truncated = true; break; }
     scanned++;
     const parts = typeof candidate.content === "string" ? [{ type: "text", text: candidate.content }] : candidate.content;
-    const part = parts.findIndex((block) => block.type === "text" && terms.every((term) => block.text.toLowerCase().includes(term)));
-    if (part < 0 && terms.length) continue;
+    let part = -1;
+    let matchedTerms = [];
+    for (let index = 0; index < parts.length; index++) {
+      if (parts[index].type !== "text") continue;
+      const lower = parts[index].text.toLowerCase();
+      const matched = terms.filter((term) => lower.includes(term));
+      if (part < 0 || matched.length > matchedTerms.length) { part = index; matchedTerms = matched; }
+    }
+    if (terms.length && (match === "all" ? matchedTerms.length !== terms.length : !matchedTerms.length)) continue;
+    matches++;
     const text = part < 0 ? "" : parts[part].text;
-    const at = terms.length ? text.toLowerCase().indexOf(terms[0]) : 0;
+    const at = matchedTerms.length ? text.toLowerCase().indexOf(matchedTerms[0]) : 0;
     const from = Math.max(0, at - 80);
     const to = Math.min(text.length, from + 600);
     const startLine = text.slice(0, Math.max(0, at)).split("\n").length;
@@ -158,11 +176,13 @@ export function searchSources(index, state, { query = "", ids = [], scope = "act
       id: candidate.id, binding: candidate.binding, version: candidate.version, role: candidate.role, authorship: candidate.authorship, derived: candidate.derived, editId: candidate.editId, qualification: candidate.qualification, readStatus: candidate.readStatus, kind: candidate.head?.kind,
       visibility: candidate.visibility, origin: candidate.origin,
       range: part < 0 ? null : { part, startLine, endLine },
-      snippet: text.slice(from, to), excerpt: text.slice(from, to), chars: text.length,
+      snippet: text.slice(from, to), matchedTerms, chars: text.length,
       truncated: from > 0 || to < text.length, caveats: candidate.caveats, provenance: candidate.provenance,
     });
+    hits.sort((left, right) => right.matchedTerms.length - left.matchedTerms.length);
+    if (hits.length > limit) hits.pop();
   }
-  return { method: "lexical", scope, query, hits, scanned, truncated };
+  return { method: "lexical", scope, query, match, hits, scanned, truncated: truncated || matches > limit };
 }
 function textOf(content) {
   const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;

@@ -45,9 +45,9 @@ test("an inner ref can update an outer private copy without updating its source"
   applyOperation(manager, { action: "call", task: "inner shared", capture: [capture(manager, id, "ref")] });
   applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "private shared mutation" });
   applyOperation(manager, { action: "return" });
-  assert.equal(search(manager, id).excerpt, "private shared mutation");
+  assert.equal(search(manager, id).snippet, "private shared mutation");
   applyOperation(manager, { action: "return" });
-  assert.equal(search(manager, id).excerpt, "original");
+  assert.equal(search(manager, id).snippet, "original");
   assert.doesNotMatch(modelText(manager), /private shared mutation/);
 });
 
@@ -63,7 +63,7 @@ test("copy-on-write does not overwrite a simultaneously visible parent pin", () 
     assert.deepEqual(search(manager, id).caveats, ["Preserve the original qualification."]);
     applyOperation(manager, { action: "return" });
     assert.doesNotMatch(modelText(manager), /private value/);
-    assert.equal(search(manager, id).excerpt, "original pinned value");
+    assert.equal(search(manager, id).snippet, "original pinned value");
   }
 });
 

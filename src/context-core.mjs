@@ -4,6 +4,7 @@ import {
 } from "./context-values.mjs";
 import { analyzeRepeatedSelections, rankVerifiedSources, readObservationIdentity, readOnlyObservation, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
 import { loadContextArtifact, writeContextArtifact } from "./context-artifacts.mjs";
+import { randomUUID } from "node:crypto";
 export { contentVersion } from "./context-values.mjs";
 
 export const CONTEXT_STATE_TYPE = "pi-compass-v2.context";
@@ -12,6 +13,7 @@ export const CONTEXT_SCHEMA_VERSION = 4;
 const INTENT_TYPE = `${CONTEXT_STATE_TYPE}.intent`;
 const MAX_DEPTH = 16;
 const MAX_SOURCES = 256;
+const MAX_CONTROL_BYTES = 2 * 1024 * 1024;
 const MAX_PINS = 64;
 const MAX_CONTENT_BYTES = 128 * 1024;
 const EXTERNAL_MESSAGES = new Set(["watch-condition", "watch-lost", "subagent-result"]);
@@ -52,6 +54,8 @@ export function normalizeContextState(raw) {
   if (raw === undefined || raw === null) return emptyContextState();
   if (!object(raw) || raw.schemaVersion !== CONTEXT_SCHEMA_VERSION) fail("Unsupported Compass context schema; open a new session or navigate to a pre-context branch.");
   if (!Number.isSafeInteger(raw.revision) || raw.revision < 0 || !Array.isArray(raw.frames) || raw.frames.length > MAX_DEPTH || !Array.isArray(raw.pins) || raw.pins.length > MAX_PINS || !object(raw.values) || !object(raw.watches)) fail("Invalid Compass context metadata.");
+  const control = { schemaVersion: raw.schemaVersion, revision: raw.revision, frames: raw.frames, pins: raw.pins, values: raw.values, watches: raw.watches };
+  if (Buffer.byteLength(JSON.stringify(control)) > MAX_CONTROL_BYTES) fail("Context control metadata exceeds 2 MiB. Use native compaction before entering another frame; spilling payloads does not shrink parent restoration metadata.");
   const scopes = new Set(["root"]);
   let parent = "root";
   for (const frame of raw.frames) {
@@ -59,7 +63,8 @@ export function normalizeContextState(raw) {
     if (!Array.isArray(frame.saved) || !Array.isArray(frame.refs) || !Array.isArray(frame.copies)
       || frame.saved.some((item) => !object(item)) || frame.refs.some((item) => !object(item)) || frame.copies.some((item) => !object(item))) fail("Invalid frame source lists.");
     const frameScopes = new Set([...scopes, frame.id]);
-    ensureIds(frame.saved.map((item) => item.id), "saved source IDs");
+    const savedIds = frame.saved.map((item) => item.id);
+    if (savedIds.some((id) => typeof id !== "string" || !id) || new Set(savedIds).size !== savedIds.length) fail("Invalid or duplicate parent restoration source IDs.");
     ensureIds(frame.refs.map((item) => item.id), "reference capture IDs");
     ensureIds(frame.copies.map((item) => item.id), "copy capture IDs");
     for (const item of frame.saved) {
@@ -92,7 +97,7 @@ export function normalizeContextState(raw) {
     for (const field of ["kind", "target", "prompt"]) if (watch[field] !== undefined && typeof watch[field] !== "string") fail(`Invalid native watch ${field}.`);
     if (watch.repeat !== undefined && typeof watch.repeat !== "boolean") fail("Invalid native watch repeat state.");
   }
-  return structuredClone({ schemaVersion: raw.schemaVersion, revision: raw.revision, frames: raw.frames, pins: raw.pins, values: raw.values, watches: raw.watches });
+  return structuredClone(control);
 }
 
 function draftShape(entry) {
@@ -228,7 +233,6 @@ function snapshot(state, index, turnIds) {
     const head = ownsValue ? state.values[key] : null;
     saved.push({ id, editId: index.edits.get(id)?.id ?? null, visible: Boolean(message), binding: head ? key : null, valueState: head ? contentVersion(head) : null, logicalId });
   }
-  if (saved.length > MAX_SOURCES) fail("Too many active sources; compact or spill before entering a frame.");
   return saved;
 }
 function nativeEdit(targetId, content) { return { type: "context_edit", targetId, replacement: content === null ? null : { content: structuredClone(content) } }; }
@@ -287,7 +291,7 @@ function planCall({ next, index, boundary, operation, turnIds }) {
     const head = next.values[copy.key];
     entries.push(valueMessage({ id: copy.id, key: copy.key, head, content: valueContent(index, head, copy.id) }));
   }
-  entries.push(nativeMessage(`Frame ${frame.id}; context revision ${next.revision + 1}.\nTask: ${operation.task}\nInputs: ref=${refs.map((ref) => ref.id).join(", ") || "none"}; private copy=${copies.map((copy) => copy.id).join(", ") || "none"}. Return explicitly; exports default to none. Environment effects remain.`, { frame: frame.id, action: "call" }));
+  entries.push(nativeMessage(JSON.stringify({ action: "call", resultStatus: "applied", callId: operation.callId, revision: next.revision + 1, frame: frame.id, task: operation.task, refs: refs.map((ref) => ref.id), copies: copies.map((copy) => copy.id) }), { frame: frame.id, action: "call" }));
   return entries;
 }
 function external(entry) {
@@ -343,7 +347,7 @@ function planReturn({ next, index, boundary, operation }) {
   next.frames.pop();
   next.pins = next.pins.filter((pin) => pin.scope !== frame.id);
   releaseFrameValues(next, frame.id);
-  entries.push(nativeMessage(`Returned from ${frame.id}; context revision ${next.revision + 1}. Local process released; environment effects remain.`, { frame: frame.id, action: "return" }));
+  entries.push(nativeMessage(JSON.stringify({ action: "return", resultStatus: "applied", callId: operation.callId, revision: next.revision + 1, frame: next.frames.at(-1)?.id ?? null, returnedFrom: frame.id }), { frame: frame.id, action: "return" }));
   return entries;
 }
 function writeView(state, value, head, content) {
@@ -692,6 +696,18 @@ function transitionEntries(state, branch, boundary, operation, entries) {
   return [intent, ...entries, persisted];
 }
 
+/** Reuse the commit planner for early validation. Synthetic entries never persist. */
+export function validateContextOperation({ state, branch, boundary, operation, content = [] }) {
+  const messageEntryId = randomUUID();
+  const resultEntryId = randomUUID();
+  const message = { role: "assistant", content: [{ type: "toolCall", id: operation.callId, name: "compass_context", arguments: {} }] };
+  const result = { role: "toolResult", toolName: "compass_context", toolCallId: operation.callId, content, details: { contextOperation: operation } };
+  const entries = [{ type: "message", id: messageEntryId, message }, { type: "message", id: resultEntryId, message: result }];
+  planContextBoundary({ state, branch: [...branch, ...entries], boundary: {
+    ...boundary, messageEntryId, message, toolResults: [result], toolResultEntryIds: [resultEntryId], entries: [], outcome: "completed",
+  } });
+}
+
 export function planContextBoundary({ state: input, branch, boundary, toolName = "compass_context" }) {
   const operation = operationFromBoundary(boundary, toolName);
   if (!operation || operation.action === "search") return null;
@@ -736,7 +752,7 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
       : movedRole === "toolResult"
         ? " The complete verified read payload was relocated to the append end; its original call/result pair remains present with a projection pointer."
         : " The selected working value was moved to the append end.";
-    entries.push(nativeMessage(`Context ${operation.action} applied; revision ${next.revision}. Sources: ${(operation.ids ?? []).join(", ")}.${change}${comparisonText}${references.length ? ` Values: ${JSON.stringify(references)}` : ""}`, { action: operation.action, revision: next.revision, references, ...(operation.action === "move" ? { sourceIds: [...(operation.ids ?? [])], range: operation.range ?? null, rawExchangePreserved: movedRole === "toolResult", rawSourcePreserved: movedRole !== "toolResult", ...(comparison ? { relocationComparison: comparison, coalescedSourceIds: [operation.verifiedAgainst.id] } : {}) } : {}) }));
+    entries.push(nativeMessage(JSON.stringify({ action: operation.action, resultStatus: "applied", callId: operation.callId, revision: next.revision, ids: operation.ids ?? [], ...(references.length ? { references } : {}), ...(change || comparisonText ? { note: `${change}${comparisonText}`.trim() } : {}) }), { action: operation.action, revision: next.revision, references, ...(operation.action === "move" ? { sourceIds: [...(operation.ids ?? [])], range: operation.range ?? null, rawExchangePreserved: movedRole === "toolResult", rawSourcePreserved: movedRole !== "toolResult", ...(comparison ? { relocationComparison: comparison, coalescedSourceIds: [operation.verifiedAgainst.id] } : {}) } : {}) }));
   }
   return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: ["call", "return"].includes(operation.action) && boundary.outcome === "completed" };
 }

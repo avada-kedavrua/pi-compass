@@ -42,6 +42,8 @@ function createSummary(file) {
     noOpCapabilityOpens: 0,
     fullGoalReads: 0,
     goalStateRecords: 0,
+    goalStateBytes: 0,
+    context: { callsByAction: {}, queued: 0, messagesByAction: {}, rejectedBoundaries: 0 },
     finalState: null,
     malformedLines: 0,
   };
@@ -135,6 +137,10 @@ export async function analyzeSession(file) {
       summary.startedAt = isoTimestamp(record.timestamp);
     }
     if (record.type === "compaction") summary.compactions += 1;
+    if (record.type === "custom_message" && record.customType === "pi-compass-v2.context-message") {
+      if (record.details?.contextError === true) summary.context.rejectedBoundaries++;
+      else if (record.details?.action) addCount(summary.context.messagesByAction, record.details.action);
+    }
 
     let rawGoalState = null;
     if (record.type === "custom" && record.customType === "pi-compass-v2.goalrun" && isRecord(record.data)) rawGoalState = record.data;
@@ -143,6 +149,7 @@ export async function analyzeSession(file) {
     }
     if (isRecord(rawGoalState) && rawGoalState.schemaVersion === GOAL_RUN_API_VERSION) {
       summary.goalStateRecords += 1;
+      summary.goalStateBytes += Buffer.byteLength(JSON.stringify(rawGoalState), "utf8");
       summary.finalState = compactGoalState(rawGoalState);
     }
 
@@ -186,6 +193,7 @@ export async function analyzeSession(file) {
         addCount(summary.topLevelTools, name);
         if (name === "codemode") summary.codemodeCalls += 1;
         if (name.startsWith("compass_")) summary.compassTopLevelCalls += 1;
+        if (name === "compass_context") addCount(summary.context.callsByAction, item.arguments?.action ?? "unknown");
       }
     }
     if (message.role !== "toolResult") continue;
@@ -196,6 +204,7 @@ export async function analyzeSession(file) {
       if (name.startsWith("compass_")) summary.compassTopLevelErrors += 1;
     }
     const text = resultText(message);
+    if (name === "compass_context" && message.isError !== true && message.details?.contextOperation) summary.context.queued++;
     if (name === "compass_state") {
       let unchanged = message.details?.unchanged === true;
       if (!unchanged) {
@@ -214,6 +223,7 @@ export async function analyzeSession(file) {
       summary.nestedToolCalls += 1;
       addCount(summary.nestedTools, nestedName);
       if (nestedName.startsWith("compass_")) summary.compassNestedCalls += 1;
+      if (nestedName === "compass_context") addCount(summary.context.callsByAction, call.arguments?.action ?? "unknown");
       if (String(call?.status ?? "").toLowerCase() === "error" || call?.isError === true) {
         summary.nestedErrors += 1;
         addCount(summary.nestedErrorsByTool, nestedName);

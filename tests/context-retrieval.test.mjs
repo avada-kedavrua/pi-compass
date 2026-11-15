@@ -43,6 +43,23 @@ test("history filters IDs and deduplicates retained heads before reading repeate
   assert.ok(reads.selected <= 2, `dereferenced one retained payload ${reads.selected} times`);
 });
 
+test("keyword bags rank literal matches; strict all is explicit and result snippets are not duplicated", () => {
+  const { index, state } = fixture();
+  const found = searchSources(index, state, { query: "visible missing current", limit: 1 });
+  assert.equal(found.hits[0].id, "current");
+  assert.deepEqual(found.hits[0].matchedTerms, ["visible", "current"]);
+  assert.equal(found.hits[0].excerpt, undefined);
+  assert.equal(searchSources(index, state, { query: "visible missing current", match: "all" }).hits.length, 0);
+});
+
+test("completed search-only Code Mode results do not recursively rank themselves", () => {
+  const { index, state } = fixture();
+  const echo = { id: "search-echo", type: "message", message: { role: "toolResult", toolName: "codemode", content: [{ type: "text", text: "needle" }], nestedCalls: { complete: true, calls: [{ name: "compass_context", arguments: { action: "search" } }] } } };
+  index.branch.push(echo); index.byId.set(echo.id, echo);
+  assert.equal(searchSources(index, state, { scope: "history", query: "needle" }).hits.length, 0);
+  assert.equal(searchSources(index, state, { scope: "history", ids: [echo.id], query: "needle" }).hits[0].id, echo.id, "explicit source lookup remains recoverable");
+});
+
 test("searchSources returns bounded lexical hits and resolves an exact line range", () => {
   const { index, state } = fixture();
   const found = searchSources(index, state, { query: "visible", scope: "active" });

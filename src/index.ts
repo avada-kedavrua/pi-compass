@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { executionDriftReason } from "./write-scope.mjs";
 import { questionnaireFailureResultPatch } from "./questionnaire-integration.mjs";
 import { latestHumanSource, validateGoalSources } from "./goal-sources.mjs";
+import { agentResult } from "./compass-result.mjs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -30,6 +31,7 @@ import {
   setGoal,
   observeHumanInput,
   stateCursor,
+  parseStateCursor,
   availableCapabilities,
   acceptanceStatus,
   goalOutcomeStatus,
@@ -66,7 +68,6 @@ import {
   updateCompetitorCancellation,
   routeSetStatus,
   revisePlanState,
-  summarizePlanStatus,
   transitionTasks,
   reconcileUnknownExecutionTasks,
   triageIssue,
@@ -82,6 +83,7 @@ import {
   planObservationBoundary,
   planWatchBoundary,
   prepareContextOperation,
+  validateContextOperation,
   releaseWatchMessages,
   restoreContextState,
   searchContext,
@@ -233,15 +235,21 @@ function persistState(pi: any, value = state) {
 function persistTrace(pi: any, item: any) {
   try { pi.appendEntry?.(`${STATE_ENTRY_TYPE}.trace`, clone(item)); } catch { /* trace is best-effort */ }
 }
-function stateResult(text: string, details: Record<string, unknown> = {}) {
-  const cursor = stateCursor(state, contextState.revision);
-  return {
-    content: [{ type: "text", text: `${text}\nstateCursor: ${cursor}` }],
-    details: { ...details, cursor, stateRevision: state.stateRevision ?? 0 },
-  };
+function approvalReceipt() {
+  const { approved, requestId, status } = dagApprovalStatus(state);
+  return { approved, requestId, status };
 }
-function readResult(text: string, details: Record<string, unknown> = {}) {
-  return { content: [{ type: "text", text }], details };
+function stateResult(data: Record<string, unknown>) {
+  const receipt = { ...data, cursor: stateCursor(state, contextState.revision) };
+  const { unchanged, ...payload } = receipt;
+  return agentResult({ resultStatus: unchanged === true ? "unchanged" : "applied", ...payload }, { ...receipt, stateRevision: state.stateRevision });
+}
+function planResult(data: Record<string, unknown>) {
+  const request = state.plan.approvalRequest;
+  return stateResult({ ...data, ...(data.unchanged !== true && !dagApprovalStatus(state).approved && request ? { approvalRequest: { id: request.id, questionnaire: request.questionnaire }, next: "Pass approvalRequest.questionnaire unchanged to ask_user_question({questions:[questionnaire]})." } : {}) });
+}
+function readResult(data: unknown, details: Record<string, unknown> = {}) {
+  return agentResult(typeof data === "string" ? { ...details, text: data } : data, details);
 }
 function sameIds(left: any[], right: any[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
@@ -966,11 +974,8 @@ async function handleCompassToolResult(pi: any, event: any, ctx: any) {
 
     if (["compass_plan_create", "compass_plan_revise"].includes(toolName) && state.plan?.approvalRequest && !dagApprovalStatus(state).approved) {
       const request = state.plan.approvalRequest;
-      const approvalPrompt = `Before any DAG task starts, present the exact structured Human questionnaire in the dagApprovalRequest field through ask_user_question. Do not execute or treat text/partial/custom/UI-error output as approval. Preserve its entire question, header, multiSelect, option descriptions and preview unchanged so Compass can correlate the response. Approval request: ${request.id}`;
       const details = { ...(event?.details && typeof event.details === "object" ? clone(event.details) : {}), dagApproval: dagApprovalStatus(state), dagApprovalRequest: { id: request.id, questionnaire: request.questionnaire } };
-      const content = Array.isArray(event?.content) ? [...event.content] : [];
-      content.push({ type: "text", text: approvalPrompt });
-      return { content, details };
+      return { content: event.content, details };
     }
     const beforeSnapshot = executionSnapshotForToolResult();
     const previousHistoryIds = new Set((state.plan?.executionHistory ?? []).map((batch: any) => batch.requestId));
@@ -1141,13 +1146,14 @@ function registerGoalTool(pi: any) {
         const candidate = latest ? observeHumanInput(state, latest).state : state;
         const sourceIds = params?.sourceIds ?? (latest ? [latest] : []);
         validateGoalSources(branch, sourceIds);
+        const priorWork = { criteria: state.goal.criteria.length, tasks: state.plan.tasks.length, routeSet: Boolean(state.routeSet) };
         const result = noMutation(() => setGoal(candidate, { ...params, sourceIds }));
         if (result.changed) {
           state = result.state;
           afterMutation(pi, contextCwd(ctx));
         }
-        return stateResult(`Goal v${state.goal.version} ${result.changed ? result.replaced ? "replaced" : "recorded" : "unchanged"}: ${clip(state.goal.current, 240)}`, {
-          mutation: "goal_set", unchanged: !result.changed, goalVersion: state.goal.version, sourceIds: state.goal.sourceIds,
+        return stateResult({
+          mutation: "goal_set", unchanged: !result.changed, goalVersion: state.goal.version, sourceIds: state.goal.sourceIds, ...(result.replaced ? { reset: priorWork } : {}),
         });
       });
     },
@@ -1166,6 +1172,7 @@ function registerStateSnapshotTool(pi: any) {
     async execute(_id: string, params: any, ...rest: any[]) {
       return serialized(async () => {
         if (params?.maxEvents !== undefined && (!Number.isInteger(params.maxEvents) || params.maxEvents < 1 || params.maxEvents > 8)) throw new Error("maxEvents must be an integer from 1 to 8. No state changed.");
+        if (params?.cursor !== undefined && !parseStateCursor(params.cursor)) throw new Error("Invalid cursor. Pass a cursor returned by Compass unchanged. No state changed.");
         const ctx = getContext(rest);
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         restoreContext(ctx);
@@ -1179,7 +1186,7 @@ function registerStateSnapshotTool(pi: any) {
           snapshot.delta.omitted = (snapshot.delta.omitted ?? 0) + snapshot.delta.events.length - params.maxEvents;
           snapshot.delta.events = snapshot.delta.events.slice(-params.maxEvents);
         }
-        return readResult(JSON.stringify(snapshot), { cursor: snapshot.cursor, unchanged: snapshot.unchanged === true, stateRevision: state.stateRevision });
+        return readResult(snapshot, { cursor: snapshot.cursor, unchanged: snapshot.unchanged === true, stateRevision: state.stateRevision });
       });
     },
   });
@@ -1218,8 +1225,8 @@ function contextOperationSchema() {
   const range = Type.Object({ part: Type.Optional(Type.Integer({ minimum: 0 })), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }, { additionalProperties: false, description: "Exact native part/line selection bound to the full source version. Images support part selection without line bounds." });
   const selection = Type.Object({ id: sourceId, version, binding: Type.Optional(binding), range: Type.Optional(range) }, { additionalProperties: false });
   return Type.Object({
-    action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"] }),
-    expectedRevision: Type.Integer({ minimum: 0, description: "Context revision from a native receipt/search, or the numeric C segment of compass_state.cursor." }),
+    action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"], description: "Required fields: call→task (capture optional); return→none (result/exportIds optional); pin/unpin→ids; mark→ids,version,handling,reason; load/move→ids,version; replace→ids,version,content; drop→ids,versions; spill→ids,version,path,purpose; transfer→watchIds,watchScope. All mutations also require expectedRevision." }),
+    expectedRevision: Type.Optional(Type.Integer({ minimum: 0, description: "Required for mutations; optional for search. Use revision from a search/receipt or the C segment of compass_state.cursor." })),
     task: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "Required for call: the local procedure and objective." })),
     capture: Type.Optional(Type.Array(Type.Object({ id: sourceId, mode: Type.String({ enum: ["ref", "copy"] }), version, binding: Type.Optional(binding) }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true })),
     exportIds: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Sources explicitly returned to the parent frame; default none." })),
@@ -1247,19 +1254,20 @@ function contextOperationSchema() {
     versions: Type.Optional(Type.Array(Type.Object({ id: sourceId, version }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true, description: "Required for action=drop: the observed version of every selected source." })),
     content: Type.Optional(Type.String({ minLength: 1, maxLength: 8000, description: "Replacement content for action=replace." })),
     result: Type.Optional(Type.String({ maxLength: 8000, description: "Optional bounded return value for action=return." })),
-    query: Type.Optional(Type.String({ maxLength: 400, description: "Search terms for action=search; lookup is on demand, not mandatory." })),
+    query: Type.Optional(Type.String({ maxLength: 400, description: "Whitespace-separated literal keywords. Default matches any keyword and ranks by matched count; no embeddings or semantic inference." })),
+    match: Type.Optional(Type.String({ enum: ["any", "all"], description: "Search only: any (default) retrieves keyword alternatives; all requires every term in one text block." })),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
   }, { additionalProperties: false });
 }
 function registerContextTool(pi: any) {
   return registerOnce(pi, "compass_context", {
     label: "Context Frames",
-    description: "Manage same-session attention frames without starting another Pi session. call enters a local task with explicit ref/copy capture; return restores the parent view with explicit exports. search recovers active/parent/history sources and versioned ranges. load creates an explicit data copy or verifies a spill receipt; move relocates whole working values or selected text ranges without replaying calls. Tool-result ranges remain qualified data copies preserving their complete source exchange. spill verifies a project artifact before pointer replacement. mark updates handling; retirement unpins. replace/drop preserve Human originals/tool exchanges.",
-    promptSnippet: "Use same-session context frames only when isolating attention reduces total work; capture and export are explicit and default to none.",
+    description: "Retain or recover source data and isolate same-session attention. search returns IDs/bindings/versions; pin retains a selected value, mark tracks handling. call(task,capture) hides other context; return restores the parent and exports only explicit outputs. load copies data; move relocates eligible values; replace/drop edit only eligible projection values; spill writes a verified project artifact. Search can run in Code Mode. Mutations must be direct standalone calls; a queued receipt is followed by a native applied/rejected receipt with the resulting revision. Raw Pi history and filesystem effects are not rolled back.",
+    promptSnippet: "Retain decisions/evidence with search and pin; use call/return for same-session attention isolation. Mutations must be direct standalone calls; use their native terminal receipt, not polling.",
     promptGuidelines: [
       "Frames/edits change attention, not Pi's append-only transcript or environment. Spill writes an explicit artifact; no filesystem rollback occurs.",
       "Use search only when needed. Pass stable source IDs and versions; never infer them from message positions. rankedSources preserves your semantic selection order; runtime verifies identity/ranges, not meaning.",
-      "For repeat-based move, select the prior complete read payload and pass verifiedAgainst with the later read ID/version. Exact repeats need the same read source/range and payload; subset relocation additionally needs a shared native file revision. Unknown or changed observations fail closed. The larger prior superset is retained; lines outside the refreshed subset remain qualified.",
+      "For verified repeat move, pass the complete earlier read and verifiedAgainst=later read. Subsets require a shared native file revision; otherwise data stays unknown and is not removed.",
       "A ref is shared and survives interruption; a copy is private and forks on write. Human originals and executed calls are read-only; explicit private copies are data.",
       "A frame cannot return while it owns live pi-await watches; use native unwatch, or action=transfer to move an owned watch to an active parent/root scope first. Repeating wakes remain live and do not complete ownership.",
     ],
@@ -1270,21 +1278,37 @@ function registerContextTool(pi: any) {
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         restoreContext(ctx);
         const action = String(params?.action ?? "");
-        if (!Number.isInteger(params?.expectedRevision) || params.expectedRevision !== contextState.revision) {
+        if ((action !== "search" || params?.expectedRevision !== undefined) && (!Number.isInteger(params?.expectedRevision) || params.expectedRevision !== contextState.revision)) {
           throw new Error(`Stale context revision ${params?.expectedRevision}; current revision is ${contextState.revision}. No context changed.`);
         }
         if (action === "search") {
           const branch = ctx?.sessionManager?.getBranch?.() ?? [];
           const result = searchContext(branch, { context: contextBoundaryPreview(ctx) }, contextState, params);
-          return readResult(JSON.stringify(result), { contextRevision: contextState.revision, hits: result.hits.length });
+          return readResult(result, { contextRevision: contextState.revision });
         }
         if (!["call", "return", "search", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"].includes(action)) {
           throw new Error(`Unknown context action ${action}. No context changed.`);
         }
         const prepared = await prepareContextOperation({ state: contextState, branch: ctx?.sessionManager?.getBranch?.() ?? [], boundary: { context: contextBoundaryPreview(ctx) }, operation: { ...params, callId: toolCallId, goalVersion: state.goal.version }, projectRoot: contextCwd(ctx) });
         const operation = prepared.operation;
+        try {
+          validateContextOperation({ state: contextState, branch: ctx?.sessionManager?.getBranch?.() ?? [], boundary: { context: contextBoundaryPreview(ctx) }, operation, content: prepared.content ?? [] });
+        } catch (error) {
+          if (operation.artifact) throw new Error(`${error instanceof Error ? error.message : String(error)} Verified artifact remains at ${operation.artifact.path}; filesystem effects were not rolled back.`);
+          throw error;
+        }
+        const receipt = {
+          action,
+          stateChanged: false,
+          contextRevision: contextState.revision,
+          ...(Array.isArray(operation.ids) && operation.ids.length ? { ids: operation.ids } : {}),
+          ...(typeof operation.scope === "string" ? { scope: operation.scope } : {}),
+          ...(operation.artifact?.path ? { artifactPath: operation.artifact.path } : {}),
+          resultStatus: "queued",
+          callId: toolCallId,
+        };
         return {
-          content: prepared.content ?? [{ type: "text", text: `Context action ${action} queued for the native turn boundary; no new session or Agent Loop will be created.${operation.artifact ? ` Artifact verified at ${operation.artifact.path}; if native commit fails, it remains on disk.` : ""}` }],
+          content: [...agentResult(receipt).content, ...(prepared.content?.slice(1) ?? [])],
           details: { contextOperation: operation, contextRevision: contextState.revision },
         };
       });
@@ -1345,19 +1369,14 @@ function ensureLoader(pi: any): string {
         const currentCaps = capabilitiesFor();
         const invalidNow = requested.filter((capability: string) => !currentCaps.includes(capability) || activeCapabilities().includes(capability));
         if (invalidNow.length) throw new Error(`Capability no longer applicable: ${invalidNow.join(", ")}. Current openable set: ${currentCaps.filter((capability: string) => !activeCapabilities().includes(capability)).join(", ")}. No state changed.`);
-        const before = activeCapabilities();
-        const added = requested.filter((capability: string) => !before.includes(capability));
-        const alreadyLoaded = requested.filter((capability: string) => before.includes(capability));
-        if (!added.length) {
-          return readResult(`No change; already loaded: ${alreadyLoaded.join(", ")}.`, { added, alreadyLoaded, activeCapabilities: before });
-        }
-        setActiveCapabilities([...before, ...added]);
+        const added = requested;
+        setActiveCapabilities([...activeCapabilities(), ...added]);
         state.projectRoot = contextCwd(ctx);
         // Do not change tool registry inside this model response. The next context
         // boundary exposes the union of loaded capabilities and current schemas.
         loadoutRefreshPending = true;
         persistState(pi);
-        return stateResult(`Loaded: ${added.join(", ")}.`, { activeCapabilities: activeCapabilities(), added, alreadyLoaded });
+        return stateResult({ mutation: "open", added });
       });
     },
   });
@@ -1416,8 +1435,8 @@ function planReviseSchema() {
 function routeSchema() {
   return Type.Object({
     action: Type.String({ enum: ["create", "status", "select", "propose_exploration", "register_competitor", "result", "cancel_request", "cancel_ack", "cancel_terminal", "cancel_unknown"] }),
-    expectedStateVersion: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000_000 })),
-    baselineRef: Type.Optional(Type.String({ maxLength: 300 })),
+    expectedStateVersion: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000_000, description: "Required for every mutation of an existing RouteSet. Initial create may omit or pass 0; use stateVersion from the last receipt/status." })),
+    baselineRef: Type.Optional(Type.String({ minLength: 1, maxLength: 300, description: "Required for create and register_competitor: a concrete shared code/checkpoint reference. Not authorization or an automatic filesystem snapshot." })),
     acceptanceCriteria: Type.Optional(Type.Array(Type.Union([Type.String({ minLength: 1, maxLength: 300 }), Type.Object({ id: Type.String({ minLength: 1, maxLength: 32 }), text: Type.String({ minLength: 1, maxLength: 300 }) }, { additionalProperties: false })]), { maxItems: 12 })),
     routes: Type.Optional(Type.Array(Type.Object({
       routeId: Type.String({ minLength: 1, maxLength: 40, pattern: "^[A-Za-z][A-Za-z0-9_-]{0,39}$" }),
@@ -1430,7 +1449,7 @@ function routeSchema() {
       risks: Type.Optional(Type.Array(Type.String({ maxLength: 300 }), { maxItems: 8 })),
     }, { additionalProperties: false }), { minItems: 2, maxItems: 3 })),
     routeId: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
-    runId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+    runId: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Native competitor identity. Required with routeId+correlationId for register_competitor, result and cancel_*; result is NOT a route-level verdict." })),
     correlationId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
     scope: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Exact proposed exploration scope, shown to Human before authorization." })),
     budget: Type.Optional(Type.Integer({ minimum: 2, maximum: 24, description: "Proposed maximum competitor runs; not authorization until the exact questionnaire is answered." })),
@@ -1454,7 +1473,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
     names.push(registerDynamic(pi, "compass_route", {
       label: "RouteSet",
       description: "Manage one compact RouteSet authority for alternative strategies. Alternatives are not DAG siblings; exploration requires explicit Human authorization and competitor cancellation requires an accepted shared-criteria result.",
-      promptSnippet: "Create a RouteSet only for materially different strategies; use exact route/run identities and expectedStateVersion for mutations.",
+      promptSnippet: "create requires baselineRef, shared acceptanceCriteria and 2–3 routes. Use the returned exact Human questionnaire; select never self-approves. result is only for a registered native competitor (runId, routeId, correlationId, criteria); all existing-RouteSet mutations require expectedStateVersion.",
       parameters: routeSchema(),
       async execute(_id: string, params: any, ...rest: any[]) {
         return serialized(async () => {
@@ -1464,7 +1483,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const action = params.action;
           let result: any;
           if (action === "status") {
-            return readResult(JSON.stringify(routeSetStatus(state)), { routeSet: routeSetStatus(state) });
+            return readResult(routeSetStatus(state));
           }
           if (action === "create") result = noMutation(() => createRouteSet(state, params));
           else if (action === "select") result = noMutation(() => selectRoute(state, params));
@@ -1475,10 +1494,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           else throw new Error(`Unknown RouteSet action ${action}. No state changed.`);
           state = result.state;
           afterMutation(pi, contextCwd(ctx));
-          const summary = action === "create"
-            ? `RouteSet ${result.routeSet.id} created; present its exact structured selection questionnaire before choosing or authorizing exploration.`
-            : `RouteSet action ${action} applied at stateVersion ${state.routeSet?.stateVersion ?? 0}.`;
-          return stateResult(summary, { mutation: `route_${action}`, routeSet: routeSetStatus(state), questionnaire: state.routeSet?.selectionRequest?.questionnaire ?? null });
+          return stateResult({ mutation: `route_${action}`, routeSet: routeSetStatus(state), ...(action === "create" || action === "propose_exploration" ? { next: "Pass routeSet.selectionRequest.questionnaire unchanged as ask_user_question({questions:[questionnaire]}). Native entry/call identity supplies authorization; do not reword or self-select." } : {}) });
         });
       },
     }));
@@ -1505,7 +1521,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             afterMutation(pi, contextCwd(ctx));
             const dependencyReady = readyTasks(state.plan).map((task: any) => task.id);
             const ready = dagApprovalStatus(state).approved ? dependencyReady : [];
-            return stateResult(`Draft DAG created (r${state.plan.revision}); ${state.plan.tasks.length} tasks; executable now: ${ready.join(", ") || "none"}. A correlated structured Human approval is required before any progression.`, { mutation: "plan_create", revision: state.plan.revision, ready, dependencyReady, approval: dagApprovalStatus(state) });
+            return planResult({ mutation: "plan_create", revision: state.plan.revision, ready, dependencyReady, approval: approvalReceipt() });
           });
         },
       }));
@@ -1525,7 +1541,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const result = noMutation(() => renewDagApprovalRequest(state));
           state = result.state;
           afterMutation(pi, contextCwd(ctx));
-          return stateResult(`Present this exact structured Human questionnaire before any task progression. Approval request ${result.request.id}; use its complete question, header, options, descriptions, preview, and multiSelect value unchanged.`, {
+          return stateResult({
             mutation: "dag_approval_request",
             approvalRequest: { id: result.request.id, questionnaire: result.request.questionnaire },
           });
@@ -1549,7 +1565,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         const approved = dagApprovalStatus(state).approved;
         const ready = approved ? dependencyReady : [];
         const blocked = plan.tasks.filter((task: any) => task.status === "blocked").map((task: any) => task.id);
-        return readResult(summarizePlanStatus(state), {
+        return readResult({
           revision: plan.revision ?? 0,
           stateVersion: plan.stateVersion ?? 0,
           total: plan.tasks.length,
@@ -1557,13 +1573,12 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           inProgress: plan.tasks.filter((task: any) => task.status === "in_progress").map((task: any) => task.id),
           ready,
           dependencyReady,
-          approval: dagApprovalStatus(state),
+          approval: approvalReceipt(),
           blocked,
           tasks: plan.tasks.map((task: any) => ({ id: task.id, title: clip(task.title, 100), status: task.status, dependsOn: task.dependsOn, executor: task.executor || "parent", ...(task.executor === "subagent" ? { agent: task.agent || "scout" } : {}), writeScope: task.writeScope || null, frameScope: task.frameScope || null, reason: task.reason ? clip(task.reason, 140) : null })),
           acceptance: { status: acceptance.status, total: acceptance.total, reportedPass: acceptance.passed, failed: acceptance.failed, blocked: acceptance.blocked, unverified: acceptance.unverified },
           goalOutcome: outcome,
-          execution: plan.execution ? clone(plan.execution) : null,
-          executionHistory: clone(plan.executionHistory ?? []),
+          execution: plan.execution ? { requestId: plan.execution.requestId, status: plan.execution.status, results: plan.execution.results.map((item: any) => ({ id: item.id, status: item.status, runId: item.runId, ...(item.error ? { error: item.error } : {}) })) } : null,
         });
       },
     }));
@@ -1579,7 +1594,6 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           activeCheck("planning");
           if (!state.plan.goal || !state.plan.tasks.length) throw new Error("No DAG exists. Create one only if real dependencies or independent tracks justify it.");
           if (params.expectedStateVersion !== (state.plan.stateVersion ?? 0)) throw new Error(`Stale plan state version ${params.expectedStateVersion}; current version is ${state.plan.stateVersion ?? 0} (DAG revision ${state.plan.revision}). Read current status and revise from the latest state; no changes were made.`);
-          const before = state.plan.revision;
           const eventSeqBefore = state.eventSeq ?? 1;
           const beforeStatuses = new Map(state.plan.tasks.map((task: any) => [task.id, { status: task.status, reason: task.reason || "" }]));
           const { expectedStateVersion: _expectedStateVersion, ...revisionInput } = params;
@@ -1600,10 +1614,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const readyNow = dagApprovalStatus(state).approved ? dependencyReady : [];
           const blockedNow = state.plan.tasks.filter((task: any) => task.status === "blocked").map((task: any) => task.id);
           if (changed) afterMutation(pi, contextCwd(ctx));
-          const invalidatedText = invalidatedDetails.length
-            ? ` Invalidated work: ${invalidatedDetails.map((item: any) => `${item.id} (${item.from} → pending; ${clip(item.reason, 100)})`).join("; ")}.`
-            : "";
-          return stateResult(`DAG ${state.plan.revision === before ? "unchanged" : `revised r${state.plan.revision}`}; state v${state.plan.stateVersion}. Executable now: ${readyNow.join(", ") || "none"}; approval=${dagApprovalStatus(state).approved ? "current" : "required"}.${invalidatedText}${blockedNow.length ? ` Blocked: ${blockedNow.join(", ")}.` : ""}`, { mutation: "plan_revise", unchanged: !changed, revision: state.plan.revision, stateVersion: state.plan.stateVersion, ready: readyNow, dependencyReady, approval: dagApprovalStatus(state), invalidated: reset, invalidatedDetails, blocked: blockedNow });
+          return planResult({ mutation: "plan_revise", unchanged: !changed, revision: state.plan.revision, stateVersion: state.plan.stateVersion, ready: readyNow, dependencyReady, approval: approvalReceipt(), invalidated: reset, invalidatedDetails, blocked: blockedNow });
         });
       },
     }));
@@ -1646,7 +1657,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             state = result.state;
             afterMutation(pi, contextCwd(ctx));
             const readyNow = readyTasks(state.plan).map((task: any) => task.id);
-            return stateResult(`Task ${params.assessment.taskId} assessment recorded: ${params.assessment.status}. Newly ready: ${readyNow.join(", ") || "none"}.`, { mutation: "task_assess", taskId: params.assessment.taskId, assessment: result.assessment, ready: readyNow });
+            return stateResult({ mutation: "task_assess", taskId: params.assessment.taskId, assessment: result.assessment, ready: readyNow });
           } else if (["done", "block", "reopen"].includes(action)) {
             if (!tasks.length || hasTaskIds || !Array.isArray(params?.tasks)) throw new Error(`action="${action}" requires tasks and forbids taskIds. No state changed.`);
             for (const [index, item] of tasks.entries()) {
@@ -1672,15 +1683,15 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const readyNow = readyTasks(state.plan).map((task: any) => task.id);
           const remaining = state.plan.tasks.filter((task: any) => task.status !== "done").length;
           afterMutation(pi, contextCwd(ctx));
-          if (action === "start") return stateResult(`Started: ${result.affected.join(", ")}. Ready next: ${readyNow.join(", ") || "none"}.`, { mutation: "task_start", affected: result.affected, ready: readyNow });
+          if (action === "start") return stateResult({ mutation: "task_start", affected: result.affected, ready: readyNow });
           if (action === "done") {
             const direct = result.completedWithoutStart ?? [];
-            return stateResult(`Done: ${result.affected.join(", ")}.${direct.length ? ` Completed directly from ready/pending: ${direct.join(", ")}.` : ""} Ready: ${readyNow.join(", ") || "none"}. Remaining: ${remaining}.`, { mutation: "task_done", affected: result.affected, completedWithoutStart: direct, ready: readyNow, remaining });
+            return stateResult({ mutation: "task_done", affected: result.affected, completedWithoutStart: direct, ready: readyNow, remaining });
           }
-          if (action === "block") return stateResult(`Blocked: ${result.affected.join(", ")}. Other ready: ${readyNow.join(", ") || "none"}.`, { mutation: "task_block", affected: result.affected, ready: readyNow });
+          if (action === "block") return stateResult({ mutation: "task_block", affected: result.affected, ready: readyNow });
           const roots = tasks.map((item: any) => item.id);
           const downstream = result.affected.filter((id: string) => !roots.includes(id));
-          return stateResult(`Reopened: ${roots.join(", ")}. Downstream invalidated: ${downstream.join(", ") || "none"}. Ready: ${readyNow.join(", ") || "none"}.`, { mutation: "task_reopen", affected: result.affected, roots, downstream, ready: readyNow });
+          return stateResult({ mutation: "task_reopen", affected: result.affected, roots, downstream, ready: readyNow });
         });
       },
     }));
@@ -1709,8 +1720,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             const execution = state.plan.execution;
             if (params.action === "status") {
               if (Object.keys(params).some((key) => key !== "action")) throw new Error('action="status" accepts no additional fields. No state changed.');
-              if (!execution) return readResult("No Subagent execution record exists.", { execution: null });
-              return readResult(`Subagent batch ${execution.status}; tasks=${(execution.taskIds ?? []).join(",")}; request=${execution.requestId}. ${execution.error || ""}`.trim(), { execution: clone(execution) });
+              return readResult({ execution: execution ? clone(execution) : null });
             }
             if (params.action !== "resolve") throw new Error('action must be "status" or "resolve". No state changed.');
             if (!execution || execution.status !== "unknown") throw new Error("Only an unknown Subagent batch can be manually reconciled. No state changed.");
@@ -1791,7 +1801,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
               ref: latest.requestId,
             });
             afterMutation(pi, contextCwd(ctx));
-            return stateResult(`Reconciled Subagent batch ${latest.requestId}; tasks=${latest.taskIds.join(",")}. Ready: ${readyTasks(state.plan).map((task: any) => task.id).join(", ") || "none"}.`, {
+            return stateResult({
               mutation: "execution_reconcile",
               requestId: latest.requestId,
               taskIds: latest.taskIds,
@@ -1815,8 +1825,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         activeCheck("acceptance");
         const current = (state.goal.criteria ?? []).filter((item: any) => item.goalVersion === state.goal.version);
-        if (!current.length) return readResult("No acceptance criteria are defined for the current Goal. Define a small observable set only if useful.", { status: "criteria_not_defined", total: 0, goalOutcome: goalOutcomeStatus(state) });
-        return readResult([`Acceptance: ${JSON.stringify(acceptanceStatus(state))}`, `Goal outcome: ${JSON.stringify(goalOutcomeStatus(state))}`, ...current.map((item: any) => `${item.id} [${item.status}] ${clip(item.text, 160)}${item.evidence ? `; evidence: ${clip(item.evidence, 180)}` : ""}`)].join("\n"), { acceptance: current, status: acceptanceStatus(state), goalOutcome: goalOutcomeStatus(state) });
+        return readResult({ goalVersion: state.goal.version, ...acceptanceStatus(state), independentlyVerified: false, criteria: current.map((item: any) => ({ id: item.id, text: item.text, status: item.status, ...(item.evidence ? { evidence: item.evidence } : {}) })) });
       },
     }));
     names.push(registerOnce(pi, "compass_acceptance_define", {
@@ -1832,7 +1841,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const result = noMutation(() => defineAcceptanceCriteria(state, params.criteria));
           state = result.state;
           if (result.changed) afterMutation(pi, contextCwd(ctx));
-          return stateResult(`Acceptance criteria ${result.changed ? "updated" : "unchanged"}: ${result.criteria.map((item: any) => `${item.id} [${item.status}]`).join(", ")}.`, { mutation: "acceptance_define", unchanged: !result.changed, criteria: result.criteria.map((item: any) => item.id) });
+          return stateResult({ mutation: "acceptance_define", unchanged: !result.changed, criteria: result.criteria.map((item: any) => ({ id: item.id, status: item.status })) });
         });
       },
     }));
@@ -1853,10 +1862,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const result = noMutation(() => recordAcceptanceResult(state, { ...params, source: "agent_reported" }));
           state = result.state;
           if (result.changed) afterMutation(pi, contextCwd(ctx));
-          return stateResult(result.changed
-            ? `Recorded ${params.criterionId} as ${params.status}. Goal acceptance remains a report, not an independent verifier result.`
-            : `No change: ${params.criterionId} already has the same status and evidence.`,
-          { mutation: "acceptance_record", unchanged: !result.changed, criterionId: params.criterionId, status: params.status, summary: acceptanceStatus(state) });
+          return stateResult({ mutation: "acceptance_record", unchanged: !result.changed, criterionId: params.criterionId, status: params.status, summary: acceptanceStatus(state) });
         });
       },
     }));
@@ -1879,7 +1885,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           assertCapability("issue_review");
           const result = noMutation(() => triageIssue(state, params));
           if (result.duplicate) {
-            return readResult(JSON.stringify({ duplicate: true, triageId: result.item.id, noRelevantStateChange: true, summary: result.summary }), { duplicate: true, triageId: result.item.id, issueTruncated: result.item.issueTruncated === true });
+            return readResult({ duplicate: true, triageId: result.item.id, summary: result.summary, issueTruncated: result.item.issueTruncated === true });
           }
           state = result.state;
           afterMutation(pi, contextCwd(ctx));
@@ -1916,7 +1922,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           afterMutation(pi, contextCwd(ctx));
           const superseded = result.supersededDecisionIds ?? [];
           const impacted = result.impactedTaskIds ?? [];
-          return stateResult(`Recorded ${result.item.id}: ${clip(result.item.summary, 220)}.${superseded.length ? ` Superseded prior decisions: ${superseded.join(", ")}.` : ""}${impacted.length ? ` Reassess potentially affected tasks: ${impacted.join(", ")}.` : ""}`, { mutation: "decision", id: result.item.id, supersededDecisionIds: superseded, potentiallyAffectedTaskIds: impacted });
+          return stateResult({ mutation: "decision", id: result.item.id, supersededDecisionIds: superseded, potentiallyAffectedTaskIds: impacted });
         });
       },
     }));
@@ -1937,7 +1943,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const result = noMutation(() => recordCheckpoint(state, params));
           state = result.state;
           afterMutation(pi, contextCwd(ctx));
-          return stateResult(`Recorded ${result.item.id}: ${clip(result.item.summary, 220)}. ${result.item.ref ? `Reference: ${result.item.ref}` : "No recoverable reference; this is only a planning marker."}`, { mutation: "checkpoint", id: result.item.id });
+          return stateResult({ mutation: "checkpoint", id: result.item.id, ref: result.item.ref || null });
         });
       },
     }));
@@ -1951,7 +1957,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         activeCheck("history");
         const events = buildRecentEvents(state, params.limit ?? 12);
-        return readResult(events.length ? events.map((item: any) => `- ${item.id} ${item.at} [${item.kind}] goal v${item.goalVersion}: ${clip(item.summary, 200)}${item.ref ? ` (ref ${item.ref})` : ""}`).join("\n") : "No structured events have been recorded.", { events });
+        return readResult({ events });
       },
     }));
     return names;
@@ -2294,7 +2300,7 @@ export default function (pi: any) {
         entries: [...(event.entries ?? []), {
           type: "custom_message",
           customType: CONTEXT_MESSAGE_TYPE,
-          content: `Context operation rejected: ${message}`,
+          content: JSON.stringify({ resultStatus: "rejected", stateChanged: false, contextRevision: contextState.revision, error: message }),
           display: false,
           details: { contextError: true, status: "rejected", stateChanged: false, contextRevision: contextState.revision },
         }],

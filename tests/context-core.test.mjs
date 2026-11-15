@@ -18,6 +18,38 @@ function host() {
 }
 function capture(manager, id, mode = "ref") { return { id, mode, version: sourceVersion(manager, id) }; }
 
+test("long-session frames restore more than 256 parent sources without copying payloads", () => {
+  const manager = host();
+  for (let index = 0; index < 1000; index++) user(manager, `parent-${index}`);
+  const before = modelText(manager);
+  const call = applyOperation(manager, { action: "call", task: "bounded local investigation" });
+  assert.equal(call.state.frames[0].saved.length, 1000);
+  assert.ok(Buffer.byteLength(JSON.stringify(call.state)) < 150000, "restoration stores native references, not payloads");
+  assert.doesNotMatch(modelText(manager), /parent-999/);
+  user(manager, "Human steering during frame");
+  applyOperation(manager, { action: "return", result: "local conclusion" });
+  assert.equal(restoreContextState(manager.getBranch()).frames.length, 0);
+  const restored = new Set(JSON.parse(modelText(manager)).map((message) => JSON.stringify(message)));
+  for (const message of JSON.parse(before).filter((item) => item.role !== "system")) assert.ok(restored.has(JSON.stringify(message)));
+  assert.equal(JSON.parse(modelText(manager)).find((message) => message.role === "system").content, "RESERVED SYSTEM");
+  assert.match(modelText(manager), /Human steering during frame/);
+  assertPaired(manager);
+});
+
+test("near-budget control state stays restorable after the commit receipt is attached", () => {
+  const manager = host();
+  const id = user(manager, "eligible source");
+  const state = emptyContextState();
+  state.watches.large = { owner: "root", prompt: "" };
+  const budget = 2 * 1024 * 1024;
+  state.watches.large.prompt = "x".repeat(budget - Buffer.byteLength(JSON.stringify(state)) - 1);
+  assert.equal(Buffer.byteLength(JSON.stringify(state)), budget - 1);
+  manager.appendCustomEntry("pi-compass-v2.context", state);
+  const result = applyOperation(manager, { action: "unpin", ids: [id] });
+  assert.equal(result.state.revision, 1);
+  assert.equal(restoreContextState(manager.getBranch()).watches.large.prompt.length, state.watches.large.prompt.length);
+});
+
 test("context normalization rejects malformed and non-canonical bindings", () => {
   const missing = emptyContextState();
   missing.frames = [{ id: "frame-1", parent: "root", boundaryId: "boundary", summaryId: null, saved: [], refs: [{ id: "source", version: "a".repeat(24) }], copies: [] }];

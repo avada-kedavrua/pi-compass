@@ -48,7 +48,9 @@ async function setup(laterHandler, earlierContextHandler, cwd = "/context-integr
       api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now(),
     };
     const messageEntryId = manager.appendMessage(message);
-    const output = await tools.get("compass_context").execute(id, parameters, undefined, undefined, runner.createContext());
+    let output;
+    try { output = await tools.get("compass_context").execute(id, parameters, undefined, undefined, runner.createContext()); }
+    catch (error) { output = { isError: true, content: [{ type: "text", text: String(error.message) }] }; }
     const result = { role: "toolResult", toolCallId: id, toolName: "compass_context", ...output, timestamp: Date.now() };
     const resultEntryId = manager.appendMessage(result);
     const proposal = await runner.emitBoundary({
@@ -108,6 +110,31 @@ test("installed runner chains frame entry and return; only committed metadata be
   assert.doesNotMatch(modelText(manager), /LOCAL PROCEDURE/);
   assertPaired(manager);
   assert.deepEqual(host.errors, []);
+});
+
+test("Agent data-only path enters a long frame and receives correlated terminal receipts", async () => {
+  const host = await setup();
+  for (let index = 0; index < 350; index++) user(host.manager, `old parent observation ${index}`);
+  const id = user(host.manager, "Font 微软雅黑; red text for unmet targets; green text for challenge success.");
+  const tool = host.tools.get("compass_context");
+  const search = JSON.parse((await tool.execute("recover", { action: "search", query: "微软雅黑 green unknownword" }, undefined, undefined, host.runner.createContext())).content[0].text);
+  const source = search.hits.find((hit) => hit.id === id);
+  assert.ok(source);
+  await host.turn({ action: "pin", expectedRevision: search.revision, ids: [source.id], lifetime: "session" });
+  await host.turn({ action: "call", expectedRevision: 1, task: "Investigate only the retained decision", capture: [{ id: source.id, version: source.version, mode: "ref" }] });
+  const entered = restoreContextState(host.manager.getBranch());
+  assert.equal(entered.frames.length, 1);
+  assert.ok(entered.frames[0].saved.length > 256);
+  const receipt = host.manager.getBranch().findLast((entry) => entry.customType === "pi-compass-v2.context-message");
+  assert.equal(JSON.parse(receipt.content).resultStatus, "applied");
+  assert.equal(JSON.parse(receipt.content).revision, 2);
+  assert.match(JSON.parse(receipt.content).callId, /^integration-/);
+  await assert.rejects(() => tool.execute("invalid-mark", { action: "mark", expectedRevision: 2, ids: [source.id], version: source.version }, undefined, undefined, host.runner.createContext()), /Handling rationale|Mark requires/);
+  assert.equal(restoreContextState(host.manager.getBranch()).revision, 2, "invalid mutation is rejected before returning queued");
+  await host.turn({ action: "return", expectedRevision: 2, result: "evidence retained" });
+  assert.equal(restoreContextState(host.manager.getBranch()).frames.length, 0);
+  assert.match(modelText(host.manager), /old parent observation 349/);
+  assertPaired(host.manager);
 });
 
 test("tool schema and installed boundary carry verified range moves and Agent-ranked sources", async () => {

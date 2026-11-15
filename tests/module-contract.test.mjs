@@ -4,6 +4,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as goalRun from "../src/goal-run.mjs";
+import { agentResult } from "../src/compass-result.mjs";
+
+test("Agent JSON contains only the selected payload, never merged internal receipts", () => {
+  const payload = { revision: 4, hits: [{ id: "source" }] };
+  const result = agentResult(payload, { hits: 1, contextOperation: { private: true } });
+  assert.deepEqual(JSON.parse(result.content[0].text), payload);
+  assert.equal(result.details.hits, 1);
+  assert.equal(result.details.contextOperation.private, true);
+});
 
 test("GoalRun v8 module exports the complete runtime contract", () => {
   assert.equal(goalRun.GOAL_RUN_API_VERSION, 8);

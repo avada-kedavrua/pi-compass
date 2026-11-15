@@ -4,6 +4,7 @@
 
 Local M0–M7 development is complete for the declared supported boundaries. This is a **local candidate**, not live Pi/provider acceptance.
 
+- [Field-use audit](docs/agent-usage-audit-v0.10.0.md): observed session IDs/hash, cost/benefit evidence, resolved T1–T5 and explicitly unmodified work. This round adds no forced prompt injection or workflow restrictions.
 - [Release manifest](RELEASE-MANIFEST.json): implementation snapshot and native dependency identity.
 - [Milestone checklist and local evidence](docs/architecture-v0.10.0.md#final-local-evidence): implemented behavior, verification results and unsupported cases.
 - [Measurements](docs/measurements-v0.10.0.md): bounded local CPU/memory/context data, not provider/cache/token or semantic-quality evidence.

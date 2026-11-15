@@ -23,6 +23,8 @@ test("session report distinguishes top-level calls, logged nested calls, errors,
   const summary = await analyzeSession(file);
   assert.equal(summary.records, 7);
   assert.equal(summary.goalStateRecords, 1);
+  assert.equal(summary.goalStateBytes, Buffer.byteLength(JSON.stringify(goalState)));
+  assert.deepEqual(summary.context, { callsByAction: {}, queued: 0, messagesByAction: {}, rejectedBoundaries: 0 });
   assert.equal(summary.finalState.outcome.status, "not_assessed");
   assert.equal(summary.assistantRequests, 2);
   assert.equal(summary.assistantRequestErrors, 1);

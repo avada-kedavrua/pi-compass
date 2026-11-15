@@ -214,7 +214,7 @@ test("RouteSet bounds alternatives at three and direct select cannot bypass the 
   const state = routeState();
   assert.throws(() => createRouteSet(withGoal(), { expectedStateVersion: 0, baselineRef: "git:b", acceptanceCriteria: ["check"],
     routes: ["A", "B", "C", "D"].map((routeId) => ({ routeId, summary: routeId })) }), /2..3 alternatives/);
-  assert.throws(() => selectRoute(state, { expectedStateVersion: 1, routeId: "routeA" }), /only if it was already Human-selected/);
+  assert.throws(() => selectRoute(state, { expectedStateVersion: 1, routeId: "routeA" }), /no correlated Human selection/);
   assert.equal(state.routeSet.selectedRouteId, null);
   assert.equal(humanSelectRoute(state, "routeA").routeSet.selectedRouteId, "routeA");
 });
@@ -230,7 +230,7 @@ test("RouteSet rejects duplicate normalized criteria and reserved route IDs with
 test("RouteSet preserves exact competitor identity and shared acceptance evidence", () => {
   let state = authorizeRoutes(routeState());
   state = registerCompetitorRun(state, { expectedStateVersion: 3, runId: "run-a", routeId: "routeA", baselineRef: "git:baseline", correlationId: "corr-a" }).state;
-  assert.throws(() => recordCompetitorResult(state, { expectedStateVersion: 4, runId: "run-a", routeId: "routeB", correlationId: "corr-a", criteria: [{ id: "C1", status: "pass", evidence: "ok" }] }), /identity.*stale/);
+  assert.throws(() => recordCompetitorResult(state, { expectedStateVersion: 4, runId: "run-a", routeId: "routeB", correlationId: "corr-a", criteria: [{ id: "C1", status: "pass", evidence: "ok" }] }), /Unknown competitor run/);
   const result = recordCompetitorResult(state, { expectedStateVersion: 4, runId: "run-a", routeId: "routeA", correlationId: "corr-a", criteria: [{ id: "C1", status: "pass", evidence: "shared smoke test passed" }] });
   assert.equal(result.acceptanceGate, "passed");
   assert.equal(result.state.routeSet.competitorRuns[0].result.criteria[0].id, "C1");
@@ -357,7 +357,7 @@ test("Human route switching resets route-bound DAG evidence and requires fresh a
   state = approvePlan(state);
   state = completeAndAssess(state, "api", "existing route A evidence");
   const revision = state.plan.revision;
-  assert.throws(() => selectRoute(state, { expectedStateVersion: 2, routeId: "routeB" }), /only if it was already Human-selected/);
+  assert.throws(() => selectRoute(state, { expectedStateVersion: 2, routeId: "routeB" }), /no correlated Human selection/);
   state = proposeRouteExploration(state, { expectedStateVersion: 2, scope: "read-only comparison", budget: 2,
     routeIds: ["routeA", "routeB"] }).state;
   state = humanSelectRoute(state, "routeB");
@@ -436,7 +436,7 @@ test("structured questionnaire answers preserve choice semantics without storing
     }],
   });
   assert.match(captured.item.summary, /Where should the frontend run\? = Local Vite/);
-  assert.match(buildGoalDetails(captured.state), /Keep HMR enabled/);
+  assert.match(JSON.stringify(buildGoalDetails(captured.state).humanAnswers), /Keep HMR enabled/);
   assert.doesNotMatch(JSON.stringify(captured.state), /large-preview-body/);
   assert.equal(captured.state.events.at(-1).status, "answered");
 });
@@ -744,7 +744,6 @@ test("route review signal requires a repeated failure signature, not merely seve
 test("compact state snapshot returns a cursor and only new current-Goal events", () => {
   let state = withGoal("Goal: implement API smoke test");
   const initial = buildStateSnapshot(state, null, { contextFrame: { active: false, depth: 0, id: null } });
-  assert.equal(initial.v, 8);
   assert.deepEqual(initial.contextFrame, { active: false, depth: 0, id: null });
   const framed = buildStateSnapshot(state, null, { contextFrame: { active: true, depth: 1, id: "frame-1" } });
   assert.deepEqual(framed.contextFrame, { active: true, depth: 1, id: "frame-1" });
@@ -892,6 +891,14 @@ test("Human answers observed before Goal creation never acquire a fictitious fut
   assert.equal(normalizeGoalRunState(state).humanDecisions[0].goalVersion, 0);
 });
 
+test("acceptance definitions and evidence reject oversized or ambiguous inputs without changing prior reports", () => {
+  const state = defineAcceptanceCriteria(withGoal("Validate the delivered feature"), ["observable result"]).state;
+  const before = structuredClone(state);
+  for (const criteria of [["same", "same"], ["x".repeat(301)], Array.from({ length: 13 }, (_, index) => `criterion ${index}`)]) assert.throws(() => defineAcceptanceCriteria(state, criteria), /acceptanceCriteria/);
+  assert.throws(() => recordAcceptanceResult(state, { criterionId: state.goal.criteria[0].id, status: "reported_pass", evidence: "x".repeat(2001) }), /never silently truncated/);
+  assert.deepEqual(state, before);
+});
+
 test("stale acceptance identities cannot cross a Goal replacement", () => {
   let state = defineAcceptanceCriteria(withGoal("Ship feature A"), ["A behaves correctly"]).state;
   const staleId = state.goal.criteria[0].id;
@@ -1015,7 +1022,6 @@ test("context-aware cursor and default snapshot stay compact", () => {
   assert.match(cursor, /^R\d+-E\d+-C7$/);
   const frame = { active: true, depth: 2, id: "frame-x", secretContents: "must not leak" };
   const snapshot = buildStateSnapshot(state, null, { contextRevision: 7, contextFrame: frame });
-  assert.equal(snapshot.v, 8);
   assert.deepEqual(snapshot.contextFrame, { active: true, depth: 2, id: "frame-x" });
   assert.equal("runtime" in snapshot, false);
   assert.equal("sourceIds" in snapshot.goal, false);

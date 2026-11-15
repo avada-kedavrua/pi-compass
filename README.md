@@ -13,6 +13,8 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 - RouteSets separate from DAGs: explicit route selection, Human-authorized bounded exploration, shared acceptance/caveat comparison, and acceptance-gated competitor cancellation.
 - Native watch ownership by arm identity, repeating/lost/terminal lifecycle handling, branch reconciliation, and explicit frame-to-parent transfer.
 
+The [field-use audit and resolved TODOs](docs/agent-usage-audit-v0.10.0.md) records the first real task’s overhead, failures, fixes and remaining unknowns. It does not claim measured net savings from a single uncontrolled session.
+
 ## Important boundaries
 
 - No second Pi session, transcript store, conventions registry, scheduler, polling observer, or automatic route fan-out.

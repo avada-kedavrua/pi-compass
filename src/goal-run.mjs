@@ -485,7 +485,7 @@ function appendEvent(state, kind, input = {}) {
 }
 
 function syncAcceptanceCriteria(state, criteria, source = "plan") {
-  const texts = (Array.isArray(criteria) ? criteria : []).map((item, index) => nonEmpty(item, `acceptanceCriteria[${index}]`, 300)).slice(0, MAX_ACCEPTANCE_CRITERIA);
+  const texts = validateGoalCriteria(criteria);
   const prior = new Map((state.goal.criteria ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => [item.text, item]));
   const next = [];
   for (const text of texts) {
@@ -569,7 +569,7 @@ export function defineAcceptanceCriteria(stateValue, criteria) {
   const state = normalizeGoalRunState(stateValue);
   if (!state.goal.current) throw new Error("No Goal exists in this session.");
   if (!Array.isArray(criteria) || criteria.length < 1) throw new Error("Provide at least one concrete acceptance criterion.");
-  const normalized = criteria.map((item, index) => nonEmpty(item, `criteria[${index}]`, 300)).slice(0, MAX_ACCEPTANCE_CRITERIA);
+  const normalized = validateGoalCriteria(criteria);
   if (state.plan.tasks.length && JSON.stringify(normalized) !== JSON.stringify(state.plan.acceptanceCriteria)) {
     throw new Error("A DAG exists. Change Goal-level acceptance criteria through the DAG revision so task dependencies and acceptance stay consistent.");
   }
@@ -588,7 +588,8 @@ export function recordAcceptanceResult(stateValue, input) {
   if (!["reported_pass", "failed", "blocked", "inconclusive"].includes(status)) {
     throw new Error('status must be one of: reported_pass, failed, blocked, inconclusive.');
   }
-  const evidence = nonEmpty(input?.evidence, "evidence", 2000);
+  if (typeof input?.evidence !== "string" || !input.evidence.trim() || input.evidence.trim().length > 2000) throw new Error("evidence must contain 1..2000 characters; evidence is never silently truncated. No state changed.");
+  const evidence = input.evidence.trim();
   const source = typeof input?.source === "string" ? clip(input.source, 80) : "agent_reported";
   const criteria = state.goal.criteria ?? [];
   const criterion = criteria.find((item) => item.id === criterionId && item.goalVersion === (state.goal.version ?? 1));
@@ -990,25 +991,14 @@ export function shouldSurfaceIssueReview(stateValue) {
   return [...counts.values()].some((count) => count >= 2);
 }
 
-export function buildGoalDetails(stateValue, maxChars = 26000) {
+export function buildGoalDetails(stateValue) {
   const state = normalizeGoalRunState(stateValue);
-  if (!state.goal.current) return "No explicit Goal has been set for this session.";
-  const version = state.goal.version;
-  const criteria = state.goal.criteria.filter((item) => item.goalVersion === version);
-  const lines = [
-    `Original Goal: ${state.goal.original}`,
-    `Current Goal v${version}: ${state.goal.current}`,
-    `Original Human source IDs: ${(state.goal.originalSourceIds ?? []).join(", ") || "none"}`,
-    `Current Human source IDs: ${(state.goal.sourceIds ?? []).join(", ") || "none"}`,
-    `Reviewed latest Human input: ${state.goal.reviewedInputId === state.latestHumanEntryId ? "yes" : "no"}`,
-    `Declared constraints: ${(state.goal.constraints ?? []).length ? state.goal.constraints.map((item) => `- ${item}`).join("\n") : "none"}`,
-    `Acceptance: ${acceptanceStatus(state).status}.`,
-    criteria.length ? `Acceptance criteria: ${criteria.map((item) => `${item.id}[${item.status}] ${item.text}${item.evidence ? ` — ${clip(item.evidence, 180)}` : ""}`).join("; ")}` : "Acceptance criteria: none explicitly declared.",
-  ];
-  const decisions = state.humanDecisions.filter((item) => item.goalVersion === version);
-  if (decisions.length) lines.push(`Genuine Human answers: ${decisions.map((item) => `${item.id}: ${clip(item.summary || item.text, 300)}`).join("; ")}`);
-  const result = lines.join("\n");
-  return result.length > maxChars ? `${result.slice(0, maxChars - 1)}…` : result;
+  return {
+    goal: state.goal.current ? { version: state.goal.version, original: state.goal.original, current: state.goal.current, originalSourceIds: state.goal.originalSourceIds, sourceIds: state.goal.sourceIds, constraints: state.goal.constraints } : null,
+    reviewedInputId: state.goal.reviewedInputId,
+    criteria: state.goal.criteria.filter((item) => item.goalVersion === state.goal.version).map((item) => ({ id: item.id, text: item.text, status: item.status })),
+    humanAnswers: state.humanDecisions.filter((item) => item.goalVersion === state.goal.version).map((item) => ({ id: item.id, sourceEntryId: item.sourceEntryId, sourceCallId: item.sourceCallId, ...(item.questionnaire ? { questionnaire: item.questionnaire } : { text: item.text }) })),
+  };
 }
 
 export function buildIssueReview(stateValue, issue, evidenceRefs = []) {
@@ -1071,8 +1061,8 @@ function compactEvent(event) {
   };
 }
 
-function parseStateCursor(value) {
-  if (typeof value !== "string") return null;
+export function parseStateCursor(value) {
+  if (typeof value !== "string" || value.length > 64) return null;
   const match = value.match(/^R(\d+)-E(\d+)-C(\d+)$/);
   if (!match) return null;
   const values = match.slice(1).map(Number);
@@ -1101,7 +1091,7 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
   const prior = afterCursor == null ? null : parseStateCursor(afterCursor);
   const ahead = Boolean(prior && (prior.revision > revision || prior.eventSeq > latestSeq || prior.contextRevision > contextRevision));
   const exact = Boolean(prior && prior.revision === revision && prior.eventSeq === latestSeq && prior.contextRevision === contextRevision);
-  if (exact) return { v: 8, unchanged: true, cursor, contextFrame: frame };
+  if (exact) return { unchanged: true, cursor, contextFrame: frame };
   const firstSeq = state.events.length ? eventSequence(state.events[0].id) ?? latestSeq : latestSeq + 1;
   const gap = Boolean(prior && prior.eventSeq < firstSeq - 1 && prior.eventSeq < latestSeq);
   const currentEvents = state.events.filter((event) => event.goalVersion === state.goal.version);
@@ -1125,7 +1115,6 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
     ? `Acceptance is Agent-reported satisfied, but DAG task(s) remain blocked: ${state.plan.tasks.filter((task) => task.status === "blocked").map((task) => task.id).join(", ")}. Explain the blocker before claiming the overall Goal outcome is achieved.`
     : null;
   const result = {
-    v: 8,
     cursor,
     contextFrame: frame,
     goal: state.goal.current ? { version: state.goal.version, current: clip(state.goal.current, 240), ...(state.goal.current.length > 240 ? { currentTruncated: true } : {}) } : null,
@@ -1491,7 +1480,8 @@ export function registerCompetitorRun(stateValue, input = {}) {
 export function recordCompetitorResult(stateValue, input = {}) {
   const state = routeInput(stateValue, input);
   const run = state.routeSet.competitorRuns.find((item) => item.runId === input.runId && item.routeId === input.routeId);
-  if (!run || run.goalVersion !== state.goal.version || run.baselineRef !== state.routeSet.baselineRef || run.correlationId !== input.correlationId) throw new Error("Competitor identity, Goal version, baseline, or correlation is stale. No state changed.");
+  if (!run) throw new Error(`Unknown competitor run ${input.runId ?? "(missing runId)"} for route ${input.routeId ?? "(missing routeId)"}. result records a registered native competitor, not a route-level verdict. No state changed.`);
+  if (run.goalVersion !== state.goal.version || run.baselineRef !== state.routeSet.baselineRef || run.correlationId !== input.correlationId) throw new Error("Competitor Goal version, baseline, or correlation is stale. No state changed.");
   if (["cancel_requested", "cancel_acknowledged"].includes(run.status) || run.cancellation) throw new Error(`Competitor ${run.runId} is already terminal or cancellation is in progress. No state changed.`);
   const criteria = input.criteria;
   if (!Array.isArray(criteria) || criteria.length !== state.routeSet.acceptanceCriteria.length) throw new Error("Competitor result must report every shared acceptance criterion. No state changed.");
@@ -1556,7 +1546,7 @@ export function selectRoute(stateValue, input = {}) {
   const route = state.routeSet.routes.find((item) => item.routeId === input.routeId);
   if (!route) throw new Error(`Unknown or stale route identity "${input.routeId}". No state changed.`);
   if (state.routeSet.selectedRouteId !== route.routeId && route.acceptanceGate !== "passed") {
-    throw new Error("A route can be selected directly only if it was already Human-selected or passed the shared acceptance gate. Use its correlated Human questionnaire to switch. No state changed.");
+    throw new Error(`Route ${route.routeId} has no correlated Human selection or passing competitor result. Request ${state.routeSet.selectionRequest?.id ?? "none"} is ${state.routeSet.selectionRequest?.status ?? "unavailable"}; read compass_route(action=status) and pass its complete questionnaire to ask_user_question unchanged. Recreate the RouteSet with the current expectedStateVersion if Human rejected every alternative. No state changed.`);
   }
   bindSelectedRoute(state, route);
   if (route.acceptanceGate === "passed") {
