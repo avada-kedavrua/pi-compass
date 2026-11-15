@@ -6,25 +6,29 @@ These are bounded local measurements, not provider, token-cache, or semantic-qua
 node scripts/measure-context.mjs
 ```
 
-Observed output for implementation `b465a44` (Node 22.22.1 / Pi 1.5.2):
+Observed output for implementation `24198a3` (Node 22.22.1 / Pi 1.5.2):
 
 | Measure | Result |
 |---|---:|
+| Compact semantic Goal read median / JSON | 0.025 ms / 222 bytes |
+| Exact unchanged Goal read JSON | 96 bytes |
 | Branch entries | 1,000 |
-| Bounded lexical retrieval median / returned hits | 0.395 ms / 8 |
-| Full lexical miss median / scanned sources | 3.284 ms / 1,000 |
+| Bounded lexical retrieval median / returned hits | 0.406 ms / 8 |
+| Full lexical miss median / scanned sources | 3.369 ms / 1,000 |
 | Retrieval truncation | true (bounded result) |
-| Watch-state transition median | 0.073 ms |
-| Frame-call planning median / active window | 0.497 ms / 128 sources |
+| Watch-state transition median | 0.060 ms |
+| Frame-call planning median / active window | 0.529 ms / 128 sources |
 | Frame-call projection edits / draft JSON | 130 / 22,557 bytes |
 | Frame-call control-state JSON | 13,375 bytes |
-| Missing-pin request overlay median | 0.157 ms |
+| Missing-pin request overlay median | 0.174 ms |
 | Compacted native / outgoing JSON | 137 / 629 bytes |
 | Retained overlay increment | 492 bytes |
 | Projected context JSON | 100,911 bytes |
 | Control-state JSON | 79 bytes before the watch transition |
-| Process RSS at sample end | 76,877,824 bytes |
-| Process heap used at sample end | 10,948,192 bytes |
+| Process RSS at sample end | 77,459,456 bytes |
+| Process heap used at sample end | 11,424,648 bytes |
+
+The Goal sample is an explicitly submitted short objective, with native source identity, no criteria/DAG and no retained raw Human prompt. Bytes measure serialized snapshot JSON, not the surrounding tool envelope or provider tokens. The unchanged sample includes the committed root-frame indicator. Snapshot generation normalizes once and reuses derived acceptance/outcome summaries.
 
 The frame sample uses a synthetic native parent summary and a bounded 128-source active tail: frame capture is limited to 256 active sources, so an unbounded 1,000-source call is deliberately rejected. It measures production draft planning and serialized edit/control overhead, not persistence latency or provider cache hits. Earlier-view edits may invalidate a provider's cached suffix; native system/tool prefixes are not rewritten.
 
