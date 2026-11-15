@@ -184,22 +184,25 @@ Exit: unauthorized exploration and premature cancellation are rejected; accepted
 
 ## Final local evidence
 
-Implementation `24198a3` ([release identity](../RELEASE-MANIFEST.json)), including semantic Goal foundation `63a14ff`. Counts describe retained behavior after deleting obsolete NLP/automatic-planning and synthetic live-helper tests, not weakened lifecycle assertions. Current-only GoalRun v8 rejects unsupported snapshots without migration/reset; native raw history is unchanged.
+Implementation `4dc29d7` ([release identity](../RELEASE-MANIFEST.json)), including semantic Goal foundation `63a14ff` and field-use corrections. The [field audit](agent-usage-audit-v0.10.0.md) records the frozen input/hash, observed failures, T1–T5 fixes and explicitly deferred work. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v4 reject unsupported snapshots without migration/reset; native raw history is unchanged.
 
 | Check | Observed result |
 |---|---:|
-| `npm test` | 253/253, 0 skipped; 3.670 s |
-| `npm run test:core` | 80/80; 0.080 s |
-| `npm run test:non-extension` | 109/109; 0.230 s |
+| `npm test` | 259/259, 0 skipped; 3.778 s |
+| `npm run test:core` | 82/82; 0.082 s |
+| `npm run test:non-extension` | 111/111; 0.238 s |
 | `npm run preflight` / `node scripts/preflight.mjs --static-only` | PASS; expected source/target overlap warning |
 | `node scripts/check-subagents-contract.mjs` | 36/36 against installed pi-subagents 0.88.1 |
 | Context/retention/artifact regressions | Included in full suite; installed projection/runner adapters |
 | Native package Skill discovery outside checkout | 1/1; one progressive Skill, no provider |
+| Frozen field-call native replay | 266 parent references, entered/returned, paired exchanges; no provider |
 | `git diff --check` | PASS |
 
 Independent scoped reviews cleared persistence/approval, branch and scheduler generation recovery, nested watch ownership, route questionnaire/proposal correlation, artifact root/ancestor replacement protection, retrieval edit lineage/read completeness, Skill activation, spill range provenance, conflicting read evidence and whole-companion coalescing. The final binding review cleared shared syntax validation and immutable-record identity checks, keeping logical binding identity separate from payload entry IDs and provenance. Dead Goal/DAG continuity projections, duplicate DAG notes/state and the unused retry wrapper were removed; active GoalRun decisions/checkpoints remain authoritative. The repeated-read regression checks one covered payload and a net serialized-context reduction for a representative large read; a partial comparison cannot remove an uncovered remainder. The repaired scheduler regression emitted four requests instead of two before repair; the artifact race created an outside file before repair. Source identities, not text equality alone, control edits and eligibility. Auxiliary diagnostics remain inconclusive for some files and include a pre-existing dictionary-`any` rule finding; this is not a clean whole-project typecheck claim.
 
 The semantic Goal audit also reproduced a real pause/fallback race: a primary terminal quota failure was replaced with an unlaunched fallback identity and became fictitious unknown work. The regression now covers pauses before the primary response and during fallback preparation; source identities are persisted/emitted without an await gap, suppressed fallback consumes the primary terminal fact, and Goal replacement is not blocked by a nonexistent run. Pre-Goal answers retain version 0; criterion IDs do not cross-rebind after replacement; bounded deltas declare omitted events. Independent bounded re-reviews found no remaining actionable findings in these fixes and obsolete-helper removal.
+
+Field-use repair independently re-reviewed the result/context/search/acceptance seams. Review found a near-limit metadata/commit-size mismatch; the failure was reproduced, canonical metadata budgeting corrected, and a near-budget roundtrip regression added. The bounded re-review found no further actionable issues. Early validation and actual native commit remain distinct; generated questionnaires are now available directly in model-visible content, without unsolicited startup prompts. Final parent checks also cover complete structured Goal reads and cursor-validation errors before persistence.
 
 Native API/installed projection/runner checks do not establish a real AgentSession/provider cycle. See [measurements](./measurements-v0.10.0.md) for bounded local CPU/memory/draft/request-size data and [handoff](../handoff.md) for Human acceptance and feedback. No provider/cache/token or semantic-quality improvement is claimed from these checks.
 

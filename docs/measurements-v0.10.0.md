@@ -6,31 +6,33 @@ These are bounded local measurements, not provider, token-cache, or semantic-qua
 node scripts/measure-context.mjs
 ```
 
-Observed output for implementation `24198a3` (Node 22.22.1 / Pi 1.5.2):
+Observed output for implementation `4dc29d7` (Node 22.22.1 / Pi 1.5.2):
 
 | Measure | Result |
 |---|---:|
-| Compact semantic Goal read median / JSON | 0.025 ms / 222 bytes |
-| Exact unchanged Goal read JSON | 96 bytes |
+| Compact semantic Goal read median / JSON | 0.025 ms / 216 bytes |
+| Exact unchanged Goal read JSON | 90 bytes |
 | Branch entries | 1,000 |
-| Bounded lexical retrieval median / returned hits | 0.406 ms / 8 |
-| Full lexical miss median / scanned sources | 3.369 ms / 1,000 |
+| Bounded lexical retrieval median / returned hits | 4.061 ms / 8 (1,000 candidates scanned for ranking) |
+| Full lexical miss median / scanned sources | 1.697 ms / 1,000 |
 | Retrieval truncation | true (bounded result) |
-| Watch-state transition median | 0.060 ms |
-| Frame-call planning median / active window | 0.529 ms / 128 sources |
-| Frame-call projection edits / draft JSON | 130 / 22,557 bytes |
-| Frame-call control-state JSON | 13,375 bytes |
-| Missing-pin request overlay median | 0.174 ms |
+| Watch-state transition median | 0.090 ms |
+| Frame-call planning median / active window | 2.453 ms / 1,000 sources |
+| Frame-call projection edits / draft JSON | 1,002 / 168,945 bytes |
+| Frame-call control-state JSON | 103,185 bytes |
+| Missing-pin request overlay median | 0.155 ms |
 | Compacted native / outgoing JSON | 137 / 629 bytes |
 | Retained overlay increment | 492 bytes |
 | Projected context JSON | 100,911 bytes |
 | Control-state JSON | 79 bytes before the watch transition |
-| Process RSS at sample end | 77,459,456 bytes |
-| Process heap used at sample end | 11,424,648 bytes |
+| Process RSS at sample end | 75,657,216 bytes |
+| Process heap used at sample end | 13,136,056 bytes |
 
 The Goal sample is an explicitly submitted short objective, with native source identity, no criteria/DAG and no retained raw Human prompt. Bytes measure serialized snapshot JSON, not the surrounding tool envelope or provider tokens. The unchanged sample includes the committed root-frame indicator. Snapshot generation normalizes once and reuses derived acceptance/outcome summaries.
 
-The frame sample uses a synthetic native parent summary and a bounded 128-source active tail: frame capture is limited to 256 active sources, so an unbounded 1,000-source call is deliberately rejected. It measures production draft planning and serialized edit/control overhead, not persistence latency or provider cache hits. Earlier-view edits may invalidate a provider's cached suffix; native system/tool prefixes are not rewritten.
+The frame sample now uses all 1,000 active sources without pre-compaction. The former 256-source restoration ceiling was removed: snapshots contain immutable native references under a 2 MiB canonical-control budget, not copied parent payloads. Explicit captures, pins, value bindings and exchange closures remain separately bounded. The sample measures production draft planning and linear edit/control overhead, not persistence latency or provider cache hits. Earlier-view edits may invalidate a provider’s cached suffix; native system/tool prefixes are not rewritten.
+
+Keyword-any ranking scans the bounded candidate set before selecting top matches, so its 4.061 ms sample is not the same operation as the earlier early-hit lookup that stopped after eight candidates. The extra local CPU buys deterministic ranking and recovery for keyword alternatives; no unconditional performance or provider-cost win is claimed.
 
 The overlay sample uses one explicit retained source head referencing native raw content after a synthetic native compaction; it measures serialized request-context bytes, not provider tokens. The miss sample exercises the bounded scan rather than only early matching results. Whole-process memory is not memory attributed solely to Compass.
 
