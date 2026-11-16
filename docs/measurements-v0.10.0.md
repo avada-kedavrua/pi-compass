@@ -55,3 +55,20 @@ Run `node scripts/measure-tool-contract.mjs` on the installed Pi host. Baseline 
 | Code Mode input type | Preserved, not `unknown` |
 
 The mutation schema remains visible to the model. Its nested variants cost more JSON than a flat optional-field bag but encode required/disallowed fields and source-selection forms. Query/mutation separation reuses native model-only exposure so Code Mode-only does not hide the only legal mutation path. This is a structural correctness/callability tradeoff, not an assertion that the entire prompt, tokenizer output or provider bill is smaller. No strict-provider sampling mode is requested; actual provider acceptance remains a Human live-test item.
+
+## Runtime guard cost
+
+Run `node scripts/measure-runtime-guards.mjs` after installing the owned dependency. Node 22.22.1, public Code Mode sandbox 1.5.2; actual kernel and temporary SQLite profile with an in-memory branch adapter, 25 calls per path (first reported separately, remaining calls form warm statistics). One applicable trivial rule; this is not a many-rule throughput claim.
+
+| Path | Warm median / p95 |
+|---|---:|
+| Empty profile | 0.017 / 0.059 ms |
+| Registered global rule, different tool | 0.028 / 0.060 ms |
+| One matching rule passes | 5.881 / 7.698 ms |
+| One matching rule blocks | 5.569 / 6.722 ms |
+
+First put, including module/WASM/Worker startup and private store creation: 51.052 ms. Mutation JSON: 123 bytes; compact listing: 294 bytes; exact unchanged listing: 62 bytes. Serialized JSON excludes the native tool envelope and is not a provider-token measurement.
+
+Whole-process RSS was 50,135,040 bytes before the sample and 109,985,792 at its end. This includes Node, SQLite, worker, VM allocations and GC timing; it is not sole-attributed guard memory. Worker VM memory and V8 heap have separate caps, and idle workers are reaped; no zero-overhead or zero-RSS claim is made.
+
+Reusing a Node Worker removes per-check thread creation, while each predicate still gets a fresh public sandbox VM. Matching several rules adds VM work; selectors and scope-revision caching avoid that on unrelated calls. This demonstrates bounded local mechanics and output size, not native AgentSession/provider latency, cache hits, semantic detector quality or net savings. Native warn/block/branch composition checks and independent review are recorded separately in the [canonical evidence](architecture-v0.10.0.md#final-local-evidence).

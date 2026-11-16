@@ -20,11 +20,15 @@
     "report:sessions": "node scripts/session-report.mjs",
     "test:core": "node --experimental-strip-types --test tests/dag-core.test.mjs tests/goal-run.test.mjs tests/module-contract.test.mjs tests/questionnaire-integration.test.mjs",
     "test": "node --import ./scripts/register-pi-host-typebox.mjs --experimental-strip-types --test tests/*.test.mjs",
+    "test:guards": "node --import ./scripts/register-pi-host-typebox.mjs --experimental-strip-types --test tests/runtime-guard*.test.mjs",
     "config:propose": "node scripts/merge-subagents-settings.mjs",
     "test:non-extension": "node --experimental-strip-types --test tests/dag-core.test.mjs tests/goal-run.test.mjs tests/module-contract.test.mjs tests/execution-orchestrator.test.mjs tests/session-report.test.mjs tests/subagents-config.test.mjs tests/write-scope.test.mjs tests/questionnaire-integration.test.mjs"
   },
   "engines": {
-    "node": ">=22.16.0"
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-codemode": "1.5.2"
   },
   "peerDependencies": {
     "typebox": "*"

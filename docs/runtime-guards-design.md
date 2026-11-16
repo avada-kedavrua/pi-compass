@@ -1,159 +1,130 @@
-# Runtime guards：反馈评估与设计草案
+# Runtime guards：执行契约与设计边界
 
-状态：**设计提案，不是已实现的工具或当前执行契约**。本轮只修复 Goal 详细读取的原生输入审阅信号；不注册规则、不修改全局配置、不替换 Pi 的权限机制。
+`runtime_guard` 已实现为独立于 Goal/DAG 的共享内核，由 Compass 的一个 Pi 适配器注册。它不解析 Human 自然语言、不自动生成规则、不改变 AGENTS/NOTES，也不要求创建 Goal。
 
-## 1. 旧版反馈如何处理
+**Human 已明确选择原生 hook 范围**：检查 `tool_call` 当时观察到的参数，覆盖直接和 Code Mode 嵌套调用；不保证后续插件再次改参，也不覆盖独立 child/remote 进程或扩展内部 exec。不是最终参数检查器或 OS 安全沙箱。无需修改已安装 Pi。
 
-两份反馈使用 `compass_goal(action=get|set)` / `compass_dag(nodes)`，不是当前 v0.10 的调用面。它们是有价值的现场报告，但缺少对应版本与原始 JSONL，不能当作当前版本的复现或成本归因。
+## 注册并使用一条规则
 
-| 反馈 | 当前证据与处理 |
+先用 `runtime_guard({operation:{action:"get"}})` 获取 compact scope revisions；新作用域的 revision 为 0。之后复用 mutation 回执，不要每轮重读全部规则。
+
+下面的例子只提醒**显式 limit 大于 200**，不声称检查 read 的默认值、文件总行数或图片：
+
+```json
+{
+  "operation": {
+    "action": "put",
+    "scope": "session",
+    "expectedRevision": 0,
+    "rule": {
+      "id": "explicit-read-limit",
+      "tools": ["read"],
+      "read": ["input.limit"],
+      "effect": "warn",
+      "check": "e=>({verdict:typeof e.input.limit==='number'&&e.input.limit>200?'violation':'pass'})",
+      "hint": "Read a smaller line range.",
+      "cases": [
+        {"event":{"toolName":"read","input":{"limit":50}},"expected":"pass"},
+        {"event":{"toolName":"read","input":{"limit":500}},"expected":"violation"}
+      ]
+    }
+  }
+}
+```
+
+注册返回 applied/unchanged、scope/id/revision、cursor；不回显源码。revision 是**作用域版本**，不是单条规则的计数。注册完成后，后续准入使用新规则；已准入或运行的调用不追溯撤销。Code Mode 中应顺序 await 注册与被保护操作，不能并行注册和执行后假定顺序。
+
+## 固定操作面
+
+所有参数使用 `{operation:{action,...}}`，Native schema 为 root object + action union。
+
+| action | 输入与行为 |
 |---|---|
-| set 原样回显全文 | 当前 `compass_goal` 只回 applied/unchanged、版本、sourceIds、cursor，替换时补 reset 计数；不回显 goal/constraints。无需再加 brief 开关或 hash/lengths。见 `src/index.ts` 的 `registerGoalTool` / `stateResult`。 |
-| 重复 set 浪费写入 | `setGoal` 对相同内容、来源与审阅状态幂等；确认新 Human 输入可以产生必要的审阅更新，不应伪装成无变化。见 `src/goal-run.mjs:setGoal`。 |
-| 旧约束不能删除 | 当前完整列表替换可删除旧条款；**尚无逐条 ID/patch**。是否增加增量 API 应看当前真实更新成本，不能为旧接口直接增加六七种操作。 |
-| get 把未审阅状态看成当前正确约束 | runtime 无法判断语义冲突，但能判断新 Human 输入是否已审阅。`compass_state` 已有 input.reviewed；本轮补齐详细 Goal 读取的同一信号。false 不代表所有约束失效，true 也不代表语义正确。 |
-| get 投影 / since last_compact | 已有 compact state、opaque cursor delta、完整详情、定向 context search/pin/mark。先使用这些现有能力；不再引入靠 compaction 推导语义变化的第二个游标。 |
-| 文档 output 与 schema 不符 | 当前任务 schema 和 DAG 核心都支持 output；历史不一致不应做兼容层。见 `src/index.ts:taskDefinitionSchema` 与 `src/dag-core.mjs:normalizeTask`。 |
-| 所有节点无边、同 cwd 必然冲突 | 不成立：独立只读检查可以合法并行。当前校验依赖引用/环、执行器与只读子任务边界；语义独立性仍归 Agent。不能为了防错给正常只读 DAG 加噪声告警。 |
-| 失败后整条 DAG 重投 | 当前有 reopen 和依赖感知失效，保留无关工作。它不是未知 child 的盲重试；unknown 先核对原生身份。不能新增通用 retry 按钮抹掉未知执行结果。 |
-| Compass 没有 context 工具 | 当前查询与 model-only mutation 已拆分；Skill 可见不代表扩展加载，model-only 工具本来不在 Code Mode ALL_TOOLS。参见 [工具契约](tool-contract.md)。 |
-| AGENTS / NOTES / Goal 三份真相 | 同意风险。AGENTS/文件继续拥有工作规范；Goal 只保留必要任务态和解释，context 按版本保留证据。编译出的 guard 是操作性产物，不升级为另一份 Human 指令。 |
+| get | 默认返回各 scope 的 revision 和简短规则列表；scope 可筛选，cursor 原样回传；完全未变只回 unchanged/cursor。指定 id 时默认 session，返回该规则源码/案例/来源。过滤器参与 cursor。 |
+| put | expectedRevision + rule；创建或完整替换同 scope 的 ID。验证结构、纯函数表达式和提供的案例，再 CAS 激活。完全相同的定义不重跑 VM 或写入。 |
+| test | scope/id + cases；只运行判定，返回逐例结果，stateChanged=false。不执行真实工具或真实设备动作。 |
+| remove | scope/id + expectedRevision；只删除该 scope 的定义。删除也推进 scope revision，不能以重用旧 ID 绕过版本检查。 |
 
-跨 compaction 的价值与 DAG 的收益因任务而异，两份反馈本身也不同。不能由其中一例推导“唯一价值”或普遍净收益。也不应为了采纳而要求每个工具都用一次。
+scope 默认 session。未知 ID、过期版本、非法字段、案例失败和不可用 runtime 不等同。验证失败不激活；Native session 写入结果不确定时返回 unknown，先 get 核对而非盲重试。已提交但刷新回执失败会明确 stateChanged=true，不伪装成无变化。
 
-## 2. 定位与责任
+### 判定函数与观察
 
-**Human 给语义要求 → Agent 编写可检验规则 → runtime 按明确事件执行规则。**
+check 是 JS 函数表达式，返回且只返回：
 
-- Agent 负责语义解释、适用工具、允许/禁止案例、识别范围、修订与退休。runtime 不从自然语言推导规则，也不保证任意程序等价性。
-- runtime 负责事件真实性、准确的作用域/版本、生效边界、资源隔离、错误与通知交付、确定性执行，以及自身不会破坏工具协议。
-- Agent 的判定函数漏检/误报，属于规则质量问题；宿主线程卡死、参数交付不实、跨 scope 覆盖、通知丢失或版本竞争，则是机制缺陷。不能都推给 Agent。
-- 这是合作式工作流护栏，不是对抗恶意 Agent/扩展的 OS 安全沙箱。真正的文件/网络权限与进程隔离继续归原生权限或系统沙箱。
+```js
+e => ({ verdict: "pass" /* 或 violation / unknown */, reason: "可选，最多240字符" })
+```
 
-推荐一个独立于 Goal/DAG 的共享 guard 内核，由**一个** Pi 扩展适配层拥有。Compass 可引用 guard 身份，不复制规则引擎、不强制创建 Goal，也不在两个入口各跑一次 hook。包/仓库归属在实施前决定。
+`e` 包含原生 toolName、toolCallId、parentToolCallId、cwd，以及 read 所选的 input 字段。read 使用 input 或 input.field 路径；重叠的父/子选择合并为父选择。未选择的数据不可凭空假设存在。
 
-## 3. 最短工作流与提议接口
+- 不提供 Node、fs、network、import、tools、models。不得打印输出或写 store；用返回的 reason 解释判断。
+- 每次判定拥有新的隔离 VM；Date/random 固定为确定性环境，不是实时钟。没有通用可变状态或计时器。
+- 投影只读自有数据属性，不执行 host getter，不沿继承属性构造目标，也不修改 Pi-owned input。输入是有界 JSON 快照，不静默截断。
+- 可选 sourceRefs 是溯源引用，不是新 Human 指令或已核验 fresh 的标记。内容/语义失效仍由 Agent 审阅。
+- 可选 cases 为 1–8 个 event/expected。提供的案例必须通过才能激活，但“案例通过”不等于语义正确。
+- lazy 工具尚未注册时可以登记其原生名；回执列 unresolvedTargets，不假装已有覆盖。`*` 显式匹配所有工具，控制工具自身除外。
 
-1. Agent 看当前语义要求，按需注册或修改一条规则；不要求每轮重建规则。
-2. 一次 put 完成结构/语法验证、可选案例检查和原子激活，回小回执。
-3. 后续每个匹配的工具调用执行判定：pass、violation 或 unknown。
-4. 命中按 warn/block 处理。Agent 根据短反馈修订同一 ID，不另外复制一条规则。
+## warn、block 与 unknown
 
-建议一个小控制工具 `runtime_guard`，root object + operation union：
+**warn** 不改 content、structuredContent、details、isError、usage 或图片。命中通过原生 turn_end custom-message draft 聚合给父 Agent，即使 Code Mode 丢弃 nested 返回值。未命中不发消息，不为提醒请求额外 provider turn。提醒遵从 Pi 原生提交/上下文生命周期，不是新的系统权威。
 
-| 操作 | 必要行为 |
+**block** 在观察点阻止调用执行，不返回正常业务数据；仍有原生短错误结果并保持 call/result 配对。不默认终止整个 Agent，不自动执行补救命令，不重试。nested block 的错误即使被脚本吞掉，也有父级边界提醒，包括 scope 竞争和 runtime 不可用。
+
+unknown、坏返回值、异常、超预算、取消和超时不伪装成语义违规。block 规则检查失败则阻止；warn 规则检查失败则提醒后继续。无法读取规则存储或规则在判定期间变化时，不能知道是否新增了禁止条件，因此拒绝本次准入。
+
+`runtime_guard` 不受自身规则封锁，避免坏规则锁死修复；仍受其他原生权限控制。修复须使用对应 scope 和新 revision，不能用 local 弱化 global。存储损坏需要 Human 修复对应文件或选择支持的 Native branch，不提供静默重置。
+
+提醒最多聚合 16 个分组，正文受约 2 KiB 预算限制；省略时有 omitted 计数，不声称完整。hint 是短的可操作修正建议，不复述整份规则或原始工具输入。
+
+## Scope 与持久化
+
+| scope | 所有权与生命周期 |
 |---|---|
-| put | 创建或替换一个 scope 内的 ID；expectedRevision 防止丢失更新；提交成功后生效。 |
-| get | 默认只列身份、版本、效果与有效 scope；指定 ID 才取源码、案例、来源。支持原样传回的 cursor，避免重复全文。 |
-| test | 只跑判定函数，不调用被检查的真实工具，不写规则/状态，不产生真实设备动作。 |
-| remove | 按 ID + expectedRevision 删除；不允许 local 删除 global。 |
+| session | 默认。通过原生 runtime-guard.state custom entry 持久化；Native tree 恢复该分支的状态，不复制 transcript、不随 Goal 替换自动猜测退休。 |
+| local | 当前 Pi cwd 的 canonical path，不扫描/推断 git root，也不因一次 shell cd 改变。不同项目不共享 local 定义。 |
+| global | 当前 Pi profile，共享给使用该 profile 且加载此扩展的其他 Pi 进程；Agent 按 Human 授权范围维护，不因一次项目例外擅改全局。 |
 
-规则最小信息：`id`、`scope`、`tools`、`read`、`effect`、`check`、短修正提示；可选来源引用和测试案例。check 是 Agent 提交的纯 JS 函数源码，不是 Node 模块路径；返回值严格校验，不能把任意 truthy 值当成命中。
+同名规则的身份是 scope + id。所有适用规则共同检查；local pass/warn 不抵消 global block。
 
-- tools 使用原生工具名，不猜命名空间别名。未加载的 lazy 工具可以登记，但回执明确 unresolvedTargets，不声称已有覆盖。
-- read 声明需要的事件字段，例如 input.command；避免把 write 的 MB 级正文、图片或整个上下文复制到 VM。需要完整字段时显式声明，超预算不能静默截断。
-- runtime 提供稳定的调用 ID、parent ID、原生 cwd 和选定输入快照；不提供 fs、network、process、import、tools 或 models。
-- 可选案例必须实际通过，否则不激活。案例通过不等于语义正确；不强制每条规则凑相同数量的测试。
-- put/get 的 mutation 回执只含 status、scope/id/revision 与必要的生效/未知目标信息，不回显源码和案例。
-- Code Mode 中可以顺序 await 注册后再调用工具；不得并行注册和执行后声称顺序有保障。原生已准入或已运行的调用不追溯撤销。
+Global/local 共用 `<getAgentDir()>/runtime-guards.sqlite`，首次写入才创建，数据库权限 0600。使用 Node 内置 SQLite/WAL、零 busy 等待及 BEGIN IMMEDIATE/CAS；没有自制文件租约或第二个语义规范仓库。SQLite 在 Node 22 的实验性提示不等于测试失败。
 
-## 4. 提醒与阻止必须分清
+热路径只读 namespace revision；版本不变复用已验证快照，变化后重新加载。VM await 不持数据库事务锁，检查完成后再核对版本；竞争直接报未执行，不无限循环重试。不同进程共用版本检查，不靠 fs.watch 假定即时一致。已打开的存储消失或被替换会失败可见，不静默变成空规则。
 
-### warn
+Schema v1 current-only；不迁移、不清空未知版本。规则源码是 Agent 编译的操作性产物；AGENTS/NOTES 与原生 Human 记录仍拥有语义来源。
 
-执行照常继续，**不改原工具 content、structuredContent、isError、usage 或图片**。不向外部工具的 JSON 后拼文本；那会破坏程序化调用。
+## 隔离、预算和成本
 
-命中提醒用原生 custom message 在合法边界交给父 Agent，不伪装 Human 消息，不为提醒单独触发模型调用。按原生顶层调用/批次聚合重复规则，保留命中次数；正常未命中不增加提示。
+生产依赖固定的公开 `@earendil-works/pi-codemode@1.5.2`，不依赖 Pi 未导出的 VM internals，也不假设它在 native loader 的别名中。TypeBox 仍只使用 Pi peer，Node 最低版本由 dependency 提升到 22.19.0。
 
-尤其要验收 Code Mode：即使脚本丢弃了 nested 工具返回值，父 Agent 仍能看到提醒。仅把消息放到 nested content/details 或 TUI notify 中都不够。准确的原生投递时机是 P0 验证项，不能只靠 fake event bus 声称完成。
+一个惰性 Node Worker 内使用公开 InlineCodemodeSandbox，每次 start 创建新的 VM；Inline 不在 Pi 主线程运行。没有第二个 Agent loop。Worker 空闲 30 秒回收，下一次需要时重建；空 profile/未匹配路径不启动 VM。
 
-### block
-
-在执行前返回 Pi 的 block 决定：工具不执行、不产生该调用的副作用、不返回正常业务结果。**仍返回短错误结果**并保留 call/result 配对；“结果不返回”不能实现为悬挂调用或删掉 toolResult。
-
-不默认终止整个 Agent，不自动重跑、不自动执行修正命令。修正后由 Agent 选择下一步。
-
-执行完才发现输出不合要求，只能记录/提醒或阻止未来调用，不能声称撤销副作用。首版不提供“执行后 block 并藏掉结果”。
-
-### unknown / evaluator error
-
-unknown、抛错、超时、超量输入、非法返回值与 violation 区分。默认 block 规则检查失败时阻止该调用，warn 规则则提醒后继续，回执注明“未完成检查”，不伪造违反语义的结论。不自动关闭失效规则。
-
-控制工具及 Human 紧急恢复入口不受**本机制自己的**通配规则封锁，仍受原生权限限制。修复 scope 权限保持不变；不能通过 local 修复入口弱化 global。
-
-## 5. Scope、来源和一致性
-
-共享一套格式和执行器，global/project/session 只是规则作用域：
-
-- session 默认：适合临时任务，不意外扩散；随原生分支恢复，不靠模型记住。
-- project：按明确的 canonical 项目根标识，不随一次 bash cd 漂移。
-- global：profile 级规则，跨项目生效；Agent 只能在 Human 授权的作用域内维护，不能因本项目一次例外擅改全局。
-- 同时适用的规则全部成立；local 不能用同名 ID 覆盖或降级 global。warn 不抵消 block。身份是 scope + id，不是一个隐式覆盖链。
-- 代码/效果/来源更新以版本 CAS 激活；旧版本或验证失败均不改活动状态。注册回执界定生效点，已准入调用使用其明确的快照。
-- 只有“同进程收到回执”不足以宣称其他 Pi 进程同步更新。共享持久化的版本检查和激活语义必须单独验证；不能靠 fs.watch 保证立即一致。
-
-持久化候选优先评估 Node 内置 SQLite 的小表/事务，避免自写不可靠的 read-check-rename 或过期锁协议。global 和 project 用 scope key，session 继续尊重原生分支生命周期。是否采用 SQLite、最低 Node 版本和实际开销需 P0 证据，不在此预先承诺为已选实现。
-
-任何事务都不跨 VM await 持锁。先取快照，在事务外判定，再验证版本并提交；规则被并发修改时不能沿用旧判定。竞争需有界处理并明确未执行，不能无限重试或偷偷放行。
-
-来源引用记录原生输入身份，或文件位置/版本，不复制整份 AGENTS/NOTES 为第二规范。内容 hash 变化只能证明来源变化，不能证明规则语义失效或生成正确修订。没有检查就不能标 fresh。新 Human 输入仍由 Agent 解释；runtime 不自动撤销所有现有保护，也不从新文字自动改规则。
-
-## 6. “不能 cd”及覆盖边界
-
-应检查实际 bash 调用的参数，而不是扫描整段 Code Mode 源码，也不是拦截宿主为设置 cwd 生成的内部 shell 包装。
-
-规则作者至少要区分：真正的 cd 命令、分号/管道/子 shell、注释、`echo 'cd x'`、文件名、here-document 的数据与执行、引号转义、别名/函数、`bash -c`、PowerShell、Python/自定义工具的间接执行。
-
-不把 `command.includes('cd')` 包装成通用保证；也不为这个例子把几十种 shell 模式写死到内核。判定器的语法支持、保守性与未覆盖路径属于明确的规则覆盖范围。必要的共享解析 helper 可以在真实案例支持后加入，不先建一套万用 DSL。
-
-原生边界已确认的限制：
-
-1. `tool_call` 可阻止工具，nested Code Mode 调用也经过它。
-2. Pi 1.5.2 的后续 tool_call handler 仍能改 input，且不重新验证。**一次早期检查不等于检查了最终执行参数。** 仅靠“我最后注册”或冻结 Pi-owned input 不足以成为通用解法。
-3. 普通 tool_call 看不到扩展内部 exec、任意程序内部系统调用、未装适配器的独立 child/remote runtime 或 Human 的 ! 命令。不能把 global 理解为覆盖所有 OS 行为。
-
-因此“最终参数上的防护”是 P0 的阻断性问题：先找到受支持的原生最终检查边界，或给出经过验证的扩展组合/受控工具适配范围。若只能提供 tool_call 观察点上的护栏，必须按这个较窄边界命名和验收；不能把宿主集成缺口归咎于 Agent 规则写错。不得为此偷偷修改已安装 Pi、重写所有原生工具或建第二个工具执行器。
-
-## 7. 轻量运行，而不是把模型换成另一个重循环
-
-- 无启用作用域时不启动 VM；工具选择先用缓存索引过滤。全局即时一致若要求版本探测，就实测该成本，不同时宣称零 I/O。
-- 同一次事件的适用规则批量检查；只传声明字段，不扫描整段 history、不让模型逐次判定。
-- 缓存已验证规则、selector 与版本化源码 bundle。公共 Code Mode sandbox 每次运行创建新 VM，不能凭空声称已经缓存了跨调用 JS 函数。
-- Agent JS 不用 Node eval/new Function/node:vm 冒充安全沙箱。复用公开 Code Mode/QuickJS 能力；不给规则执行外部动作的工具。
-- 需要独立 worker 的硬期限、VM 内存/输入/输出/代码体积预算和取消清理；Promise.race 不能终止恶意循环或不可中断内建函数。失效 worker 不能继续占着执行容量却标成空闲。
-- 初步方向是惰性共享的 warm worker、隔离执行上下文与有界准入；不能为每个规则/调用新开线程，也不能共享可被上一条规则污染的全局对象。公共 API 能否同时满足这些要求及其成本先验证，验证不了就停，不扩成自研通用 VM 框架。
-
-本轮本机微探测（Node 22.22.1、公开 pi-codemode 1.5.2、32 MiB VM 限额、空 tools/globals、每次十个简单判断，7 次运行含首次）：
-
-| 执行方式 | 首次 | 后六次中位数 | 解释 |
-|---|---:|---:|---|
-| CodemodeSandbox，逐次新建 worker | 44.350 ms | 31.592 ms | 不适合作为轻量热路径默认实现。 |
-| InlineCodemodeSandbox，宿主线程 | 8.469 ms | 5.853 ms | 不能据此选择它：不可中断内建运算仍可能卡宿主。 |
-
-这不是 native hook 集成、warm worker 实现、恶意代码隔离或 provider 收益证明，也没有测得该功能的独占 RSS。第一个探测脚本因等待 unref worker 的退出而以未完成顶层 await 结束；修正探测脚本后才得到上表，不能把失败的脚本算作通过。
-
-## 8. 有状态限制：单独承认成本
-
-“不能 cd”是无状态的；“IR 至少间隔 60 秒”“资源不能并发占用”不是。不能把读上次时间然后放行当作并发安全。
-
-若纳入有状态能力，需要原子 check-and-reserve、调用身份、终态/未知态处理，以及跨进程 scope 的一致时钟/状态语义。并行调用不能同时通过；超时不代表设备没收到命令，不能自动释放保护再重发。重启、时钟倒退、更新判定代码时未结束的 reservation 都必须有明确状态。
-
-首个可交付垂直切片以无状态工具调用检查为界；只预留事件/版本边界，不先开放未经验证的通用可变 store、计时器、锁服务或自动补救动作。有状态能力单独过事务性验收，等待与调度仍复用原生能力。不能把首版包装成已能保证设备冷却间隔。
-
-## 9. 实施顺序与验收
-
-| 阶段 | 要证明什么 |
+| 边界 | 上限/行为 |
 |---|---|
-| P0，先验证、不铺功能 | 最终参数检查边界；parent/nested 的 warn 可达且原结果不变；公开沙箱复用的安全和热路径成本；scope 持久化/CAS 的可行性。任一关键项无证据就暴露范围，不转写成“支持”。 |
-| P1，最小通用垂直切片 | 单规则 put → 验证 → 生效 → warn/block → 按 ID 修订/删除；无规则快路径；语法/返回/超时错误；原生紧急恢复；global/project/session 不越权覆盖。 |
-| P2，再覆盖真实复杂规则 | 真实 command 边缘案例、lazy MCP、扩展组合、独立子进程覆盖声明；有需求且事务验收通过后再做状态型限制。 |
+| 每 scope 规则 | 32 条，完整 control snapshot 256 KiB |
+| 单规则源码 | 8 KiB；hint 240 字节 |
+| tools / read | 各最多 16 项；read 路径最多 10 段 |
+| 单判定观察 | 64 KiB JSON、最多 64 层；越限 unknown，不截断 |
+| VM | 32 MiB；Worker V8 old/young generation 64/16 MiB |
+| 准入 | 一个活动批次，最多 16 个等待批次 |
+| 执行期限 | 默认 1 秒，含等候与冷启动；取消/超时终止 Worker，实际退出后才能复用容量 |
 
-最小测试矩阵应覆盖：pass/violation/unknown；坏代码与超时；注册失败不激活；并发修订不丢更新；local 不能弱化 global；聚合提醒不丢 nested 命中；JSON/structuredContent/image 正常结果不变；block 不执行且仍有错误配对；重启/分支恢复；后续 handler 改参数的可复现场景。性能单列未匹配路径、命中路径、并发/超时、RSS 与 provider 调用数，不能只报平均值。
+Worker idle/超时退出后的队列都会继续调度；终止失败则关闭容量并拒绝等待者。独立工具取消信号必须传入控制操作，在提交前再次检查，不能只用 Agent-wide signal。
 
-目标不是“自动管住所有语义”，而是：Agent 能以低成本把适合机械检查的要求编译成可验证、可修改、可追责的防护；不适合机械保证的要求仍保持语义与证据边界。
+本地延迟与完整进程 RSS 见 [测量](measurements-v0.10.0.md#runtime-guard-cost)。它们不是 provider latency、token 净节省或功能独占内存证明。多条匹配规则增加判定成本，应注册少量值得机械检查的要求，而不是把每句 prose 都搬进去。
 
-## 10. 证据定位
+## 场景与责任边界
 
-- 当前工程：`src/index.ts` 的 registerGoalTool / taskDefinitionSchema / registerContextSearchTool / registerContextTool；`src/goal-run.mjs` 的 setGoal / buildGoalDetails / transitionTasks；`src/dag-core.mjs` 的 normalizeTask / assertAcyclic。
-- 原生 Pi 1.5.2：安装包 `docs/extensions.md` 的 Tool Events、pi.sendMessage 与 Calling Other Tools；`dist/core/extensions/runner.js:emitToolCall`。后续 handler 可变输入与 load-order chaining 是公开契约，不是推测。
-- 公开沙箱 1.5.2：`@earendil-works/pi-codemode` 的 exports，CodemodeSandboxBase / CodemodeSandbox / InlineCodemodeSandbox / RemoteCodemodeSandbox / serveCodemodeRemote 的类型与生命周期说明。这里只确认公开能力，尚未证明复用后的 guard 集成。
+“不能 cd”的判定应检查实际工具参数，而不是整段 Code Mode 文本或宿主设置 cwd 的内部 shell 包装。Agent 要区分命令、引号、注释、文件名、数据 heredoc 与执行、别名、间接 shell、自定义工具、PowerShell 等覆盖范围。内核不把 includes('cd') 宣传成语义保证，也不硬编码几十种 shell 变体。
+
+Agent 负责函数漏检/误报和案例质量；框架负责正确交付观察、scope/CAS、生效边界、CPU/内存约束、取消、通知和协议不变。Host prototype 污染、丢失 nested 通知、跨 scope cursor 误报 unchanged、关停期间丢队列等都是机制缺陷，不推给规则作者。
+
+“IR 间隔至少 60 秒”、资源并发占用等有状态条件**不在本版保证内**。它们需要原子 check-and-reserve、终态/未知态、跨进程时钟和重启语义；超时不代表设备没收到命令，不能自动释放保护重发。此版本只交付无状态的工具调用检查，等待/调度继续归原生能力。
+
+## 证据与验收
+
+- `src/runtime-guard*.mjs`：纯数据/schema、scope store、VM/Worker、Pi 适配，控制工具只有一个入口。
+- `tests/runtime-guard*.test.mjs`：实际 SQLite/public sandbox/installed ExtensionRunner，覆盖 CRUD、CAS、原生分支、warn 结果保持、nested 提醒、已接受的后续改参边界、取消、原型安全、超时恢复、idle 退出期间准入、存储损坏。
+- `scripts/measure-runtime-guards.mjs`：临时 profile 与内存 branch adapter，不创建 Human profile 规则。无规则、未匹配、匹配通过和阻止分别计量。
+- [canonical local evidence](architecture-v0.10.0.md#final-local-evidence)：实际完整验证结果。Registry/branch adapter 测试不是 live AgentSession/provider 验收。
+
+旧版反馈中 set 全量回显、幂等、output 和 context 入口已有当前接口对应修复；完整约束列表可以删除旧条款，但仍没有逐条 patch。无边 + 同 cwd 不必然冲突；当前 DAG 已校验依赖引用/环并限制自动子任务只读。不能新增无条件“失败重试”绕过 unknown run identity。全量 Goal 详情的 input.reviewed 表示原生输入是否待审阅，不代表 runtime 已判断语义正确或冲突。完整使用成本仍需 Human live 证据。

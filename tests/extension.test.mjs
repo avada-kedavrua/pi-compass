@@ -68,7 +68,14 @@ function fakePi(options = {}) {
   }
   const pi = {
     events, commands, tools, entries, delegationRequests,
-    on(name, handler) { events.set(name, handler); },
+    on(name, handler) {
+      const prior = events.get(name);
+      events.set(name, prior ? async (event, context) => {
+        const patch = await prior(event, context);
+        if (patch?.block) return patch;
+        return await handler(patch ? { ...event, ...patch } : event, context) ?? patch;
+      } : handler);
+    },
     registerTool(definition) { tools.set(definition.name, definition); },
     registerCommand(name, definition) { commands.set(name, definition); },
     getActiveTools() { return [...active]; },

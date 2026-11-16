@@ -35,7 +35,7 @@ export const piRoot = piPackageRoots().find(isPiPackageRoot);
 const hostParentURL = piRoot ? pathToFileURL(path.join(piRoot, "package.json")).href : null;
 registerHooks({
   resolve(specifier, context, nextResolve) {
-    if (specifier === "typebox" || specifier.startsWith("typebox/")) {
+    if (specifier === "typebox" || specifier.startsWith("typebox/") || specifier === "@earendil-works/pi-coding-agent") {
       if (!hostParentURL) {
         throw new Error(
           "Cannot locate Pi's host-provided TypeBox. Install Pi >=1.4.0 or set PI_CODING_AGENT_PACKAGE_ROOT to the @earendil-works/pi-coding-agent package directory. Do not install TypeBox into the Compass package.",

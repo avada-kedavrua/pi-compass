@@ -10,7 +10,7 @@ Lower the total practical cost of completing arbitrary Goals without reducing co
 
 - **Agent:** interpret Human intent; explicitly create/reaffirm/replace the semantic Goal and declare constraints/acceptance; choose decomposition, capabilities, route, attention, caveats and final integration. Runtime never guesses these from natural language.
 - **Pi:** session tree, message persistence, branching, compaction, and append-only context projection edits.
-- **Compass:** Goal/version state, explicit Human constraints and decisions, evidence references, deterministic eligibility/validation, acceptance status, and bounded continuity projection.
+- **Compass:** Goal/version state, explicit Human constraints and decisions, evidence references, deterministic eligibility/validation, acceptance status, and bounded continuity projection. The optional [runtime guard kernel](runtime-guards-design.md) stores executable Agent compilations, not a second canonical conventions registry; it requires neither Goal nor DAG and uses native observation gates only.
 - **Code Mode:** deterministic tool batching, parsing, validation, and aggregation in the parent context.
 - **pi-subagents:** isolated semantic child work when explicitly justified, dependency-ready, and read-only.
 
@@ -38,7 +38,7 @@ A RouteSet is a set of alternative strategies for the same Goal version and base
 
 - Pi baseline: 1.5.2 for the current `context_with_system`, native boundary and installed projection behavior. Pi 0.87.0 introduced Context Edit, but Compass uses only the validated boundaries supported by the installed host.
 - pi-subagents: the installed structured delegation contract owns child execution, status and cancellation; Compass does not assume extension inheritance.
-- Node.js: `>=22.16.0`.
+- Node.js: `>=22.19.0` for the pinned public Code Mode runtime used by guards.
 - GoalRun schema/API: v8; context schema v4. Start a new session or select a supported native branch when old GoalRun snapshots are present; unsupported schemas fail visibly without migration or reset.
 
 Historical v0.9.0 architecture and implementation boundaries are in [`architecture-v0.9.0.md`](./architecture-v0.9.0.md). Historical v0.8.0 implementation details remain in [`design-v0.8.0.md`](./design-v0.8.0.md).

@@ -167,11 +167,20 @@ if (staticOnly) {
   }
 }
 
+try {
+  const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-codemode"));
+  const dependency = JSON.parse(readText(path.resolve(path.dirname(entry), "../package.json")));
+  if (dependency.version !== manifest?.dependencies?.["@earendil-works/pi-codemode"]) throw new Error("Runtime dependency version does not match package.json");
+  add("PASS", "Runtime guard sandbox", `${dependency.name} ${dependency.version}; owned dependency, not a Pi loader alias`);
+} catch (error) { add("FAIL", "Runtime guard sandbox", `${error.message}; run npm ci --ignore-scripts --omit=peer in the package checkout`); }
+
 const nodeResult = run("node", ["--version"]);
 const nodeVersion = nodeResult.ok ? parseVersion(nodeResult.text) : null;
+const requiredNode = manifest?.engines?.node ?? "";
+const minimumNode = parseVersion(requiredNode.replace(/^>=\s*/, ""));
 if (!nodeResult.ok) add("FAIL", "Node.js", "Node.js is not available on PATH");
-else if (nodeVersion && atLeast(nodeVersion, [22, 16, 0])) add("PASS", "Node.js", `${nodeResult.text} (minimum tested: 22.16.0)`);
-else add("WARN", "Node.js", `${nodeResult.text}; Node.js below the tested 22.16.0 baseline; upgrade Node before running the package tests`);
+else if (nodeVersion && minimumNode && atLeast(nodeVersion, minimumNode)) add("PASS", "Node.js", `${nodeResult.text} (package minimum: ${requiredNode})`);
+else add("FAIL", "Node.js", `${nodeResult.text}; requires a valid engines.node (${requiredNode}) for the runtime guard dependency`);
 
 const npmResult = run("npm", ["--version"]);
 const bunResult = run("bun", ["--version"]);

@@ -17,6 +17,14 @@ If Compass is absent from the available tools (check `compass_context_search` in
 - `compass_open` loads missing groups once: `acceptance`, `history`, `goal_details`, `planning`, `routes`, `issue_review`. Open only what the next step needs. No need to open planning to retain evidence.
 - Acceptance is optional and may be recorded whenever evidence is available. Define concrete criteria, use returned IDs, then record `reported_pass|failed|blocked|inconclusive` with real evidence. No independent verification is inferred from your report. Status returns current full criterion text/evidence; no mandatory reread after every record.
 
+## Optional runtime checks
+
+- `runtime_guard` works before any Goal. Compile only worthwhile mechanical requirements into pure JS; Agent owns semantics/coverage and runtime owns safe execution. Canonical instructions remain in AGENTS/NOTES, not another prose registry.
+- `get` lists scope revisions and IDs; `get+id` recovers one definition. `put`/`remove` require the **scope** revision; default session, local binds canonical Pi cwd, global affects the profile. Reuse receipts; do not register/read every turn.
+- Declare native tools and only needed `input.field` observations. Return `{verdict:"pass"|"violation"|"unknown",reason?}`; no tools/I/O/output/store. Use cases, including optional parentToolCallId for nested checks. Refine the same ID instead of accumulating copies.
+- `warn` keeps business results untouched and sends boundary feedback; `block` prevents the observed call but returns a native error. The control tool remains available for repair. Local cannot override global.
+- Coverage is native tool_call, including Code Mode nested calls—not later plugin rewrites, independent children or arbitrary OS actions. No live clock/mutable state, device cooldown guarantee, or automatic semantic compilation. Do not blindly retry blocked/unknown actions.
+
 ## Retain or recover context
 
 Read with `compass_context_search({...})`; mutate with direct `compass_context({operation:{action,...}})`. Required/allowed fields are in each schema. Model-only mutation stays available even in Code Mode-only mode; no flat mutation adapter is retained.

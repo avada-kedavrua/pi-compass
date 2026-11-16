@@ -12,6 +12,7 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 - Human-approved DAGs: exact structured questionnaire correlation, material-change invalidation, evidence-bearing assessments, dependency gating, unknown-run fail-closed behavior, and native structured delegation.
 - RouteSets separate from DAGs: explicit route selection, Human-authorized bounded exploration, shared acceptance/caveat comparison, and acceptance-gated competitor cancellation.
 - Native watch ownership by arm identity, repeating/lost/terminal lifecycle handling, branch reconciliation, and explicit frame-to-parent transfer.
+- Optional `runtime_guard`: Agent-written pure JS checks with scoped IDs/CAS revisions, session branch recovery, shared global/local definitions, result-preserving warnings and pre-execution blocks at the native tool_call observation point.
 
 The [field-use audit and resolved TODOs](docs/agent-usage-audit-v0.10.0.md) records the first real task’s overhead, failures, fixes and remaining unknowns. It does not claim measured net savings from a single uncontrolled session.
 
@@ -27,7 +28,7 @@ The [field-use audit and resolved TODOs](docs/agent-usage-audit-v0.10.0.md) reco
 ## Requirements
 
 - Pi: `>=1.5.2` for the current `context_with_system` integration.
-- Node.js: `>=22.16.0`.
+- Node.js: `>=22.19.0`. Install the pinned public Code Mode runtime dependency; TypeBox still comes only from Pi.
 - TypeBox is supplied by Pi as a peer dependency; Compass must not install a package-local copy.
 - pi-subagents, pi-await and ask-user-questions must be installed and enabled by the Human's Pi configuration when those capabilities are used.
 
@@ -48,6 +49,12 @@ text(result);
 
 Mutations remain direct standalone calls and require the returned revision; do not batch a pin/frame operation in Code Mode.
 
+## Runtime guards
+
+Use `runtime_guard({operation:{action:"get"}})` once to recover scope revisions. Put a worthwhile mechanical check under a stable ID, then reuse its mutation receipt to refine/remove it. No Goal or DAG is required. `warn` keeps normal results intact; `block` prevents the observed call and returns a short native error. Source/cases are fetched only with get+id.
+
+The Human-approved coverage is native `tool_call` inputs, including Code Mode nested tools—not post-plugin final parameters, independent children or arbitrary OS actions. Rules do not auto-compile from Human text. See the [execution contract and runnable rule example](docs/runtime-guards-design.md); stateful device cooldowns are not supported by this version.
+
 ## Local validation
 
 ```bash
@@ -57,6 +64,7 @@ npm run test:non-extension
 npm test
 npm run preflight
 node scripts/measure-context.mjs
+node scripts/measure-runtime-guards.mjs
 ```
 
 See the canonical [local verification results](docs/architecture-v0.10.0.md#final-local-evidence) and [bounded local measurements](docs/measurements-v0.10.0.md). These are not live provider or token evidence.
@@ -69,7 +77,8 @@ In a disposable Pi session rooted at this package (or an explicit safe fixture p
 2. Ask the Agent to record a simple semantic Goal via `compass_goal`; verify a DAG is not required. Send a clarification: raw text must not replace the Goal. The Agent explicitly reviews/reaffirms or updates it.
 3. Use `compass_context` for a small `call`/`return`. Check the footer changes between `frame: root` and the committed frame identity, then recover a source with `compass_context_search` and pin it with `compass_context`. Compact or navigate only through native Pi operations and verify the value remains qualified.
 4. Only when provider cost is acceptable, ask the Agent to create a small read-only DAG: two independent inspections and a third depending on both. Review and answer the exact native Human approval questionnaire. The Agent must assess prerequisite evidence before the dependent task starts; parent/Code Mode work must stay with the parent.
-5. Inspect actual native child identities, task evidence, assessments and unknown/stale handling. Export a redacted report with `node scripts/session-report.mjs <session.jsonl> --json`. A local test pass is not live provider acceptance.
+5. In the disposable session, register the [session-scoped guard example](docs/runtime-guards-design.md#注册并使用一条规则). Trigger warn and block, including a nested Code Mode call that discards its result; verify the parent still gets feedback. Change/remove the same ID with the returned scope revision. Global/local tests affect the profile and should use an isolated disposable profile.
+6. Inspect actual native child identities, task evidence, assessments and unknown/stale handling. Export a redacted report with `node scripts/session-report.mjs <session.jsonl> --json`. A local test pass is not live provider acceptance.
 
 Use a disposable session/project: provider calls and filesystem effects remain real. The obsolete automatic live-test command/launcher was removed; acceptance uses the same Agent, native questionnaire and scheduler as ordinary work, not a synthetic dispatch bypass.
 

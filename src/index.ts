@@ -5,6 +5,7 @@ import { questionnaireFailureResultPatch } from "./questionnaire-integration.mjs
 import { latestHumanSource, validateGoalSources } from "./goal-sources.mjs";
 import { agentResult } from "./compass-result.mjs";
 import { contextSearchSchema, contextToolSchema } from "./context-tool-schema.mjs";
+import { registerRuntimeGuards } from "./runtime-guard.mjs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -2441,6 +2442,8 @@ export default function (pi: any) {
     persistState(pi);
   }));
 
+  registerRuntimeGuards(pi);
+
   pi.registerCommand("compass-preflight", {
     description: "Check Compass progressive disclosure and required tools in the active Pi session",
     handler: async (_args: string, ctx: any) => {
@@ -2457,6 +2460,7 @@ export default function (pi: any) {
         { label: "Stable-name schema replacement", ok: schemaReplacement },
         { label: "Compass loader", ok: allNames.some((name) => name === "compass_open") || availableCapabilities(state).every((name) => activeCapabilities().includes(name)) },
         { label: "Compact state tool registered", ok: allNames.some((name) => name === "compass_state") },
+        { label: "Runtime guard controller registered", ok: allNames.includes("runtime_guard") },
         { label: "codemode", ok: names.some((name) => /code.?mode/i.test(name)) },
         { label: "pi-subagents registered", ok: subagentInstalled },
         { label: "Structured delegation event bus surface", ok: Boolean(pi.events && typeof pi.events.on === "function" && typeof pi.events.emit === "function" && delegationRuntimes.get(pi)?.installed) },
@@ -2467,6 +2471,7 @@ export default function (pi: any) {
       lines.push(`Loaded Compass capabilities: ${activeCapabilities().join(", ") || "none"}`);
       if (!schemaReplacement) lines.push("BLOCKER: same-name schema replacement did not verify. Do not use this build; dynamic schemas require this Pi runtime behavior.");
       lines.push(`Active Compass tools: ${names.filter(isCompassName).join(", ") || "none"}`);
+      lines.push("Runtime guards are explicit Agent registrations, checked at native tool_call inputs including nested calls; later plugin mutations and independent children are outside this boundary.");
       lines.push(`Subagent tools: ${!subagentInstalled ? "not installed/registered" : subagentVisible ? "visible; activation owned by Pi/pi-subagents and the user" : "registered but inactive in Pi/user toolset; Compass will not force-enable it"}`);
       lines.push(`Subagent loader: ${inventory.subagentLoader.active ? "visible" : "inactive/not registered"}. Loader visibility does not mean the executor schema is active.`);
       const awaiting = inventory.await;
