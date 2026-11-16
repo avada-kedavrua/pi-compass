@@ -184,14 +184,14 @@ Exit: unauthorized exploration and premature cancellation are rejected; accepted
 
 ## Final local evidence
 
-Implementation `7482d91` ([release identity](../RELEASE-MANIFEST.json)), including semantic Goal foundation `63a14ff` and field-use corrections. The [field audit](agent-usage-audit-v0.10.0.md) records the frozen input/hash, observed failures, T1–T5 fixes and explicitly deferred work. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v4 reject unsupported snapshots without migration/reset; native raw history is unchanged.
+Implementation `6ee720d` ([release identity](../RELEASE-MANIFEST.json)), including semantic Goal foundation `63a14ff` and field-use corrections. The [field audit](agent-usage-audit-v0.10.0.md) records the frozen input/hash, observed failures, T1–T5 fixes and explicitly deferred work. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v4 reject unsupported snapshots without migration/reset; native raw history is unchanged.
 
 | Check | Observed result |
 |---|---:|
-| `npm test` | 275/275, 0 skipped; 4.091 s |
-| `npm run test:core` | 82/82; 0.079 s |
-| `npm run test:non-extension` | 111/111; 0.233 s |
-| `npm run test:guards` | 14/14; 0.874 s |
+| `npm test` | 279/279, 0 skipped; 4.189 s |
+| `npm run test:core` | 82/82; 0.082 s |
+| `npm run test:non-extension` | 111/111; 0.232 s |
+| `npm run test:guards` | 18/18; 0.898 s |
 | `npm run preflight` / `node scripts/preflight.mjs --static-only` | PASS; expected source/target overlap warning |
 | `node scripts/check-subagents-contract.mjs` | 36/36 against installed pi-subagents 0.88.1 |
 | Context/retention/artifact regressions | Included in full suite; installed projection/runner adapters |
@@ -212,7 +212,9 @@ A subsequent legacy-feedback check reproduced a missing qualifier in full Goal d
 
 Runtime guard verification uses actual SQLite/public sandbox/installed ExtensionRunner with temporary profiles. Independent review found and cleared cancellation/precommit, nested error notice, projection cursor, singleflight initialization, prototype-safe projection, idle-worker admission and revision/effect aggregation bugs; regressions cover each meaningful path without enabling Human profile rules. The scope revision hot path does not run a model; matching checks use fresh VMs inside one lazy worker. The documented JSON example was schema-validated, registered and triggered in a disposable fixture. Node 22.19.0 is the declared dependency minimum; actual local execution used Node 22.22.1. GoalRun v8/context v4 remain unchanged and runtime guard snapshots are v1 current-only.
 
-Native API/installed projection/runner checks do not establish a real AgentSession/provider cycle. See [measurements](./measurements-v0.10.0.md) for bounded local CPU/memory/draft/request-size data and [handoff](../handoff.md) for Human acceptance and feedback. No provider/cache/token or semantic-quality improvement is claimed from these checks.
+Human live feedback then exposed a missed production seam: the guard kernel dynamically imported the globally installed Pi SDK through ordinary Node ESM resolution. Injected test profiles and the Node host-resolution shim bypassed it. An unpatched native discoverAndLoadExtensions/factory/Runner regression reproduced the exact compass_state block before repair; the entry now statically obtains and injects the host profile provider, with no extra local SDK dependency. The same probe executes a real Worker check and temporary-profile SQLite mutation; full preflight runs it and the in-session command reads actual guard state. A broader bounded audit reproduced and repaired queued operations crossing branches, detail cursors satisfying list reads, late notices leaking across branches, and empty-policy admission after an epoch changed during initialization. Control/read/check work now retains its enqueue/await epoch, and stale errors cannot enter a new branch accumulator. All added regressions passed; independent code re-review found no remaining actionable issue in this audited seam.
+
+Native API/installed projection/runner checks, including this provider-free native factory probe, do not establish a real AgentSession/provider cycle. See [measurements](./measurements-v0.10.0.md) for bounded local CPU/memory/draft/request-size data and [handoff](../handoff.md) for Human acceptance and feedback. No provider/cache/token or semantic-quality improvement is claimed from these checks.
 
 ## Native reference baseline
 
