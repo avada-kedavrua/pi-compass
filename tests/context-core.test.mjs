@@ -1,10 +1,11 @@
 import test from "node:test";
+import { analyzeRepeatedSelections } from "../src/context-retrieval.mjs";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
-  CONTEXT_MESSAGE_TYPE, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, prepareContextOperation, releaseWatchMessages, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
+  CONTEXT_MESSAGE_TYPE, sourceIndex, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, prepareContextOperation, releaseWatchMessages, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
 } from "../src/context-core.mjs";
 import {
   SessionManager, appendDrafts, applyOperation, assertPaired, contextPreview, modelText, queueOperation, sourceVersion,
@@ -172,7 +173,7 @@ test("cross-read repeat checks use persisted call identity, exact payloads, and 
     manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: "read", arguments: arguments_ }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() });
     return manager.appendMessage({ role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text: resultText }], details: { ...(revision ? { fileRevision: revision } : {}), ...(truncated ? { truncation: { truncated: true } } : {}) }, isError, timestamp: Date.now() });
   };
-  const compare = (selections) => searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { compare: selections }).repetition;
+  const compare = (selections) => analyzeRepeatedSelections(sourceIndex(manager.getBranch(), { context: contextPreview(manager) }), restoreContextState(manager.getBranch()), selections);
   const human = user(manager, "identical words do not establish source identity");
   const first = addRead("same-a", { path: "src/./file.txt", offset: 1, limit: 4 }, "alpha\nbeta\ngamma\ndelta");
   const duplicate = addRead("same-b", { path: "src/file.txt", offset: 1, limit: 4 }, "alpha\nbeta\ngamma\ndelta");
@@ -302,10 +303,9 @@ test("native projection edit lineage stays qualified in active, parent and histo
   const manager = host();
   const id = toolExchange(manager, ["read"]).results[0];
   const editId = manager.appendContextEdit(id, { content: [{ type: "text", text: "Agent hypothesis, not observed output" }] });
-  const version = sourceVersion(manager, id);
   const check = (scope) => {
-    const found = searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { sourceScope: scope, query: "Agent hypothesis", ids: [id], rankedSources: [{ id, version }] });
-    for (const item of [found.hits[0], found.ranked.sources[0]]) {
+    const found = searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { sourceScope: scope, query: "Agent hypothesis", ids: [id] });
+    for (const item of found.hits) {
       assert.equal(item.authorship, "projection-derived");
       assert.equal(item.derived, true);
       assert.equal(item.editId, editId);
@@ -627,7 +627,7 @@ test("boundary composition preserves preceding metadata proposals and rejects co
 });
 
 test("unsupported or malformed metadata cannot silently reset a frame", () => {
-  assert.throws(() => normalizeContextState({ ...emptyContextState(), schemaVersion: 1 }), /Unsupported/);
+  assert.throws(() => normalizeContextState({ ...emptyContextState(), schemaVersion: 4 }), /Unsupported/);
   assert.throws(() => normalizeContextState({ ...emptyContextState(), frames: [{ id: "broken", parent: "other" }] }), /Invalid frame/);
 });
 

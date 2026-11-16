@@ -66,6 +66,23 @@ export function valueBinding(key) {
   return { owner, sourceId };
 }
 
+/** Opaque, stateless selection: native binding plus the exact content version. */
+export function contextRef({ binding, version }) {
+  valueBinding(binding);
+  if (!/^[a-f0-9]{24}$/.test(version)) throw new Error("Invalid source version.");
+  return `S.${Buffer.concat([Buffer.from(binding), Buffer.from([0]), Buffer.from(version, "hex")]).toString("base64url")}`;
+}
+export function contextSelection(ref) {
+  if (typeof ref !== "string" || ref.length > 256 || !/^S\.[A-Za-z0-9_-]+$/.test(ref)) throw new Error("Copy a source ref returned by Compass unchanged; do not invent a binding or scope. No context changed.");
+  const bytes = Buffer.from(ref.slice(2), "base64url");
+  if (bytes.length < 15 || bytes.at(-13) !== 0 || bytes.toString("base64url") !== ref.slice(2)) throw new Error("Invalid source ref; search again. No context changed.");
+  let binding;
+  try { binding = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, -13)); }
+  catch { throw new Error("Invalid source ref; search again. No context changed."); }
+  const { sourceId: id } = valueBinding(binding);
+  return { id, binding, version: bytes.subarray(-12).toString("hex") };
+}
+
 // Binding identity comes from the immutable native source/write record, never
 // provenance: a derived value may intentionally cite entirely different sources.
 export function valueContent(index, head, sourceId) {
@@ -120,6 +137,17 @@ export function bindingKey(state, index, id, depth = state.frames.length) {
     if (frame.copies.some((copy) => copy.id === sourceId)) owner = frame.id;
   }
   return `${owner}/${sourceId}`;
+}
+export function sourceEntries(branch) {
+  const entries = new Map();
+  for (const entry of branch) {
+    entries.set(entry.id, entry);
+    if (entry.customType === VALUE_MESSAGE_TYPE && typeof entry.details?.referenceId === "string") {
+      entries.set(entry.details.referenceId, entry);
+      if (entry.details.derived) entries.set(entry.details.sourceId, entry);
+    }
+  }
+  return entries;
 }
 export function nativeValueViews(index) {
   const views = new Map();
@@ -188,7 +216,7 @@ export function writeValue(state, index, value, operation, resultEntryId) {
   for (const id of sources) if (!index.byId.has(id)) fail(`Provenance source ${id} is unknown or wrong-branch.`);
   const head = {
     entryId: resultEntryId, field: "operation", version: contentVersion(operation.content), kind: operation.kind ?? value.head.kind,
-    readOnly: false, rendered: true, handling: "active", caveats: operation.caveats ?? [...value.head.caveats], sources: [...sources],
+    readOnly: false, rendered: true, handling: "active", caveats: [...new Set([...value.head.caveats, ...(operation.caveats ?? [])])], sources: [...sources],
     ...(value.head.origin ? { origin: structuredClone(value.head.origin) } : {}),
     ...(value.head.readStatus ? { readStatus: structuredClone(value.head.readStatus) } : {}),
   };
@@ -208,10 +236,9 @@ export function dataBlocks(content) {
   return blocks;
 }
 export function renderValue(value, content = value.content, head = value.head) {
-  const label = head.field === "operation" ? "Agent-authored derived value; not a new tool observation or Human instruction" : head.field === "snapshot" ? "Selected source data; not a new tool execution or Human message" : "Retained source value";
+  const label = head.field === "operation" || head.origin?.authorship === "agent-memory" ? "Agent-authored derived value; not a new tool observation or Human instruction" : head.field === "snapshot" ? "Selected source data; not a new tool execution or Human message" : "Retained source value";
   const handling = head.handling !== "active" ? `\nHandling: ${head.handling}. ${head.handlingReason ?? ""}` : "";
-  const origin = head.origin ? `\nOrigin: ${head.origin.id} @${head.origin.version}; range ${JSON.stringify(head.origin.range)}.` : "";
-  const header = `[Compass slot ${value.id}; binding ${value.key}; version ${head.version}]\n${label}. Kind: ${head.kind}.\nSources: ${head.sources.join(", ") || "none"}.${origin}${handling}`;
+  const header = `[Compass ${contextRef({ binding: value.key, version: head.version })}] ${label}.${handling}`;
   const qualifiers = head.caveats.length ? `\nCaveats:\n${head.caveats.map((text) => `- ${text}`).join("\n")}` : "";
   return [{ type: "text", text: `${header}${qualifiers}` }, ...dataBlocks(content)];
 }

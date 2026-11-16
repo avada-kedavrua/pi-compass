@@ -18,7 +18,7 @@ function record(index, id, binding, origin, content, head = null, visibility = "
   const exchangeComplete = Boolean(group && !group.duplicate && group.calls.size === group.results.size);
   const qualification = sourceQualifications(entry, index.readRequests?.get(id), exchangeComplete);
   const editId = head?.editId ?? projectionEditId;
-  const authored = head?.field === "operation";
+  const authored = head?.field === "operation" || head?.origin?.authorship === "agent-memory";
   const derived = authored || editId !== null || head?.field === "snapshot";
   const authorship = authored ? "agent-derived" : editId !== null ? "projection-derived" : head?.field === "snapshot" ? "retained-source-data" : message.role === "toolResult" ? "tool-observation" : message.role === "user" ? "human-original" : "agent-message";
   const caveats = [...new Set([...(qualification.caveats ?? []), ...(head?.caveats ?? [])])];
@@ -170,11 +170,11 @@ export function searchSources(index, state, { query = "", ids = [], scope = "act
     const at = matchedTerms.length ? text.toLowerCase().indexOf(matchedTerms[0]) : 0;
     const from = Math.max(0, at - 80);
     const to = Math.min(text.length, from + 600);
-    const startLine = text.slice(0, Math.max(0, at)).split("\n").length;
-    const endLine = Math.min(text.split("\n").length, startLine + 8);
+    const startLine = text.slice(0, from).split("\n").length;
+    const endLine = text.slice(0, to).split("\n").length;
     hits.push({
       id: candidate.id, binding: candidate.binding, version: candidate.version, role: candidate.role, authorship: candidate.authorship, derived: candidate.derived, editId: candidate.editId, qualification: candidate.qualification, readStatus: candidate.readStatus, kind: candidate.head?.kind,
-      visibility: candidate.visibility, origin: candidate.origin,
+      visibility: candidate.visibility, origin: candidate.origin, lineage: candidate.head?.origin,
       range: part < 0 ? null : { part, startLine, endLine },
       snippet: text.slice(from, to), matchedTerms, chars: text.length,
       truncated: from > 0 || to < text.length, caveats: candidate.caveats, provenance: candidate.provenance,
@@ -349,25 +349,6 @@ export function analyzeRepeatedSelections(index, state, selections, scope = "all
     });
   };
   return { exact: exact.filter((item) => !invalidatedByLaterChange(item)), subsets: subsets.filter((item) => !invalidatedByLaterChange(item)), changed, unknown, similarities, automaticEdits: 0 };
-}
-
-/** Preserve the Agent's bounded semantic ordering while verifying each native source and requested range. */
-export function rankVerifiedSources(index, state, selections, scope = "all") {
-  scopes(scope);
-  if (!Array.isArray(selections) || selections.length > 16 || new Set(selections.map((item) => item?.id)).size !== selections.length) fail("Ranked retrieval requires at most 16 unique source selections.");
-  const sources = selections.map((selection, rank) => {
-    const item = resolveSource(index, state, selection, scope);
-    const blocks = typeof item.content === "string" ? [{ type: "text", text: item.content }] : item.content;
-    const text = blocks.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-    return {
-      rank, id: item.id, binding: item.binding, version: item.version, range: item.range,
-      selectedVersion: contentVersion(item.content), role: item.role, authorship: item.authorship, derived: item.derived, editId: item.editId, qualification: item.qualification, readStatus: item.readStatus, origin: item.origin,
-      snippet: text.slice(0, 600), truncated: text.length > 600,
-      selectedParts: blocks.map((part, partIndex) => ({ part: partIndex, type: part.type, ...(part.type === "image" ? { mimeType: part.mimeType } : {}) })),
-      caveats: item.caveats, provenance: item.provenance,
-    };
-  });
-  return { method: "agent-selected-verified", ranking: "caller-order; not a runtime semantic score", sources };
 }
 
 export function resolveSource(index, state, { id, binding, version, range } = {}, scope = "all") {

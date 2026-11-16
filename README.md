@@ -34,11 +34,11 @@ The [field-use audit and resolved TODOs](docs/agent-usage-audit-v0.10.0.md) reco
 
 ## Install
 
-From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v8/context v4 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
+From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v8/context v5 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
 
 ### Tool missing?
 
-Seeing the Compass Skill or starting Pi in this repository does not load `src/index.ts`. For a single invocation without changing settings, use `pi -e /absolute/path/to/pi-compass`, then `/compass-preflight`. If the package is already declared, grant project trust and `/reload`, checking any load error. Both context tools are registered before any Goal; `compass_open` is not their activation switch. `compass_context_search` is discoverable/callable in Code Mode; `compass_context` is model-only and stays directly declared even in Code Mode-only mode. Compass is not inherited by child sessions.
+Seeing the Compass Skill or starting Pi in this repository does not load `src/index.ts`. For a single invocation without changing settings, use `pi -e /absolute/path/to/pi-compass`, then `/compass-preflight`. If the package is already declared, grant project trust and `/reload`, checking any load error. Basic source recovery and working memory are registered before any Goal. Open the optional `context` capability only for frames, source edits or artifacts. `compass_context_search` is discoverable/callable in Code Mode; `compass_context` is model-only and stays directly declared even in Code Mode-only mode. Compass is not inherited by child sessions.
 
 Context mutations now use `compass_context({operation:{action,...}})`; reload the current schemas before testing. For example, read-only recovery in Code Mode:
 
@@ -47,7 +47,7 @@ const result = JSON.parse(await tools.compass_context_search({query:"material co
 text(result);
 ```
 
-Mutations remain direct standalone calls and require the returned revision; do not batch a pin/frame operation in Code Mode.
+Mutations remain direct standalone calls; copy source refs unchanged, without binding/version/revision plumbing. Prefer `remember` for short qualified conclusions; `pin` retains full originals. Do not batch mutations in Code Mode. The old argument forms are not accepted. See the [consumer contract](docs/tool-contract.md#context-find-remember-then-optionally-edit).
 
 Full preflight additionally exercises the real native loader/factory and guard Worker/SQLite in a disposable profile without test SDK aliases. `/compass-preflight` checks readable guard state in the running session, not just controller registration. Neither requests a provider turn.
 

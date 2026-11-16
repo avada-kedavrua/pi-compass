@@ -8,9 +8,11 @@ Local M0–M7 development is complete for the declared supported boundaries. Thi
 - [Release manifest](RELEASE-MANIFEST.json): implementation snapshot and native dependency identity.
 - [Milestone checklist and local evidence](docs/architecture-v0.10.0.md#final-local-evidence): implemented behavior, verification results and unsupported cases.
 - [Measurements](docs/measurements-v0.10.0.md): bounded local CPU/memory/context data, not provider/cache/token or semantic-quality evidence.
-- [Tool contract](docs/tool-contract.md): explicit semantic Goal entry, compact cursors/frame feedback, progressive tools and safety boundaries. GoalRun v8/context v4 are current-only; old snapshots are rejected, not migrated. Stock-Pi retention uses request overlays; recursive child Compass is unsupported; race-safe artifacts require Linux. Filesystem effects are never rolled back.
+- [Tool contract](docs/tool-contract.md): explicit semantic Goal entry, compact cursors/frame feedback, progressive tools and safety boundaries. GoalRun v8/context v5 are current-only; old snapshots are rejected, not migrated. Stock-Pi retention uses request overlays; recursive child Compass is unsupported; race-safe artifacts require Linux. Filesystem effects are never rolled back.
 
 - [Runtime guards](docs/runtime-guards-design.md): implemented stable-ID registration/refinement/removal, explicit scope revisions, shared global/local and native session lifecycle, result-preserving warn and native pre-execution block. Coverage is the Human-approved tool_call observation point, not post-plugin final arguments. No Human profile rules were installed by development; Node >=22.19.0 and the new owned dependency require `npm ci --ignore-scripts --omit=peer` before loading.
+
+The Agent-facing Goal/context contract has been replaced. Use refs unchanged and remember for compact working evidence; advanced context operations are optional. Restart Pi to load the changed modules, then use a fresh disposable session or a native branch before any v4 context snapshot. Do not migrate/reset stored context or install a second SDK. The [consumer audit](docs/agent-usage-audit-v0.10.0.md) separates proven flows/costs from unproven provider and arbitrary-task benefit.
 
 ## Human acceptance
 

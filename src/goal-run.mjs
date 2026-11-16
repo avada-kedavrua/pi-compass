@@ -614,14 +614,13 @@ export function observeHumanInput(stateValue, sourceEntryId) {
   return { state, changed: true };
 }
 
-function validateSourceIds(value, latestHumanEntryId) {
+function validateSourceIds(value) {
   if (!Array.isArray(value) || value.length < 1 || value.length > 16) throw new Error("sourceIds must contain 1..16 unique Human entry IDs.");
   const ids = value.map((id, index) => {
     if (typeof id !== "string" || !id.trim() || id.trim().length > 128) throw new Error(`sourceIds[${index}] must be a non-empty ID of at most 128 characters.`);
     return id.trim();
   });
   if (new Set(ids).size !== ids.length) throw new Error("sourceIds must not contain duplicates.");
-  if (!ids.includes(latestHumanEntryId)) throw new Error("sourceIds must include the latest observed Human input ID.");
   return ids;
 }
 
@@ -640,7 +639,7 @@ export function setGoal(stateValue, input = {}) {
   if (input.expectedVersion !== state.goal.version) throw new Error(`Stale Goal version: expected ${state.goal.version}, received ${input.expectedVersion}. No state changed.`);
   if (typeof input.current !== "string" || !input.current.trim() || input.current.length > 4000) throw new Error("current must be a non-empty string of at most 4000 characters; text is never clipped.");
   const current = input.current.trim();
-  const sourceIds = validateSourceIds(input.sourceIds, state.latestHumanEntryId);
+  const sourceIds = validateSourceIds(input.sourceIds);
   if (!Array.isArray(input.constraints) || input.constraints.length > 24) throw new Error("constraints must be an array of at most 24 strings.");
   const constraints = input.constraints.map((item, index) => {
     if (typeof item !== "string" || !item.trim() || item.trim().length > 600) throw new Error(`constraints[${index}] must be a non-empty string of at most 600 characters.`);
@@ -1083,16 +1082,14 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
   const cursor = stateCursor(state, contextRevision);
   const revision = state.stateRevision;
   const latestSeq = Math.max(0, state.eventSeq - 1);
-  const frame = runtime?.contextFrame && typeof runtime.contextFrame === "object"
-    ? { active: runtime.contextFrame.active === true, depth: Number.isInteger(runtime.contextFrame.depth) ? runtime.contextFrame.depth : 0, id: typeof runtime.contextFrame.id === "string" ? runtime.contextFrame.id : null }
-    : { active: false, depth: 0, id: null };
+  const frame = runtime?.contextFrame?.active === true && typeof runtime.contextFrame.id === "string" ? runtime.contextFrame.id : "root";
   if (afterCursor !== null && afterCursor !== undefined && (typeof afterCursor !== "string" || afterCursor.length > 64 || !parseStateCursor(afterCursor))) {
     throw new Error('cursor must be an opaque cursor returned by compass_state, e.g. "R12-E42-C3". No state changed.');
   }
   const prior = afterCursor == null ? null : parseStateCursor(afterCursor);
   const ahead = Boolean(prior && (prior.revision > revision || prior.eventSeq > latestSeq || prior.contextRevision > contextRevision));
   const exact = Boolean(prior && prior.revision === revision && prior.eventSeq === latestSeq && prior.contextRevision === contextRevision);
-  if (exact) return { unchanged: true, cursor, contextFrame: frame };
+  if (exact) return { unchanged: true, cursor };
   const firstSeq = state.events.length ? eventSequence(state.events[0].id) ?? latestSeq : latestSeq + 1;
   const gap = Boolean(prior && prior.eventSeq < firstSeq - 1 && prior.eventSeq < latestSeq);
   const currentEvents = state.events.filter((event) => event.goalVersion === state.goal.version);
@@ -1117,17 +1114,17 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
     : null;
   const result = {
     cursor,
-    contextFrame: frame,
+    frame,
     goal: state.goal.current ? { version: state.goal.version, current: clip(state.goal.current, 240), ...(state.goal.current.length > 240 ? { currentTruncated: true } : {}) } : null,
-    outcome: outcome.status,
+    ...(outcome.status !== "no_goal" ? { outcome: outcome.status } : {}),
     ...(outcomeCaveat ? { caveat: clip(outcomeCaveat, 320) } : {}),
-    ...(state.latestHumanEntryId ? { input: { id: state.latestHumanEntryId, reviewed: state.goal.reviewedInputId === state.latestHumanEntryId } } : {}),
+    ...(state.latestHumanEntryId ? { input: { id: state.latestHumanEntryId, ...(state.goal.current ? { reviewed: state.goal.reviewedInputId === state.latestHumanEntryId } : {}) } } : {}),
     ...(plan ? { plan } : {}),
     ...(criteria.length ? { acceptance: { status: acceptanceStatusValue.status, total: criteria.length, counts: {
       passed: acceptanceStatusValue.passed, failed: acceptanceStatusValue.failed,
       blocked: acceptanceStatusValue.blocked, unverified: acceptanceStatusValue.unverified,
     } } } : {}),
-    ...(prior ? { delta: { events: deltaEvents.map(compactEvent), ...(omitted ? { omitted } : {}), ...(gap ? { historyGap: true } : {}), ...(ahead ? { cursorAhead: true } : {}) } } : {}),
+    ...(prior && (deltaEvents.length || omitted || gap || ahead) ? { delta: { events: deltaEvents.map(compactEvent), ...(omitted ? { omitted } : {}), ...(gap ? { historyGap: true } : {}), ...(ahead ? { cursorAhead: true } : {}) } } : {}),
   };
   return result;
 }
@@ -1191,7 +1188,7 @@ export function triageIssue(stateValue, input = {}) {
 
 export function availableCapabilities(stateValue) {
   const state = normalizeGoalRunState(stateValue);
-  return state.goal.current ? ["planning", "routes", "acceptance", "history", "goal_details", "issue_review"] : [];
+  return state.goal.current ? ["planning", "routes", "acceptance", "history", "goal_details", "issue_review", "context"] : ["context"];
 }
 
 export function buildRecentEvents(stateValue, limit = 12) {

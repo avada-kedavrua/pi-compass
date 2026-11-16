@@ -3,9 +3,10 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import { executionDriftReason } from "./write-scope.mjs";
 import { questionnaireFailureResultPatch } from "./questionnaire-integration.mjs";
-import { latestHumanSource, validateGoalSources } from "./goal-sources.mjs";
+import { latestHumanSource, resolveGoalSources, humanSourceRef, agentGoalDetails } from "./goal-sources.mjs";
 import { agentResult } from "./compass-result.mjs";
 import { contextSearchSchema, contextToolSchema } from "./context-tool-schema.mjs";
+import { agentSearch, agentContextOperation } from "./context-agent.mjs";
 import { registerRuntimeGuards } from "./runtime-guard.mjs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -89,7 +90,6 @@ import {
   validateContextOperation,
   releaseWatchMessages,
   restoreContextState,
-  searchContext,
 } from "./context-core.mjs";
 
 const STATE_ENTRY_TYPE = "pi-compass-v2.goalrun";
@@ -1131,14 +1131,14 @@ function observeCurrentHumanInput(ctx: any): boolean {
 function registerGoalTool(pi: any) {
   return registerOnce(pi, "compass_goal", {
     label: "Set Semantic Goal",
-    description: "Explicitly create, replace, or reaffirm the Goal after interpreting Human intent. Runtime never infers a Goal from text. Submit the complete current constraint list; original Human messages remain in Pi. Source IDs default to the latest native Human message. Replacement resets Goal-specific work and fails while native runs are unresolved.",
+    description: "Explicitly create, replace, or reaffirm the Goal after interpreting Human intent. Runtime never infers a Goal from text. Submit the complete current constraint list; original Human messages remain in Pi. Select the Human sources that actually define this Goal; reviewing the latest input is recorded separately. Replacement resets Goal-specific work and fails while native runs are unresolved.",
     promptSnippet: "You interpret Human intent; explicitly record a Goal when retained Goal state helps. Never treat your interpretation as Human approval.",
     promptGuidelines: ["After new Human input, reaffirm or update the semantic Goal and full constraints before resuming approved DAG progression. Unchanged intent does not require a new Human approval; changed material definitions do."],
     parameters: Type.Object({
       expectedVersion: Type.Integer({ minimum: 0, description: "Observed Goal version; 0 before the first explicit Goal." }),
       current: Type.String({ minLength: 1, maxLength: 4000, description: "Your semantic statement of the current Human-authorized objective, not the entire prompt." }),
       constraints: Type.Array(Type.String({ minLength: 1, maxLength: 600 }), { maxItems: 24, uniqueItems: true, description: "Complete material Human constraints. Use [] only when none apply; do not infer approval or drop prior constraints silently." }),
-      sourceIds: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 16, uniqueItems: true, description: "Native Human source entry IDs; defaults to latest. Must include the latest Human input and stay on this branch." })),
+      sources: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { minItems: 1, maxItems: 16, uniqueItems: true, description: "Human source refs from compass_state or search that define the objective/constraints. Copy unchanged; a follow-up question does not replace the original task source." }),
       acceptanceCriteria: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { maxItems: 12, uniqueItems: true, description: "Optional explicit semantic criteria. Omit to preserve existing criteria for the same Goal; a replacement starts with no criteria unless supplied." })),
     }, { additionalProperties: false }),
     async execute(_id: string, params: any, ...rest: any[]) {
@@ -1148,8 +1148,7 @@ function registerGoalTool(pi: any) {
         const branch = ctx?.sessionManager?.getBranch?.();
         const latest = latestHumanSource(branch);
         const candidate = latest ? observeHumanInput(state, latest).state : state;
-        const sourceIds = params?.sourceIds ?? (latest ? [latest] : []);
-        validateGoalSources(branch, sourceIds);
+        const sourceIds = resolveGoalSources(branch, params.sources);
         const priorWork = { criteria: state.goal.criteria.length, tasks: state.plan.tasks.length, routeSet: Boolean(state.routeSet) };
         const result = noMutation(() => setGoal(candidate, { ...params, sourceIds }));
         if (result.changed) {
@@ -1157,7 +1156,7 @@ function registerGoalTool(pi: any) {
           afterMutation(pi, contextCwd(ctx));
         }
         return stateResult({
-          unchanged: !result.changed, goalVersion: state.goal.version, sourceIds: state.goal.sourceIds, ...(result.replaced ? { reset: priorWork } : {}),
+          unchanged: !result.changed, goalVersion: state.goal.version, ...(result.replaced ? { reset: priorWork } : {}),
         });
       });
     },
@@ -1189,6 +1188,10 @@ function registerStateSnapshotTool(pi: any) {
         if (Number.isInteger(params?.maxEvents) && snapshot.delta?.events?.length > params.maxEvents) {
           snapshot.delta.omitted = (snapshot.delta.omitted ?? 0) + snapshot.delta.events.length - params.maxEvents;
           snapshot.delta.events = snapshot.delta.events.slice(-params.maxEvents);
+        }
+        if (snapshot.input?.id) {
+          const { id, ...review } = snapshot.input;
+          snapshot.input = { ref: humanSourceRef(ctx.sessionManager.getBranch(), id), ...review };
         }
         return agentResult(snapshot, { cursor: snapshot.cursor, unchanged: snapshot.unchanged === true, stateRevision: state.stateRevision });
       });
@@ -1224,64 +1227,45 @@ function restoreContext(ctx: any) {
 }
 function registerContextSearchTool(pi: any) {
   return registerOnce(pi, "compass_context_search", {
-    label: "Recover Context Sources",
-    description: "Read-only lexical recovery of current, parent or branch-history data. Returns revision, source IDs/bindings/versions, bounded snippets and qualifications. Keywords match any term by default; use match=all for conjunction. compare checks native read lineage; rankedSources preserves your verified selection, not a runtime semantic score. No revision lookup is needed first.",
-    promptSnippet: "Recover only missing context; read-only search may batch in Code Mode. Use returned versions/revision for a separate compass_context mutation.",
+    label: "Find Context",
+    description: "Find missing Human instructions, observations or working memory. Returns opaque source refs and short excerpts. Use view=handles for selected refs, details for qualifications. Search is lexical, not semantic. It never changes context.",
     parameters: contextSearchSchema(),
     async execute(_id: string, params: any, ...rest: any[]) {
       return serialized(async () => {
         const ctx = getContext(rest);
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         restoreContext(ctx);
-        return agentResult(searchContext(ctx?.sessionManager?.getBranch?.() ?? [], { context: contextBoundaryPreview(ctx) }, contextState, params));
+        return agentResult(agentSearch(ctx.sessionManager.getBranch(), { context: contextBoundaryPreview(ctx) }, contextState, params));
       });
     },
   });
 }
-function registerContextTool(pi: any) {
-  return registerOnce(pi, "compass_context", {
-    label: "Context Values and Frames",
+function registerContextTool(pi: any, extended = activeCapabilities().includes("context")) {
+  return registerDynamic(pi, "compass_context", {
+    label: "Working Context",
     exposure: "model-only",
-    description: "Use {operation:{action,...}} to retain data or isolate same-session attention. Recover IDs/bindings/versions with compass_context_search. pin retains a selected value, mark tracks handling. call(task,capture) hides other context; return restores the parent and exports only explicit outputs. load copies data; move relocates eligible values; replace/drop edit only eligible projection values; spill writes a verified project artifact. This tool is model-only: mutations must be direct standalone calls; a queued receipt is followed by a native applied/rejected receipt with the resulting revision. Raw Pi history and filesystem effects are not rolled back.",
-    promptSnippet: "Retain decisions/evidence with search and pin; use call/return for same-session attention isolation. Mutations must be direct standalone calls; use their native terminal receipt, not polling.",
-    promptGuidelines: [
-      "Frames/edits change attention, not Pi's append-only transcript or environment. Spill writes an explicit artifact; no filesystem rollback occurs.",
-      "Use search only when needed. Pass stable source IDs and versions; never infer them from message positions. rankedSources preserves your semantic selection order; runtime verifies identity/ranges, not meaning.",
-      "For verified repeat move, pass the complete earlier read and verifiedAgainst=later read. Subsets require a shared native file revision; otherwise data stays unknown and is not removed.",
-      "A ref is shared and survives interruption; a copy is private and forks on write. Human originals and executed calls are read-only; explicit private copies are data.",
-      "A frame cannot return while it owns live pi-await watches; use native unwatch, or action=transfer to move an owned watch to an active parent/root scope first. Repeating wakes remain live and do not complete ownership.",
-    ],
-    parameters: contextToolSchema(),
+    description: "Remember compact conclusions with their source refs, or pin original source content when it must remain visible. Reuse refs unchanged; no revision, binding or scope bookkeeping. Mutations must be direct standalone calls. queued is not committed: wait for the native applied/rejected receipt. Open the context capability once for optional frames, edits and artifacts.",
+    parameters: contextToolSchema(extended),
     async execute(toolCallId: string, args: any, ...rest: any[]) {
       return serialized(async () => {
-        const params = args?.operation;
-        if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Supply {operation:{action,...}}. No context changed.");
+        const input = args?.operation;
+        if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Supply {operation:{action,...}}. No context changed.");
         const ctx = getContext(rest);
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         restoreContext(ctx);
-        const action = String(params?.action ?? "");
-        if (!Number.isInteger(params?.expectedRevision) || params.expectedRevision !== contextState.revision) {
-          throw new Error(`Stale context revision ${params?.expectedRevision}; current revision is ${contextState.revision}. No context changed.`);
-        }
-        if (!["call", "return", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"].includes(action)) {
-          throw new Error(`Unknown context action ${action}. No context changed.`);
-        }
-        const prepared = await prepareContextOperation({ state: contextState, branch: ctx?.sessionManager?.getBranch?.() ?? [], boundary: { context: contextBoundaryPreview(ctx) }, operation: { ...params, callId: toolCallId, goalVersion: state.goal.version }, projectRoot: contextCwd(ctx) });
+        if (!["pin", "unpin", "remember"].includes(input.action) && !activeCapabilities().includes("context")) throw new Error("Open compass_open({capabilities:[\"context\"]}) once for frame/edit operations. No context changed.");
+        const branch = ctx.sessionManager.getBranch();
+        const boundary = { context: contextBoundaryPreview(ctx) };
+        const normalized = agentContextOperation(branch, boundary, contextState, input);
+        const prepared = await prepareContextOperation({ state: contextState, branch, boundary, operation: { ...normalized, callId: toolCallId, goalVersion: state.goal.version }, projectRoot: contextCwd(ctx) });
         const operation = prepared.operation;
-        try {
-          validateContextOperation({ state: contextState, branch: ctx?.sessionManager?.getBranch?.() ?? [], boundary: { context: contextBoundaryPreview(ctx) }, operation, content: prepared.content ?? [] });
-        } catch (error) {
-          if (operation.artifact) throw new Error(`${error instanceof Error ? error.message : String(error)} Verified artifact remains at ${operation.artifact.path}; filesystem effects were not rolled back.`);
+        try { validateContextOperation({ state: contextState, branch, boundary, operation, content: prepared.content ?? [] }); }
+        catch (error) {
+          if (operation.artifact) throw new Error(String(error instanceof Error ? error.message : error) + "; verified artifact remains at " + operation.artifact.path + "; filesystem effects were not rolled back.");
           throw error;
         }
-        const receipt = {
-          revision: contextState.revision,
-          ...(operation.artifact?.path ? { artifactPath: operation.artifact.path } : {}),
-          resultStatus: "queued",
-          callId: toolCallId,
-        };
         return {
-          content: [...agentResult(receipt).content, ...(prepared.content?.slice(1) ?? [])],
+          content: [...agentResult({ resultStatus: "queued", ...(operation.artifact?.path ? { artifactPath: operation.artifact.path } : {}) }).content, ...(prepared.content?.slice(1) ?? [])],
           details: { contextOperation: operation, contextRevision: contextState.revision },
         };
       });
@@ -1440,6 +1424,7 @@ function routeSchema() {
 
 function registerCapabilityGroup(pi: any, capability: string): string[] {
   const names: string[] = [];
+  if (capability === "context") return [registerContextTool(pi, true)];
   const activeCheck = (expected: string) => assertCapability(expected);
 
   if (capability === "routes") {
@@ -1955,14 +1940,14 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
   if (capability === "goal_details") {
     names.push(registerOnce(pi, "compass_goal_read", {
       label: "Read Goal Details",
-      description: "On-demand semantic Original/Current Goal, native Human source references, declared constraints, criteria and genuine questionnaire answers. Raw Human messages stay in Pi; an Agent-authored Goal is not Human approval.",
+      description: "On-demand current Goal, original when different, reusable Human source refs, full constraints, criteria and questionnaire evidence. Raw Human messages stay in Pi; an Agent-authored Goal is not Human approval.",
       promptSnippet: "Read Goal details only when the compact compass_state is insufficient; reuse the result unless Goal version/source changes or compaction removes required details.",
       parameters: Type.Object({}, { additionalProperties: false }),
       async execute(_id: string, _params: any, ...rest: any[]) {
         const ctx = getContext(rest);
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         assertCapability("goal_details");
-        return agentResult(buildGoalDetails(state));
+        return agentResult(agentGoalDetails(ctx.sessionManager.getBranch(), buildGoalDetails(state)));
       },
     }));
     return names;
@@ -2290,7 +2275,7 @@ export default function (pi: any) {
         entries: [...(event.entries ?? []), {
           type: "custom_message",
           customType: CONTEXT_MESSAGE_TYPE,
-          content: JSON.stringify({ resultStatus: "rejected", stateChanged: false, contextRevision: contextState.revision, error: message }),
+          content: JSON.stringify({ resultStatus: "rejected", stateChanged: false, error: message }),
           display: false,
           details: { contextError: true, status: "rejected", stateChanged: false, contextRevision: contextState.revision },
         }],

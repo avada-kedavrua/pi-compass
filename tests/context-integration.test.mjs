@@ -6,7 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { piRoot } from "../scripts/register-pi-host-typebox.mjs";
 import extensionFactory from "../src/index.ts";
-import { emptyContextState, planWatchBoundary, restoreContextState } from "../src/context-core.mjs";
+import { emptyContextState, planWatchBoundary, restoreContextState, searchContext } from "../src/context-core.mjs";
+import { contextRef, contextSelection } from "../src/context-values.mjs";
 import { SessionManager, appendDrafts, assertPaired, contextPreview, modelText, sourceVersion, user } from "./helpers/context-host.mjs";
 
 const { ExtensionRunner } = await import(new URL("dist/core/extensions/runner.js", pathToFileURL(`${piRoot}/`)));
@@ -42,18 +43,42 @@ async function setup(laterHandler, earlierContextHandler, cwd = "/context-integr
   await runner.emit({ type: "session_start" });
   // Goal capture itself is unrelated to native provider execution.
   await handlers.get("before_agent_start")[0]({ prompt: "Goal: preserve parent context while working locally." }, runner.createContext());
+  await tools.get("compass_open").execute("fixture-context", { capabilities: ["context"] }, undefined, undefined, runner.createContext());
+  await runner.emitContext(manager.buildSessionProjection().messages);
   user(manager, "PARENT ONLY");
+  // Native protocol fixtures use entry IDs; actual public calls use only refs.
+  function ref(id, version, binding) {
+    const hit = searchContext(manager.getBranch(), { context: contextPreview(manager) }, restoreContextState(manager.getBranch()), { ids: [id], sourceScope: "all", limit: 16 }).hits.find((hit) => !binding || hit.binding === binding);
+    assert.ok(hit, "fixture source is recoverable");
+    return contextRef({ binding: binding ?? hit.binding, version: version ?? hit.version });
+  }
+  function intent(parameters) {
+    const { expectedRevision, ids, version, versions, binding, scope, capture, exportIds, kind, verifiedAgainst, watchScope, content, ...input } = parameters;
+    if (ids?.length) {
+      const refs = ids.map((id) => ref(id, version ?? versions?.find((item) => item.id === id)?.version, binding));
+      if (["load", "replace", "mark", "spill"].includes(input.action)) input.source = refs[0];
+      else input.sources = refs;
+    }
+    if (capture) input.capture = capture.map((item) => (item.ref ? item : { ref: ref(item.id, item.version, item.binding), mode: item.mode }));
+    if (exportIds) input.exportSources = exportIds.map((id) => ref(id));
+    if (kind === "skill") input.skill = true;
+    if (verifiedAgainst) input.verifiedAgainst = ref(verifiedAgainst.id, verifiedAgainst.version, verifiedAgainst.binding);
+    if (watchScope) input.target = watchScope === "root" ? "root" : "parent";
+    if (content !== undefined) input.text = content;
+    return input;
+  }
   async function turn(parameters, { apply = true } = {}) {
+    const input = intent(parameters);
     const id = `integration-${++nextCall}`;
     const message = {
-      role: "assistant", content: [{ type: "toolCall", id, name: "compass_context", arguments: { operation: parameters } }],
+      role: "assistant", content: [{ type: "toolCall", id, name: "compass_context", arguments: { operation: input } }],
       api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now(),
     };
     const messageEntryId = manager.appendMessage(message);
     let output;
     try {
       const tool = tools.get("compass_context");
-      output = await tool.execute(id, validateToolArguments(tool, { name: tool.name, arguments: { operation: parameters } }), undefined, undefined, runner.createContext());
+      output = await tool.execute(id, validateToolArguments(tool, { name: tool.name, arguments: { operation: input } }), undefined, undefined, runner.createContext());
     }
     catch (error) { output = { isError: true, content: [{ type: "text", text: String(error.message) }] }; }
     const result = { role: "toolResult", toolCallId: id, toolName: "compass_context", ...output, timestamp: Date.now() };
@@ -74,7 +99,7 @@ async function setup(laterHandler, earlierContextHandler, cwd = "/context-integr
     appendDrafts(manager, proposal.entries);
     return proposal;
   }
-  return { manager, runner, tools, turn, finish, errors, aborted: () => aborted };
+  return { manager, runner, tools, turn, finish, ref, intent, errors, aborted: () => aborted };
 }
 
 test("installed runner chains frame entry and return; only committed metadata becomes active", async () => {
@@ -91,13 +116,12 @@ test("installed runner chains frame entry and return; only committed metadata be
   const proposal = await host.turn({ action: "call", expectedRevision: 0, task: "LOCAL PROCEDURE" }, { apply: false });
   assert.deepEqual(restoreContextState(manager.getBranch()), emptyContextState(), "returning drafts is not committing them");
   const beforeCommit = await tools.get("compass_context_search").execute("read-state", {}, undefined, undefined, runner.createContext());
-  assert.equal(JSON.parse(beforeCommit.content[0].text).revision, 0);
-  assert.equal((await readState(rootState.cursor)).contextFrame.active, false, "queued entry is not a committed frame");
+  assert.equal(JSON.parse(beforeCommit.content[0].text).frame, "root");
+  assert.equal((await readState(rootState.cursor)).unchanged, true, "queued entry is not a committed frame");
   appendDrafts(manager, proposal.entries);
   await runner.emitContext(manager.buildSessionProjection().messages);
   const entered = await readState(rootState.cursor);
-  assert.equal(entered.contextFrame.active, true);
-  assert.equal(entered.contextFrame.depth, 1);
+  assert.equal(entered.frame, restoreContextState(manager.getBranch()).frames[0].id);
   assert.equal(entered.unchanged, undefined);
   assert.notEqual(entered.cursor, rootState.cursor, "native context revision participates in the cursor");
   assert.match(statuses.at(-1).text, /^frame 1 · /, "Human footer reflects the committed frame without polling");
@@ -107,8 +131,7 @@ test("installed runner chains frame entry and return; only committed metadata be
   const returned = await host.turn({ action: "return", expectedRevision: 1, result: "SELECTED RESULT" });
   assert.equal(returned.continue, true);
   const restored = await readState(entered.cursor);
-  assert.equal(restored.contextFrame.active, false);
-  assert.equal(restored.contextFrame.depth, 0);
+  assert.equal(restored.frame, "root");
   assert.equal(statuses.at(-1).text, "frame: root");
   assert.match(modelText(manager), /PARENT ONLY/);
   assert.match(modelText(manager), /SELECTED RESULT/);
@@ -123,18 +146,18 @@ test("Agent data-only path enters a long frame and receives correlated terminal 
   const id = user(host.manager, "Font 微软雅黑; red text for unmet targets; green text for challenge success.");
   const tool = host.tools.get("compass_context");
   const search = JSON.parse((await host.tools.get("compass_context_search").execute("recover", { query: "微软雅黑 green unknownword" }, undefined, undefined, host.runner.createContext())).content[0].text);
-  const source = search.hits.find((hit) => hit.id === id);
+  const source = search.hits.find((hit) => hit.text?.includes("Font 微软雅黑"));
   assert.ok(source);
-  await host.turn({ action: "pin", expectedRevision: search.revision, ids: [source.id], lifetime: "session" });
-  await host.turn({ action: "call", expectedRevision: 1, task: "Investigate only the retained decision", capture: [{ id: source.id, version: source.version, mode: "ref" }] });
+  await host.turn({ action: "pin", sources: [source.ref], lifetime: "session" });
+  await host.turn({ action: "call", task: "Investigate only the retained decision", capture: [{ ref: source.ref, mode: "ref" }] });
   const entered = restoreContextState(host.manager.getBranch());
   assert.equal(entered.frames.length, 1);
   assert.ok(entered.frames[0].saved.length > 256);
   const receipt = host.manager.getBranch().findLast((entry) => entry.customType === "pi-compass-v2.context-message");
   assert.equal(JSON.parse(receipt.content).resultStatus, "applied");
-  assert.equal(JSON.parse(receipt.content).revision, 2);
-  assert.match(JSON.parse(receipt.content).callId, /^integration-/);
-  await assert.rejects(() => tool.execute("invalid-mark", { operation: { action: "mark", expectedRevision: 2, ids: [source.id], version: source.version } }, undefined, undefined, host.runner.createContext()), /Handling rationale|Mark requires/);
+  assert.equal(receipt.details.revision, 2);
+  assert.match(receipt.details.callId, /^integration-/);
+  await assert.rejects(() => tool.execute("invalid-mark", { operation: { action: "mark", source: source.ref } }, undefined, undefined, host.runner.createContext()), /Handling rationale|Mark requires/);
   assert.equal(restoreContextState(host.manager.getBranch()).revision, 2, "invalid mutation is rejected before returning queued");
   await host.turn({ action: "return", expectedRevision: 2, result: "evidence retained" });
   assert.equal(restoreContextState(host.manager.getBranch()).frames.length, 0);
@@ -142,15 +165,14 @@ test("Agent data-only path enters a long frame and receives correlated terminal 
   assertPaired(host.manager);
 });
 
-test("tool schema and installed boundary carry verified range moves and Agent-ranked sources", async () => {
+test("source refs and installed boundary carry verified content-range moves", async () => {
   const host = await setup();
   const id = host.manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "header\nmove me\nkeep me" }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "stop", timestamp: Date.now() });
   const version = sourceVersion(host.manager, id);
   const tool = host.tools.get("compass_context");
   assert.equal(tool.parameters.additionalProperties, false);
-  assert.equal(host.tools.get("compass_context_search").parameters.properties.rankedSources.maxItems, 16);
-  const selected = await host.tools.get("compass_context_search").execute("rank", { rankedSources: [{ id, version, range: { part: 0, startLine: 2, endLine: 2 } }] }, undefined, undefined, host.runner.createContext());
-  assert.equal(JSON.parse(selected.content[0].text).ranked.sources[0].snippet, "move me");
+  const selected = await host.tools.get("compass_context_search").execute("find", { refs: [host.ref(id)], view: "details" }, undefined, undefined, host.runner.createContext());
+  assert.match(JSON.parse(selected.content[0].text).hits[0].text, /move me/);
   await host.turn({ action: "move", expectedRevision: 0, ids: [id], version, range: { part: 0, startLine: 2, endLine: 2 } });
   await host.runner.emitContext(host.manager.buildSessionProjection().messages);
   const projected = host.manager.buildSessionProjection().messages;
@@ -178,8 +200,6 @@ test("verified repeat relocation crosses the native tool schema and keeps both r
   const beforeBytes = Buffer.byteLength(modelText(host.manager));
   const version = sourceVersion(host.manager, first);
   assert.ok(host.tools.get("compass_context").parameters.properties.operation.anyOf.flatMap((variant) => variant.anyOf ?? [variant]).some((variant) => variant.properties.verifiedAgainst));
-  const search = await host.tools.get("compass_context_search").execute("compare", { compare: [{ id: first, version }, { id: second, version }] }, undefined, undefined, host.runner.createContext());
-  assert.equal(JSON.parse(search.content[0].text).repetition.exact[0].relocateId, first);
   await host.turn({ action: "move", expectedRevision: 0, ids: [first], version, verifiedAgainst: { id: second, version } });
   assert.deepEqual(host.manager.getEntry(first), prior);
   assert.deepEqual(host.manager.getEntry(second), compared);
@@ -187,8 +207,8 @@ test("verified repeat relocation crosses the native tool schema and keeps both r
   assert.ok(Buffer.byteLength(modelText(host.manager)) < beforeBytes, "coalescing reduces serialized context for the representative large read");
   assert.match(modelText(host.manager), /Verified exact repeat/);
   assert.match(modelText(host.manager), /one/);
-  const history = await host.tools.get("compass_context_search").execute("recover-covered", { sourceScope: "history", ids: [second], query: "two" }, undefined, undefined, host.runner.createContext());
-  assert.equal(JSON.parse(history.content[0].text).hits[0].version, version);
+  const history = await host.tools.get("compass_context_search").execute("recover-covered", { sourceScope: "history", refs: [host.ref(second, version)], view: "handles" }, undefined, undefined, host.runner.createContext());
+  assert.equal(contextSelection(JSON.parse(history.content[0].text).hits[0].ref).version, version);
   const pinned = read("pinned-read");
   await host.turn({ action: "pin", expectedRevision: 1, ids: [pinned] });
   await host.turn({ action: "move", expectedRevision: 2, ids: [first], version, verifiedAgainst: { id: pinned, version } });
@@ -463,7 +483,7 @@ test("spill verifies a project artifact before removing context and load recheck
     assertPaired(host.manager);
     const before = restoreContextState(host.manager.getBranch());
     await writeFile(path.join(root, "evidence.json"), "tampered");
-    await assert.rejects(host.tools.get("compass_context").execute("failed-load", { operation: { action: "load", expectedRevision: before.revision, ids: [id], version: sourceVersion(host.manager, id) } }, undefined, undefined, host.runner.createContext()), /digest|byte length/);
+    await assert.rejects(host.tools.get("compass_context").execute("failed-load", { operation: { action: "load", source: host.ref(id) } }, undefined, undefined, host.runner.createContext()), /digest|byte length/);
     assert.deepEqual(restoreContextState(host.manager.getBranch()), before);
     assert.deepEqual(host.errors, []);
   } finally { await rm(root, { recursive: true, force: true }); }

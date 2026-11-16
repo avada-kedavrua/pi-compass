@@ -5,6 +5,8 @@ import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
 
 import { bindDagApprovalQuestionnaire, captureHumanDecision, emptyGoalRunState, revisePlanState, dagApprovalStatus, GOAL_RUN_RELEASE } from "../src/goal-run.mjs";
 import { createGoalState } from "./helpers/goal-state.mjs";
+import { humanSourceRef, latestHumanSource } from "../src/goal-sources.mjs";
+import { contextRef } from "../src/context-values.mjs";
 
 function fakePi(options = {}) {
   const events = new Map();
@@ -166,7 +168,7 @@ async function sendHuman(pi, text, id) {
   await pi.events.get("before_agent_start")({ prompt: text }, ctx(pi));
 }
 async function submitGoal(pi, current, { constraints = [], acceptanceCriteria } = {}) {
-  const params = { expectedVersion: latestState(pi)?.goal.version ?? 0, current, constraints, ...(acceptanceCriteria ? { acceptanceCriteria } : {}) };
+  const params = { expectedVersion: latestState(pi)?.goal.version ?? 0, current, constraints, sources: [humanSourceRef(pi.branch(), latestHumanSource(pi.branch()))], ...(acceptanceCriteria ? { acceptanceCriteria } : {}) };
   const result = await pi.tools.get("compass_goal").execute("set-goal", params, undefined, undefined, ctx(pi));
   await pi.events.get("context")?.({ messages: [] }, ctx(pi));
   return result;
@@ -193,7 +195,7 @@ test("Human prose is observed without creating, replacing, or classifying a Goal
   const pi = fakePi();
   extensionFactory(pi);
   await pi.events.get("session_start")({}, ctx(pi));
-  assert.deepEqual(pi.activeNames().filter((name) => name.startsWith("compass_")).sort(), ["compass_context", "compass_context_search", "compass_goal", "compass_state"]);
+  assert.deepEqual(pi.activeNames().filter((name) => name.startsWith("compass_")).sort(), ["compass_context", "compass_context_search", "compass_goal", "compass_open", "compass_state"]);
   for (const text of ["你好", "Goal: quoted example\nAcceptance criteria:\n- Never erase data", "目标：换一个目标。一定要使用 Compass。"] ) {
     await sendHuman(pi, text);
     assert.equal(latestState(pi).goal.current, null);
@@ -221,12 +223,12 @@ test("Goal writes validate native Human sources and stale versions without parti
   const before = structuredClone(latestState(pi));
   pi.entries.push({ id: "assistant-not-human", type: "message", message: { role: "assistant", content: [] } });
   for (const sourceIds of [["missing-source"], ["assistant-not-human"], [before.latestHumanEntryId, "wrong-branch"]]) {
-    await assert.rejects(() => pi.tools.get("compass_goal").execute("invalid", { expectedVersion: 1, current: "Changed", constraints: [], sourceIds }, undefined, undefined, ctx(pi)), /unknown, wrong-branch, or not a native Human message/);
+    await assert.rejects(() => pi.tools.get("compass_goal").execute("invalid", { expectedVersion: 1, current: "Changed", constraints: [], sources: sourceIds.map((id) => id === before.latestHumanEntryId ? humanSourceRef(pi.branch(), id) : contextRef({ binding: `root/${id}`, version: "0".repeat(24) })) }, undefined, undefined, ctx(pi)), /unknown, wrong-branch, or not a native Human message/);
     assert.deepEqual(latestState(pi), before);
   }
-  await assert.rejects(() => pi.tools.get("compass_goal").execute("stale", { expectedVersion: 0, current: "Changed", constraints: [] }, undefined, undefined, ctx(pi)), /Stale Goal version/);
+  await assert.rejects(() => pi.tools.get("compass_goal").execute("stale", { expectedVersion: 0, current: "Changed", constraints: [], sources: [humanSourceRef(pi.branch(), before.latestHumanEntryId)] }, undefined, undefined, ctx(pi)), /Stale Goal version/);
   assert.deepEqual(latestState(pi), before);
-  const results = await Promise.allSettled(["First interpretation", "Second interpretation"].map((current) => pi.tools.get("compass_goal").execute("race", { expectedVersion: 1, current, constraints: [] }, undefined, undefined, ctx(pi))));
+  const results = await Promise.allSettled(["First interpretation", "Second interpretation"].map((current) => pi.tools.get("compass_goal").execute("race", { expectedVersion: 1, current, constraints: [], sources: [humanSourceRef(pi.branch(), before.latestHumanEntryId)] }, undefined, undefined, ctx(pi))));
   assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
   assert.equal(results.filter((result) => result.status === "rejected").length, 1);
   assert.equal(latestState(pi).goal.version, 2);
@@ -239,13 +241,16 @@ test("new Human input pauses approved work until the Agent explicitly reaffirms 
   await currentTool(pi, "compass_plan_create").execute("create", { acceptanceCriteria: criteria, tasks }, undefined, undefined, ctx(pi));
   const approved = approvedDagState(latestState(pi));
   const approvalId = approved.plan.approvalRequest.id;
+  const taskSource = approved.goal.sourceIds[0];
   pi.appendEntry("pi-compass-v2.goalrun", approved);
   await pi.events.get("session_start")({}, ctx(pi));
   await sendHuman(pi, "继续，注意先确认环境");
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(dagApprovalStatus(latestState(pi)).approved, false);
   assert.equal(pi.delegationRequests.length, 0);
-  const result = await submitGoal(pi, latestState(pi).goal.current);
+  const result = await currentTool(pi, "compass_goal").execute("reaffirm", { expectedVersion: latestState(pi).goal.version, current: latestState(pi).goal.current, constraints: latestState(pi).goal.constraints, sources: [humanSourceRef(pi.branch(), taskSource)] }, undefined, undefined, ctx(pi));
+  assert.deepEqual(latestState(pi).goal.sourceIds, [taskSource]);
+  assert.equal(latestState(pi).goal.reviewedInputId, latestState(pi).latestHumanEntryId);
   assert.equal(dagApprovalStatus(latestState(pi)).approved, true);
   assert.equal(latestState(pi).plan.approvalRequest.id, approvalId);
   await pi.events.get("tool_result")({ toolName: "compass_goal", input: {}, ...result }, ctx(pi));
@@ -324,7 +329,7 @@ test("simple Goals keep a light loadout while optional capability choice stays A
   await captureGoal(pi, "Fix a typo", { planning: false });
   assert.deepEqual(pi.activeNames().filter((name) => name.startsWith("compass_")).sort(), ["compass_context", "compass_context_search", "compass_goal", "compass_open", "compass_state"]);
   const available = currentTool(pi, "compass_open").parameters.properties.capabilities.items.enum;
-  assert.deepEqual(available, ["planning", "routes", "acceptance", "history", "goal_details", "issue_review"]);
+  assert.deepEqual(available, ["planning", "routes", "acceptance", "history", "goal_details", "issue_review", "context"]);
   for (const path of ["a.ts", "b.ts", "c.ts"]) await pi.events.get("tool_call")({ toolName: "write", input: { path } }, ctx(pi));
   await pi.events.get("context")({ messages: [] }, ctx(pi));
   assert.equal(pi.activeNames().includes("compass_plan_create"), false, "write counts do not interpret planning intent");
@@ -526,11 +531,10 @@ test("one compass_open call loads multiple capabilities atomically with a minima
   const result = await open.execute("open", { capabilities: ["history", "acceptance", "goal_details"] }, undefined, undefined, ctx(pi));
   assert.deepEqual(JSON.parse(result.content[0].text).added, ["history", "acceptance", "goal_details"]);
   assert.doesNotMatch(result.content[0].text, /Loaded capabilities:/, "do not repeat the entire cumulative loadout");
-  assert.deepEqual(JSON.parse(result.content[0].text).added, ["history", "acceptance", "goal_details"]);
   assert.equal(result.details.added, undefined, "domain payload has one serialized owner");
   await pi.events.get("context")({ messages: [] }, ctx(pi));
-  assert.deepEqual(currentTool(pi, "compass_open").parameters.properties.capabilities.items.enum, ["routes", "issue_review"]);
-  await currentTool(pi, "compass_open").execute("open-rest", { capabilities: ["routes", "issue_review"] }, undefined, undefined, ctx(pi));
+  assert.deepEqual(currentTool(pi, "compass_open").parameters.properties.capabilities.items.enum, ["routes", "issue_review", "context"]);
+  await currentTool(pi, "compass_open").execute("open-rest", { capabilities: ["routes", "issue_review", "context"] }, undefined, undefined, ctx(pi));
   assert.ok(!pi.activeNames().includes("compass_open"), "loader is hidden after every optional group is explicitly loaded");
   assert.ok(pi.activeNames().includes("compass_history_recent"));
   assert.ok(pi.activeNames().includes("compass_goal_read"));
@@ -539,7 +543,7 @@ test("one compass_open call loads multiple capabilities atomically with a minima
   const revisionBeforeInvalid = pi.entries.filter((entry) => entry.customType === "pi-compass-v2.goalrun").at(-1).data.stateRevision;
   await assert.rejects(() => open.execute("bad-open", { capabilities: ["planning", "not_a_capability"] }, undefined, undefined, ctx(pi)), /Unavailable capability/);
   const afterInvalid = pi.entries.filter((entry) => entry.customType === "pi-compass-v2.goalrun").at(-1).data;
-  assert.deepEqual(afterInvalid.activeCapabilities, ["planning", "history", "acceptance", "goal_details", "routes", "issue_review"]);
+  assert.deepEqual(afterInvalid.activeCapabilities, ["planning", "history", "acceptance", "goal_details", "routes", "issue_review", "context"]);
   assert.equal(afterInvalid.stateRevision, revisionBeforeInvalid, "invalid mixed requests must not partially mutate state");
 });
 
@@ -1430,6 +1434,9 @@ test("ask-user-questions answers remain available on demand without repeated inj
   assert.match(details.content[0].text, /PowerPoint/);
   const projection = JSON.parse(details.content[0].text);
   assert.deepEqual(projection.goal.constraints, constraints, "on-demand details never truncate later material constraints");
+  assert.deepEqual(projection.goal.sources, latestState(pi).goal.sourceIds.map((id) => humanSourceRef(pi.branch(), id)));
+  assert.equal(projection.goal.sourceIds, undefined);
+  assert.equal(projection.input.ref, humanSourceRef(pi.branch(), latestState(pi).latestHumanEntryId));
   assert.equal(projection.humanAnswers[0].sourceEntryId.length > 0, true);
   assert.equal(projection.humanAnswers[0].questionnaire !== undefined, true);
 });

@@ -5,7 +5,8 @@ import { contentVersion, pinnedContextOverlay, planContextBoundary, planWatchBou
 import { buildStateSnapshot, emptyGoalRunState, observeHumanInput, setGoal } from "../src/goal-run.mjs";
 const { SessionManager } = await import(new URL("dist/core/session-manager.js", pathToFileURL(`${piRoot}/`)));
 
-const count = Number.parseInt(process.env.PI_COMPASS_MEASURE_MESSAGES ?? "1000", 10);
+const count = Number(process.env.PI_COMPASS_MEASURE_MESSAGES ?? "1000");
+if (!Number.isSafeInteger(count) || count < 1) throw new Error("PI_COMPASS_MEASURE_MESSAGES must be a positive safe integer.");
 const manager = SessionManager.inMemory("/tmp/pi-compass-measure");
 for (let i = 0; i < count; i += 1) manager.appendMessage({ role: "user", content: `measurement source ${i} stable retrieval phrase`, timestamp: Date.now() });
 const branch = manager.getBranch();
@@ -21,8 +22,9 @@ const sample = (fn, rounds = 5) => {
   }
   return { result, medianMs: times.sort((a, b) => a - b)[Math.floor(times.length / 2)] };
 };
-const retrieval = sample(() => searchContext(branch, { context }, state, { query: "stable retrieval phrase", scope: "all", limit: 8 }));
-const miss = sample(() => searchContext(branch, { context }, state, { query: "absent-query-for-bounded-scan", scope: "all", limit: 8 }));
+const retrieval = sample(() => searchContext(branch, { context }, state, { query: "stable retrieval phrase", sourceScope: "all", limit: 8 }));
+const miss = sample(() => searchContext(branch, { context }, state, { query: "absent-query-for-bounded-scan", sourceScope: "all", limit: 8 }));
+if (retrieval.result.hits.length !== Math.min(8, count) || retrieval.result.scanned !== Math.min(1024, count) || miss.result.scanned !== Math.min(1024, count)) throw new Error("Retrieval benchmark did not exercise its declared candidate set.");
 const transition = sample(() => planWatchBoundary({
   state,
   boundary: { toolResults: [{ toolName: "watch", details: { id: "w-measure", status: "armed" }, content: [] }] },

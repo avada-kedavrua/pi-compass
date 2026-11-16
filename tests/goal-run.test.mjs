@@ -538,7 +538,7 @@ test("reopening a prerequisite resets downstream dependents but preserves unrela
 test("DAG is optional for Goal continuity", () => {
   const state = withGoal();
   assert.equal(state.plan.tasks.length, 0);
-  assert.deepEqual(availableCapabilities(state), ["planning", "routes", "acceptance", "history", "goal_details", "issue_review"]);
+  assert.deepEqual(availableCapabilities(state), ["planning", "routes", "acceptance", "history", "goal_details", "issue_review", "context"]);
 });
 
 test("GoalRun rejects obsolete schema versions instead of migrating or silently reinterpreting them", () => {
@@ -744,9 +744,9 @@ test("route review signal requires a repeated failure signature, not merely seve
 test("compact state snapshot returns a cursor and only new current-Goal events", () => {
   let state = withGoal("Goal: implement API smoke test");
   const initial = buildStateSnapshot(state, null, { contextFrame: { active: false, depth: 0, id: null } });
-  assert.deepEqual(initial.contextFrame, { active: false, depth: 0, id: null });
+  assert.equal(initial.frame, "root");
   const framed = buildStateSnapshot(state, null, { contextFrame: { active: true, depth: 1, id: "frame-1" } });
-  assert.deepEqual(framed.contextFrame, { active: true, depth: 1, id: "frame-1" });
+  assert.equal(framed.frame, "frame-1");
   assert.equal(initial.goal.version, 1);
   assert.equal(initial.goal.currentTruncated, undefined);
   assert.equal(initial.plan, undefined);
@@ -760,7 +760,7 @@ test("compact state snapshot returns a cursor and only new current-Goal events",
   const unchanged = buildStateSnapshot(state, delta.cursor);
   assert.equal(unchanged.unchanged, true);
   assert.equal(unchanged.delta, undefined);
-  assert.deepEqual(unchanged.contextFrame, { active: false, depth: 0, id: null });
+  assert.deepEqual(unchanged, { unchanged: true, cursor: delta.cursor });
   assert.ok(JSON.stringify(unchanged).length < 220, "unchanged cursor response is only a small revision envelope");
 });
 
@@ -770,7 +770,7 @@ test("composite state cursor detects revision changes even when event sequence d
   state.stateRevision += 1; // e.g. a persisted state/trace update without a user-facing event
   const changed = buildStateSnapshot(state, first.cursor);
   assert.equal(changed.unchanged, undefined);
-  assert.deepEqual(changed.delta.events, []);
+  assert.equal(changed.delta, undefined);
   assert.notEqual(changed.cursor, first.cursor);
 });
 
@@ -922,9 +922,9 @@ test("bounded event deltas declare omitted retained events", () => {
 
 test("capability availability is fixed after explicit Goal creation", () => {
   const expected = ["planning", "routes", "acceptance", "history", "goal_details", "issue_review"];
-  assert.deepEqual(availableCapabilities(withGoal("Goal: fix one typo in one file")), expected);
-  assert.deepEqual(availableCapabilities(withGoal("Goal: coordinate multiple independent workstreams")), expected);
-  assert.deepEqual(availableCapabilities(emptyGoalRunState()), []);
+  assert.deepEqual(availableCapabilities(withGoal("Goal: fix one typo in one file")), [...expected, "context"]);
+  assert.deepEqual(availableCapabilities(withGoal("Goal: coordinate multiple independent workstreams")), [...expected, "context"]);
+  assert.deepEqual(availableCapabilities(emptyGoalRunState()), ["context"]);
 });
 
 test("repeated failure review includes the failure signature only after a repeated pattern", () => {
@@ -950,8 +950,12 @@ test("ordinary, quoted, and multilingual Human text only updates the latest nati
     assert.deepEqual(state.goal.constraints, []);
     assert.equal(state.events.length, 0);
   }
-  assert.deepEqual(availableCapabilities(state), []);
-  assert.throws(() => setGoal(state, { expectedVersion: 0, current: "Agent interpretation", sourceIds: ["entry-ordinary"], constraints: [] }), /latest observed Human input/);
+  assert.deepEqual(availableCapabilities(state), ["context"]);
+  state = setGoal(state, { expectedVersion: 0, current: "Agent interpretation", sourceIds: ["entry-ordinary"], constraints: [] }).state;
+  state = observeHumanInput(state, "follow-up").state;
+  state = setGoal(state, { expectedVersion: 1, current: "Agent interpretation", sourceIds: ["entry-ordinary"], constraints: [] }).state;
+  assert.equal(state.goal.originalSourceIds[0], "entry-ordinary");
+  assert.equal(state.goal.reviewedInputId, "follow-up");
 });
 
 test("Human observation is bounded and repeated IDs are a state no-op", () => {
@@ -963,12 +967,11 @@ test("Human observation is bounded and repeated IDs are a state no-op", () => {
   assert.deepEqual(observeHumanInput(observed.state, "native-entry"), { state: observed.state, changed: false });
 });
 
-test("explicit setter rejects oversized Goal, stale sources, duplicate constraints, and invalid criteria atomically", () => {
+test("explicit setter rejects oversized Goal, duplicate sources/constraints, and invalid criteria atomically", () => {
   const state = observeHumanInput(emptyGoalRunState(), "source").state;
   const before = structuredClone(state);
   for (const input of [
     { current: "x".repeat(4001), sourceIds: ["source"], constraints: [] },
-    { current: "ok", sourceIds: ["other"], constraints: [] },
     { current: "ok", sourceIds: ["source", "source"], constraints: [] },
     { current: "ok", sourceIds: ["source"], constraints: ["same", "same"] },
     { current: "ok", sourceIds: ["source"], constraints: [], acceptanceCriteria: ["pass", "pass"] },
@@ -1024,7 +1027,7 @@ test("context-aware cursor and default snapshot stay compact", () => {
   assert.match(cursor, /^R\d+-E\d+-C7$/);
   const frame = { active: true, depth: 2, id: "frame-x", secretContents: "must not leak" };
   const snapshot = buildStateSnapshot(state, null, { contextRevision: 7, contextFrame: frame });
-  assert.deepEqual(snapshot.contextFrame, { active: true, depth: 2, id: "frame-x" });
+  assert.equal(snapshot.frame, "frame-x");
   assert.equal("runtime" in snapshot, false);
   assert.equal("sourceIds" in snapshot.goal, false);
   assert.equal("acceptance" in snapshot, false);

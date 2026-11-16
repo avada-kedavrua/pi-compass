@@ -6,37 +6,37 @@ These are bounded local measurements, not provider, token-cache, or semantic-qua
 node scripts/measure-context.mjs
 ```
 
-Observed output for implementation `7aa6105` (Node 22.22.1 / Pi 1.5.2):
+Observed output for the current context-v5 consumer revision (Node 22.22.1 / Pi 1.5.2):
 
 | Measure | Result |
 |---|---:|
-| Compact semantic Goal read median / JSON | 0.026 ms / 216 bytes |
-| Exact unchanged Goal read JSON | 90 bytes |
+| Compact semantic Goal read median / JSON | 0.030 ms / 179 bytes |
+| Exact unchanged Goal read JSON | 38 bytes |
 | Branch entries | 1,000 |
-| Bounded lexical retrieval median / returned hits | 4.253 ms / 8 (1,000 candidates scanned for ranking) |
-| Full lexical miss median / scanned sources | 1.430 ms / 1,000 |
+| Bounded lexical retrieval median / returned hits | 3.996 ms / 8 (1,000 candidates scanned for ranking) |
+| Full lexical miss median / scanned sources | 1.600 ms / 1,000 |
 | Retrieval truncation | true (bounded result) |
-| Watch-state transition median | 0.060 ms |
-| Frame-call planning median / active window | 2.237 ms / 1,000 sources |
-| Frame-call projection edits / draft JSON | 1,002 / 168,945 bytes |
+| Watch-state transition median | 0.067 ms |
+| Frame-call planning median / active window | 2.551 ms / 1,000 sources |
+| Frame-call projection edits / draft JSON | 1,002 / 168,893 bytes |
 | Frame-call control-state JSON | 103,185 bytes |
-| Missing-pin request overlay median | 0.188 ms |
-| Compacted native / outgoing JSON | 137 / 629 bytes |
-| Retained overlay increment | 492 bytes |
+| Missing-pin request overlay median | 0.219 ms |
+| Compacted native / outgoing JSON | 137 / 562 bytes |
+| Retained overlay increment | 425 bytes |
 | Projected context JSON | 100,911 bytes |
 | Control-state JSON | 79 bytes before the watch transition |
-| Process RSS at sample end | 75,546,624 bytes |
-| Process heap used at sample end | 13,683,264 bytes |
+| Process RSS at sample end | 78,864,384 bytes |
+| Process heap used at sample end | 12,761,896 bytes |
 
-The Goal sample is an explicitly submitted short objective, with native source identity, no criteria/DAG and no retained raw Human prompt. Bytes measure serialized snapshot JSON, not the surrounding tool envelope or provider tokens. The unchanged sample includes the committed root-frame indicator. Snapshot generation normalizes once and reuses derived acceptance/outcome summaries.
+The Goal sample is an explicitly submitted short objective, with native source identity, no criteria/DAG and no retained raw Human prompt. Bytes measure serialized snapshot JSON, not the surrounding tool envelope or provider tokens. The unchanged sample is only cursor/unchanged; changed reads carry a single frame identity. Snapshot generation normalizes once and reuses derived acceptance/outcome summaries.
 
 The frame sample now uses all 1,000 active sources without pre-compaction. The former 256-source restoration ceiling was removed: snapshots contain immutable native references under a 2 MiB canonical-control budget, not copied parent payloads. Explicit captures, pins, value bindings and exchange closures remain separately bounded. The sample measures production draft planning and linear edit/control overhead, not persistence latency or provider cache hits. Earlier-view edits may invalidate a provider’s cached suffix; native system/tool prefixes are not rewritten.
 
-Keyword-any ranking scans the bounded candidate set before selecting top matches, so its 4.253 ms sample is not the same operation as the earlier early-hit lookup that stopped after eight candidates. The extra local CPU buys deterministic ranking and recovery for keyword alternatives; no unconditional performance or provider-cost win is claimed.
+Keyword-any ranking scans the bounded candidate set before selecting top matches, so its 3.996 ms sample is not the same operation as the earlier early-hit lookup that stopped after eight candidates. The extra local CPU buys deterministic ranking and recovery for keyword alternatives; no unconditional performance or provider-cost win is claimed.
 
 The overlay sample uses one explicit retained source head referencing native raw content after a synthetic native compaction; it measures serialized request-context bytes, not provider tokens. The miss sample exercises the bounded scan rather than only early matching results. Whole-process memory is not memory attributed solely to Compass.
 
-Retrieval decision: reuse parent semantic judgment over bounded recovered candidates, with `rankedSources` verifying the selected IDs/versions/ranges in caller order. Native code navigation tools target repository symbols rather than omitted session evidence; an embedding database or another always-on model loop would duplicate authority and add unmeasured lifecycle cost. Lexical recovery can miss paraphrases: query expansion or an explicit bounded source listing remains an Agent decision. Local tests prove source/range verification, not semantic ranking quality; no semantic benchmark or provider-cost win is claimed.
+Retrieval decision: reuse parent semantic judgment over bounded recovered candidates, with opaque exact-source refs verified by code. The obsolete public ranking/comparison handshake and dead ranking implementation were removed; mutation-time read-identity verification remains. Native code navigation tools target repository symbols rather than omitted session evidence; an embedding database or another always-on model loop would duplicate authority and add unmeasured lifecycle cost. Lexical recovery can miss paraphrases: query expansion or an explicit bounded source listing remains an Agent decision. Local tests prove source/range verification, not semantic ranking quality; no semantic benchmark or provider-cost win is claimed.
 
 A separate installed-boundary regression uses a representative 32 KB repeated read: verified coalescing leaves one complete covered payload, preserves both raw read exchanges, and reduces serialized context bytes. This is a local fixture assertion, not a provider token/cache or universal optimization claim; small payloads may cost more in pointers and edits than they save.
 
@@ -44,17 +44,20 @@ The script measures the local control/index/request-overlay path only. It does n
 
 ## Agent interface size
 
-Run `node scripts/measure-tool-contract.mjs` on the installed Pi host. Baseline is the actual registered mixed context schema from `c6aedff`; the current output uses `7aa6105` schemas and Pi's declaration generator.
+Run node scripts/measure-tool-contract.mjs on the installed Pi host. Common query/mutation parameter JSON is **2,901 bytes**, versus the prior public contract's 10,460 bytes (−72.3%). The callable search signature is **602 characters**, versus 1,225 (−50.9%), with a preserved input type. The common mutation schema has only pin/unpin/remember; advanced context operations use the existing explicit capability loader. The advanced schema still has a cost when requested; no entire-prompt or provider-token reduction is inferred.
 
-| Measure | Baseline → current |
+For the recorded seven-source case, node scripts/measure-agent-context.mjs <session.jsonl> reproduces:
+
+| Output | Serialized size |
 |---|---:|
-| Context parameter JSON, both current entrypoints combined | 8,848 → 10,460 bytes (+18.2%) |
-| Callable Code Mode context signature | 7,044 → 1,225 characters (−82.6%) |
-| Public Compass tools including optional loader | 19 → 20 |
-| Context mutation actions / schema cases | 11 / 13, plus one read-only query tool |
-| Code Mode input type | Preserved, not `unknown` |
+| Actual original search | 8,147 characters |
+| New normal search, 8 hits | 2,322 characters / 3,036 bytes |
+| Handles only, 8 hits | 792 characters / bytes |
+| Explicit source details | 5,374 characters / 6,620 bytes |
+| Qualified retained contents: seven full pins | 66,566 bytes |
+| Qualified retained contents: one supplied short memory citing all seven | 406 bytes |
 
-The mutation schema remains visible to the model. Its nested variants cost more JSON than a flat optional-field bag but encode required/disallowed fields and source-selection forms. Query/mutation separation reuses native model-only exposure so Code Mode-only does not hide the only legal mutation path. This is a structural correctness/callability tradeoff, not an assertion that the entire prompt, tokenizer output or provider bill is smaller. No strict-provider sampling mode is requested; actual provider acceptance remains a Human live-test item.
+The last row is an explicit Agent-written conclusion/caveat, not lossless compression or evidence that every relevant fact was retained. Both branches are independently cloned before replay; the script does not mutate the transcript/profile. CPU scripts assert nonempty retrieval and the declared scanned count, avoiding a misleading fast empty-path measurement. The [field audit](agent-usage-audit-v0.10.0.md) records source identity, SHA, consumer/code reviews and limits. No strict-provider sampling or provider request was performed.
 
 ## Runtime guard cost
 

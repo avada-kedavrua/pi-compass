@@ -23,7 +23,7 @@ function fixture() {
 
 test("history filters IDs and deduplicates retained heads before reading repeated payloads", () => {
   const { index, state } = fixture();
-  state.schemaVersion = 4;
+  state.schemaVersion = 5;
   state.frames = [];
   index.active.clear();
   const reads = { selected: 0, unrelated: 0 };
@@ -34,7 +34,7 @@ test("history filters IDs and deduplicates retained heads before reading repeate
     index.branch.push(entry);
     values[`root/${id}`] = { entryId: id, field: "content", version: contentVersion(content), kind: "human", readOnly: true, rendered: false, handling: "active", caveats: [], sources: [id] };
   }
-  for (let i = 0; i < 256; i++) index.branch.push({ id: `state-${i}`, type: "custom", customType: "pi-compass-v2.context", data: { schemaVersion: 4, values } });
+  for (let i = 0; i < 256; i++) index.branch.push({ id: `state-${i}`, type: "custom", customType: "pi-compass-v2.context", data: { schemaVersion: 5, values } });
   index.byId = new Map(index.branch.map((entry) => [entry.id, entry]));
   index.positions = new Map(index.branch.map((entry, i) => [entry.id, i]));
   const result = searchSources(index, state, { query: "absent", ids: ["selected"], scope: "history" });

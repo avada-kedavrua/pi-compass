@@ -4,6 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { CONTEXT_SCHEMA_VERSION } from "../src/context-core.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(scriptDir, "..");
@@ -85,9 +86,9 @@ if (manifest?.pi?.extensions?.includes("./src/index.ts") && fs.existsSync(path.j
 let release = null;
 try { release = JSON.parse(fs.readFileSync(path.join(packageRoot, "RELEASE-MANIFEST.json"), "utf8")); } catch { /* reported below */ }
 const minimumPi = parseVersion(release?.minimumPiVersion);
-if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 8 && minimumPi) {
-  add("PASS", "Release identity", `Package/manifest ${release.version}; GoalRun v${release.goalRunSchemaVersion}; Pi minimum ${release.minimumPiVersion}`);
-} else add("FAIL", "Release identity", "RELEASE-MANIFEST.json must match the package and current GoalRun schema and declare a valid Pi minimum");
+if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 8 && release?.contextSchemaVersion === CONTEXT_SCHEMA_VERSION && minimumPi) {
+  add("PASS", "Release identity", `Package/manifest ${release.version}; GoalRun v${release.goalRunSchemaVersion}; context v${CONTEXT_SCHEMA_VERSION}; Pi minimum ${release.minimumPiVersion}`);
+} else add("FAIL", "Release identity", "RELEASE-MANIFEST.json must match the package and current GoalRun/context schemas and declare a valid Pi minimum");
 const goalRunPath = path.join(packageRoot, "src", "goal-run.mjs");
 const requiredGoalRunExports = [
   "GOAL_RUN_API_VERSION", "GOAL_RUN_RELEASE", "setGoal", "observeHumanInput", "stateCursor", "availableCapabilities", "acceptanceStatus", "goalOutcomeStatus",

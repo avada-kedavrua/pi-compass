@@ -11,10 +11,10 @@ If Compass is absent from the available tools (check `compass_context_search` in
 
 ## Goal and evidence
 
-- When Goal tracking helps, `compass_goal({expectedVersion:0,current,constraints,acceptanceCriteria?})` creates your semantic interpretation. Human sources default to the latest native input. Submit the complete constraint list; your interpretation is not Human approval.
+- When Goal tracking helps, `compass_goal({expectedVersion:0,current,constraints,sources,acceptanceCriteria?})` creates your semantic interpretation. Select the original Human refs that actually define the Goal; state returns the latest input ref, search/details recover earlier refs. Reviewing a follow-up does not replace the original semantic sources. Submit the complete constraint list; your interpretation is not Human approval.
 - Reaffirm/update the Goal after material Human input before resuming an approved DAG. Same objective/constraints can preserve exact approval; replacement reports which Goal-specific work was reset. Do not treat old criterion IDs as new-Goal evidence.
 - Reuse mutation receipts. Read `compass_state({cursor})` only when state is missing; use returned cursors unchanged. Native tool diagnostics belong to `/compass-preflight`, not routine Goal reads.
-- `compass_open` loads missing groups once: `acceptance`, `history`, `goal_details`, `planning`, `routes`, `issue_review`. Open only what the next step needs. No need to open planning to retain evidence.
+- `compass_open` loads missing groups once: `acceptance`, `history`, `goal_details`, `planning`, `routes`, `issue_review`, `context`. Context is also available without a Goal. Open only what the next step needs. No need to open planning to retain evidence.
 - Acceptance is optional and may be recorded whenever evidence is available. Define concrete criteria, use returned IDs, then record `reported_pass|failed|blocked|inconclusive` with real evidence. No independent verification is inferred from your report. Status returns current full criterion text/evidence; no mandatory reread after every record.
 
 ## Optional runtime checks
@@ -27,20 +27,24 @@ If Compass is absent from the available tools (check `compass_context_search` in
 
 ## Retain or recover context
 
-Read with `compass_context_search({...})`; mutate with direct `compass_context({operation:{action,...}})`. Required/allowed fields are in each schema. Model-only mutation stays available even in Code Mode-only mode; no flat mutation adapter is retained.
+All mutation names below are actions of `compass_context({operation:{action,...}})`, not separate tools.
 
-1. `compass_context_search({query,sourceScope?})` returns the context revision and bounded sources with exact `id`, `binding`, `version` and ranges. No prior state call is needed. Default scope is active; use parent/history/all for omitted sources. Keywords match **any** term by default and rank by matched count; use `match:"all"` for conjunction. This is literal recovery, not semantic inference. Do not slice away IDs/versions needed for the next operation.
-2. Pin material instructions/evidence with `action:"pin",expectedRevision,ids`. Pins are qualified context, not extra system authority. Lifetime defaults to the current Goal, or session when no Goal exists; set session explicitly when required. Use `mark` with version, handling and reason to record active/handled/retired state. Retirement unpins; it is not deletion of raw history.
-3. `load` makes a version/range-checked data copy; `move` relocates an eligible value/range. Original Human instructions and executed calls remain immutable. `replace` edits eligible working data; `drop` needs every selected source's version and preserves complete tool exchanges.
-4. Spill only when a verified artifact is worth its filesystem and recovery cost: `spill` needs IDs/version, a new project-relative path and purpose; Compass writes/readbacks the artifact. `load` verifies its receipt. Do not prewrite the destination. Failed later commits can leave an artifact; no filesystem rollback is implied.
+- Search only for missing information: compass_context_search({query}). Literal keywords match any term by default; match=all is conjunction. Default snippets are short. Choose view=handles to omit text, details for qualifications. Recover exact refs without a query; omitted sourceScope then covers all available scopes.
+- Copy returned refs unchanged. Never construct IDs, binding paths or versions, decode refs, or extract a context revision from a cursor. Stale mutations reject instead of silently selecting newer content.
+- Prefer remember({text,sources,caveats?}) for compact conclusions/decisions with their sources and caveats. It is Agent-authored memory, not a new observation or Human instruction. pin({sources}) retains complete originals and can cost more; use it only when full content must stay visible. Use skill=true only for the exact complete native Skill-file read.
+- Lifetime defaults to the current Goal, or session before a Goal exists. Explicit lifetime=goal requires a Goal. unpin releases retention without deleting raw history.
+- Context mutations are model-only **direct standalone calls**, never nested/parallel. queued is not committed; the native boundary supplies applied/rejected. Do not poll or retry unknown outcomes blindly. Other plugins may invalidate a queued operation.
 
-Search may run in Code Mode. **All context mutations must be direct standalone calls**, not nested or parallel with another tool. Supply mutation `expectedRevision` from search/receipt or the cursor's C segment. Validation errors happen before queued when possible. `queued` means no context commit yet; the native boundary then emits a correlated `applied` or `rejected` receipt with the actual revision. Use that receipt; do not poll. A boundary can still reject a queued operation if another extension changed its preconditions.
+## Optional attention and edits
 
-## Same-session attention frame
+Open compass_open({capabilities:["context"]}) once when these help; no Goal is required.
 
-- `call` needs a local task and optional capture list; capture/export defaults are empty. `ref` shares an enclosing value and writes survive failure; `copy` is private and forks on write. Pins remain qualified inputs. A frame does not launch another Agent/session or roll back files.
-- Work locally, then explicitly `return` with result/export IDs. Turn completion does not pop. Only selected outputs and material external/Human facts survive return; local process is released.
-- Native watches belong to their arm identity. Cancel or transfer live frame-owned watches to root/parent before return. A repeating wake is not terminal. Use native `watch/watches/unwatch`; never poll or create a second timer loop.
+- call takes a task and optional capture. ref shares its outer value; copy is private. The applied receipt returns sources in capture order: use those returned refs to edit copies, not the original refs.
+- return exports only exportSources and result; other local work is released. Shared-ref writes survive interruption/return. Frames use the same native session and do not roll back filesystem/environment changes.
+- load creates a version-checked data copy; replace edits eligible working values; drop preserves complete exchanges; mark records handling. Human originals and executed calls are not editable originals. Source ranges are content-relative, not file coordinates. After replace/spill or a remainder-changing move, use the applied receipt’s updated ref for that value; the old ref no longer names its current content.
+- spill needs a source ref, new project-relative path and purpose. It writes/readbacks a verified artifact; later rejection can leave a reported artifact. No filesystem rollback or silent fallback from a bad artifact is promised.
+- move can relocate eligible working values or verify a complete repeated read against verifiedAgainst. The runtime checks identity/ranges, conflicts and qualifications; no separate comparison/ranking call is needed.
+- A frame cannot return with live owned watches. Use native unwatch, or transfer with target=parent/root. Repeating wakes stay live; native pi-await owns identities and scheduling.
 
 ## Optional plans and alternatives
 

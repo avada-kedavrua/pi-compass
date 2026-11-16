@@ -1,15 +1,15 @@
 import {
-  VALUE_MESSAGE_TYPE, adoptValue, bindingKey, contentVersion, copyValue, currentValue, dataBlocks, isValueMessage, logicalSource, questionnaireContent,
-  nativeValueViews, rawMessage as messageOf, releaseFrameValues, renderValue, validateValue, valueBinding, valueContent, valueMessage, writeValue,
+  VALUE_MESSAGE_TYPE, adoptValue, bindingKey, contextRef, contentVersion, copyValue, currentValue, dataBlocks, isValueMessage, logicalSource, questionnaireContent,
+  nativeValueViews, sourceEntries, rawMessage as messageOf, releaseFrameValues, renderValue, snapshotHead, validateValue, valueBinding, valueContent, valueMessage, writeValue,
 } from "./context-values.mjs";
-import { analyzeRepeatedSelections, rankVerifiedSources, readObservationIdentity, readOnlyObservation, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
+import { analyzeRepeatedSelections, readObservationIdentity, readOnlyObservation, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
 import { loadContextArtifact, writeContextArtifact } from "./context-artifacts.mjs";
 import { randomUUID } from "node:crypto";
 export { contentVersion } from "./context-values.mjs";
 
 export const CONTEXT_STATE_TYPE = "pi-compass-v2.context";
 export const CONTEXT_MESSAGE_TYPE = "pi-compass-v2.context-message";
-export const CONTEXT_SCHEMA_VERSION = 4;
+export const CONTEXT_SCHEMA_VERSION = 5;
 const INTENT_TYPE = `${CONTEXT_STATE_TYPE}.intent`;
 const MAX_DEPTH = 16;
 const MAX_SOURCES = 256;
@@ -142,20 +142,18 @@ export function contextStateEntry(state) {
 }
 
 /** One index per operation; keep raw and active edit views distinct after compaction. */
-function sourceIndex(branch, boundary) {
-  const byId = new Map();
+export function sourceIndex(branch, boundary) {
+  const byId = sourceEntries(branch);
   const positions = new Map();
   const groups = new Map();
   const calls = new Map();
   const callDetails = new Map();
   const readRequests = new Map();
   for (const [position, entry] of branch.entries()) {
-    byId.set(entry.id, entry);
     positions.set(entry.id, position);
     if (entry.customType === VALUE_MESSAGE_TYPE && typeof entry.details?.referenceId === "string") {
-      byId.set(entry.details.referenceId, entry);
       positions.set(entry.details.referenceId, position);
-      if (entry.details.derived) { byId.set(entry.details.sourceId, entry); positions.set(entry.details.sourceId, position); }
+      if (entry.details.derived) positions.set(entry.details.sourceId, position);
     }
     const message = messageOf(entry);
     if (message?.role === "assistant") {
@@ -291,7 +289,7 @@ function planCall({ next, index, boundary, operation, turnIds }) {
     const head = next.values[copy.key];
     entries.push(valueMessage({ id: copy.id, key: copy.key, head, content: valueContent(index, head, copy.id) }));
   }
-  entries.push(nativeMessage(JSON.stringify({ action: "call", resultStatus: "applied", callId: operation.callId, revision: next.revision + 1, frame: frame.id, task: operation.task, refs: refs.map((ref) => ref.id), copies: copies.map((copy) => copy.id) }), { frame: frame.id, action: "call" }));
+  entries.push(nativeMessage(JSON.stringify({ resultStatus: "applied", frame: frame.id, task: operation.task, ...(captures.length ? { sources: captures.map((item) => contextRef({ binding: item.mode === "copy" ? `${frame.id}/${item.id}` : refs.find((ref) => ref.id === item.id).key, version: item.version })) } : {}) }), { frame: frame.id, action: "call", callId: operation.callId, revision: next.revision + 1 }));
   return entries;
 }
 function external(entry) {
@@ -336,7 +334,7 @@ function planReturn({ next, index, boundary, operation }) {
     }
   }
   for (const [number, id] of (operation.exportIds ?? []).entries()) {
-    const value = currentValue(next, index, id);
+    const value = selectedValue(next, index, operation, id);
     ensureContent(value.content);
     entries.push(sourceDataDraft(next, operation, { ...value, caveats: value.head.caveats, provenance: [...new Set([...value.head.sources, value.head.entryId])], readStatus: value.head.readStatus }, "export", number, frame.parent));
   }
@@ -347,7 +345,7 @@ function planReturn({ next, index, boundary, operation }) {
   next.frames.pop();
   next.pins = next.pins.filter((pin) => pin.scope !== frame.id);
   releaseFrameValues(next, frame.id);
-  entries.push(nativeMessage(JSON.stringify({ action: "return", resultStatus: "applied", callId: operation.callId, revision: next.revision + 1, frame: next.frames.at(-1)?.id ?? null, returnedFrom: frame.id }), { frame: frame.id, action: "return" }));
+  entries.push(nativeMessage(JSON.stringify({ resultStatus: "applied", frame: next.frames.at(-1)?.id ?? "root" }), { frame: frame.id, action: "return", callId: operation.callId, revision: next.revision + 1 }));
   return entries;
 }
 function writeView(state, value, head, content) {
@@ -355,6 +353,25 @@ function writeView(state, value, head, content) {
   if (value.key === value.viewKey && !executedCall) return [nativeEdit(value.nativeId, renderValue(value, content, head))];
   const protectedView = executedCall || state.pins.some((pin) => pin.key !== value.key && pin.id === value.id);
   return [...(protectedView ? [] : [nativeEdit(value.nativeId, null)]), valueMessage(value, content, head)];
+}
+function selectedValue(state, index, operation, id, options = {}) {
+  const selected = [...(operation.selections ?? []), ...(operation.exportSelections ?? [])].find((item) => item.id === id);
+  const value = currentValue(state, index, id, { key: selected?.binding ?? operation.binding, ...options });
+  if (selected && selected.version !== value.version) fail("Selected source changed; recover its current ref before changing it.");
+  return value;
+}
+function planRemember({ next, index, operation }) {
+  ensureText(operation.content, "Working memory", 4000);
+  if (operation.lifetime === "goal" && !operation.goalVersion) fail("Create a semantic Goal before requesting Goal-scoped retention.");
+  const selections = operation.selections ?? [];
+  const resolved = selections.map((item) => resolveSource(index, next, item, "all"));
+  const caveats = [...new Set([...(operation.caveats ?? []), ...resolved.flatMap((item) => item.caveats)])];
+  const draft = sourceDataDraft(next, operation, { id: operation.id, version: contentVersion(operation.content), content: [{ type: "text", text: operation.content }], caveats, provenance: selections.map((item) => item.id), authorship: "agent-memory", selections }, "remember");
+  const id = draft.details.sourceId;
+  next.values[draft.details.key] = snapshotHead({ ...draft, id });
+  next.pins.push({ id, key: draft.details.key, scope: next.frames.at(-1)?.id ?? "root", ...(operation.lifetime === "session" || !operation.goalVersion ? {} : { goalVersion: operation.goalVersion }) });
+  if (next.pins.length > MAX_PINS) fail("At most 64 values may be retained; release an unused memory first.");
+  return [draft];
 }
 function planPins({ next, index, operation }) {
   ensureIds(operation.ids);
@@ -365,14 +382,14 @@ function planPins({ next, index, operation }) {
   const entries = [];
   for (const id of operation.ids) {
     source(index, id);
-    const value = currentValue(next, index, id, { key: operation.binding, allowHidden: operation.action === "unpin" });
+    const value = selectedValue(next, index, operation, id, { allowHidden: operation.action === "unpin" });
     if (operation.action === "pin") {
       if (operation.kind === "skill" && (value.head.field !== "content" || value.key !== value.viewKey || value.message?.role !== "toolResult" || value.message.toolName !== "read" || value.nativeId !== id || value.head.readStatus?.sourceId !== id || value.head.readStatus?.status !== "complete" || value.head.readStatus.fullSkillFile !== true || value.head.readStatus.payloadVersion !== value.head.version)) fail("Skill activation requires the exact original payload of a successful, complete native Skill-file read; loaded, copied, failed, truncated, or derived content is not enough.");
       const scopes = ["root", ...next.frames.map((frame) => frame.id)];
       if (scopes.indexOf(scope) < scopes.indexOf(value.key.split("/")[0])) fail("A local value cannot outlive its binding; explicitly export it before pinning it in a parent scope.");
       const head = adoptValue(next, value);
       if (operation.kind !== undefined) head.kind = operation.kind;
-      if (operation.caveats !== undefined) head.caveats = operation.caveats;
+      if (operation.caveats !== undefined) head.caveats = [...new Set([...head.caveats, ...operation.caveats])];
       // Render a qualified view, retaining the immutable raw source/body version.
       // This gives outgoing requests a complete source/version/caveat envelope;
       // it does not claim a new observation or rewrite the original Pi record.
@@ -426,7 +443,7 @@ function planEdits({ next, index, operation, boundary }) {
   }
   const selected = operation.ids.map((id) => {
     source(index, id);
-    const value = currentValue(next, index, id, { key: operation.binding });
+    const value = selectedValue(next, index, operation, id);
     assertWritableValue(next, value);
     return value;
   });
@@ -457,11 +474,14 @@ function sourceDataDraft(state, operation, selected, action, number = 0, owner =
   const content = dataBlocks(selected.content);
   if (!content.length) fail("Selection has no displayable source data; select a text or image part.");
   const id = `${operation.id}:${action}:${number}`;
+  const authored = ["agent-memory", "agent-derived"].includes(selected.authorship ?? selected.head?.origin?.authorship);
+  const selections = selected.selections ?? selected.head?.origin?.selections;
+  const binding = selected.binding ?? selected.key;
   const head = {
     entryId: id, field: "snapshot", version: contentVersion(content), kind: "memory", readOnly: false, rendered: true, handling: "active",
     caveats: [...selected.caveats], sources: [...selected.provenance],
     ...(selected.readStatus ? { readStatus: { ...structuredClone(selected.readStatus), fullSkillFile: selected.readStatus.fullSkillFile === true && !selected.range && contentVersion(content) === selected.readStatus.payloadVersion } } : {}),
-    origin: { id: selected.id, version: selected.version, range: selected.range ?? null },
+    origin: { id: selected.id, version: selected.version, range: selected.range ?? null, ...(authored ? { authorship: "agent-memory" } : {}), ...(selections ? { selections } : {}), ...(binding ? { ref: contextRef({ binding, version: selected.version }) } : {}) },
   };
   const draft = valueMessage({ id, key: `${owner}/${id}`, head }, content);
   Object.assign(draft.details, { action, derived: true, referenceId: id, origin: head.origin });
@@ -615,7 +635,7 @@ function planMove({ next, index, operation, boundary, moveComparison }) {
   if (operation.range) {
     if (operation.ids.length !== 1 || operation.selectedRange === undefined || operation.remaining === undefined) fail("Selected-range move requires a freshly verified source range.");
     const id = operation.ids[0];
-    const value = currentValue(next, index, id, { key: operation.binding });
+    const value = selectedValue(next, index, operation, id);
     assertWritableValue(next, value);
     ensureVersion(operation.version);
     if (value.version !== operation.version) fail(`Source ${id} changed since selection.`);
@@ -630,7 +650,7 @@ function planMove({ next, index, operation, boundary, moveComparison }) {
     const verifiedCut = cutTextRange(value.content, operation.range);
     if (contentVersion(verifiedCut.selected) !== contentVersion(operation.selectedRange) || (!preserveSource && contentVersion(verifiedCut.remaining) !== contentVersion(operation.remaining))) fail(`Selected range payload changed after preparation for source ${id}.`);
     const moved = sourceDataDraft(next, operation, {
-      id: value.id, version: value.version, range: operation.range, content: operation.selectedRange,
+      id: value.id, version: value.version, key: value.key, head: value.head, range: operation.range, content: operation.selectedRange,
       caveats: value.head.caveats, provenance: [...new Set([...value.head.sources, value.id])], readStatus: value.head.readStatus,
     }, "move-range");
     if (preserveSource) return [moved];
@@ -652,7 +672,7 @@ function planMove({ next, index, operation, boundary, moveComparison }) {
     if (next.pins.some((pin) => pin.id === companion.id || pin.id === operation.ids[0])) fail("Explicitly unpin both covered sources before verified read coalescing.");
   }
   for (const id of operation.ids) {
-    const value = currentValue(next, index, id, { key: operation.binding });
+    const value = selectedValue(next, index, operation, id);
     assertWritableValue(next, value);
     if (value.head.kind === "skill") fail("Active Skill content is not eligible for relocation.");
     if (value.message?.role === "toolResult") {
@@ -710,12 +730,13 @@ export function validateContextOperation({ state, branch, boundary, operation, c
 
 export function planContextBoundary({ state: input, branch, boundary, toolName = "compass_context" }) {
   const operation = operationFromBoundary(boundary, toolName);
-  if (!operation || operation.action === "search") return null;
+  if (!operation) return null;
   const next = normalizeContextState(input);
   if (operation.expectedRevision !== next.revision) fail(`Stale context revision ${operation.expectedRevision}; current revision is ${next.revision}.`);
   if ((boundary.entries ?? []).some((entry) => entry.type !== "custom")) fail("Another extension proposed context changes; run this context operation at a separate boundary.");
   const args = { next, index: sourceIndex(branch, boundary), boundary, operation, turnIds: new Set([boundary.messageEntryId, ...boundary.toolResultEntryIds]) };
   if (operation.verifiedAgainst !== undefined && operation.action !== "move") fail("verifiedAgainst is valid only for action=move.");
+  for (const selection of [...(operation.selections ?? []), ...(operation.exportSelections ?? [])]) resolveSource(args.index, next, selection, "all");
   args.moveComparison = operation.action === "move" ? verifyMoveComparison(args.index, next, operation) : null;
   let entries;
   switch (operation.action) {
@@ -723,9 +744,10 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
     case "return": entries = planReturn(args); break;
     case "transfer": {
       const transferred = planWatchTransfer(args);
-      entries = [nativeMessage(`Native watch ownership transferred; watches: ${transferred.join(", ")}; scope: ${operation.watchScope ?? operation.scope}.`, { action: "transfer", watches: transferred, scope: operation.watchScope ?? operation.scope })];
+      entries = [nativeMessage(`Native watch ownership transferred; watches: ${transferred.join(", ")}; scope: ${operation.watchScope}.`, { action: "transfer", watches: transferred, scope: operation.watchScope })];
       break;
     }
+    case "remember": entries = planRemember(args); break;
     case "pin": case "unpin": entries = planPins(args); break;
     case "replace": case "drop": entries = planEdits(args); break;
     case "load": entries = planLoad(args); break;
@@ -740,6 +762,8 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
     const movedEntry = operation.action === "move" ? args.index.byId.get(operation.ids?.[0]) : null;
     const movedRole = movedEntry ? messageOf(movedEntry)?.role : null;
     const comparison = args.moveComparison;
+    const changedKey = ["replace", "spill"].includes(operation.action) || (operation.action === "move" && operation.range) ? (operation.selections?.[0]?.binding ?? operation.binding ?? bindingKey(next, args.index, operation.ids[0])) : null;
+    const updated = changedKey && next.values[changedKey] ? contextRef({ binding: changedKey, version: next.values[changedKey].version }) : null;
     const comparisonText = comparison?.kind === "exact"
       ? ` Verified exact repeat of ${comparison.firstId} and ${comparison.secondId} at ${comparison.path}; the earlier payload was relocated and the covered companion became a qualified pointer.`
       : comparison?.kind === "subset"
@@ -752,7 +776,7 @@ export function planContextBoundary({ state: input, branch, boundary, toolName =
       : movedRole === "toolResult"
         ? " The complete verified read payload was relocated to the append end; its original call/result pair remains present with a projection pointer."
         : " The selected working value was moved to the append end.";
-    entries.push(nativeMessage(JSON.stringify({ action: operation.action, resultStatus: "applied", callId: operation.callId, revision: next.revision, ids: operation.ids ?? [], ...(references.length ? { references } : {}), ...(change || comparisonText ? { note: `${change}${comparisonText}`.trim() } : {}) }), { action: operation.action, revision: next.revision, references, ...(operation.action === "move" ? { sourceIds: [...(operation.ids ?? [])], range: operation.range ?? null, rawExchangePreserved: movedRole === "toolResult", rawSourcePreserved: movedRole !== "toolResult", ...(comparison ? { relocationComparison: comparison, coalescedSourceIds: [operation.verifiedAgainst.id] } : {}) } : {}) }));
+    entries.push(nativeMessage(JSON.stringify({ resultStatus: "applied", ...(updated ? { updated } : {}), ...(references.length ? { sources: references.map(contextRef) } : {}), ...(change || comparisonText ? { note: `${change}${comparisonText}`.trim() } : {}) }), { action: operation.action, callId: operation.callId, revision: next.revision, references, ...(operation.action === "move" ? { sourceIds: [...(operation.ids ?? [])], range: operation.range ?? null, rawExchangePreserved: movedRole === "toolResult", rawSourcePreserved: movedRole !== "toolResult", ...(comparison ? { relocationComparison: comparison, coalescedSourceIds: [operation.verifiedAgainst.id] } : {}) } : {}) }));
   }
   return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: ["call", "return"].includes(operation.action) && boundary.outcome === "completed" };
 }
@@ -808,10 +832,10 @@ function updateWatches(state, boundary) {
   return watches;
 }
 function planWatchTransfer({ next, operation }) {
-  const ids = operation.watchIds ?? operation.ids;
+  const ids = operation.watchIds;
   ensureIds(ids, "watch IDs");
   if (!ids.length) fail("Select one or more native watch IDs to transfer.");
-  const scope = operation.watchScope ?? operation.scope;
+  const scope = operation.watchScope;
   if (typeof scope !== "string" || !activeWatchScopes(next).has(scope)) fail(`Watch transfer scope ${scope || ""} is not active.`);
   const current = next.frames.at(-1)?.id ?? "root";
   for (const id of ids) {
@@ -865,7 +889,7 @@ export function releaseWatchMessages(input, text) {
 export function pinnedContextOverlay(branch, state, messages = [], goalVersion) {
   const normalized = retentionForGoal(state, goalVersion);
   if (!normalized.pins.length) return [];
-  const index = { byId: new Map(branch.map((entry) => [entry.id, entry])) };
+  const index = { byId: sourceEntries(branch) };
   const present = new Set(messages.filter((message) => message.role !== "system" && message.content !== undefined).map((message) => contentVersion(message.content)));
   const seen = new Set();
   const overlays = [];
@@ -931,7 +955,8 @@ export function planObservationBoundary({ state: input, branch, boundary, goalVe
 /** Materialize the same qualified snapshots at an existing native boundary, without another request. */
 export function planRetentionBoundary({ state: input, branch, boundary }) {
   const next = normalizeContextState(input);
-  const overlays = pinnedContextOverlay(branch, next, boundary.context.contextMessages);
+  const pendingSources = (boundary.entries ?? []).filter((entry) => entry.type === "custom_message" && entry.customType === VALUE_MESSAGE_TYPE && typeof entry.details?.referenceId === "string").map((entry) => ({ ...entry, id: entry.details.referenceId }));
+  const overlays = pinnedContextOverlay([...branch, ...pendingSources], next, boundary.context.contextMessages);
   if (!overlays.length) return null;
   const entries = overlays.map(({ role: _role, timestamp: _timestamp, ...message }) => ({ type: "custom_message", ...message }));
   next.revision += 1;
@@ -943,14 +968,10 @@ export function planRetentionBoundary({ state: input, branch, boundary }) {
 /** On-demand lexical recovery; no cross-session store or sibling-branch traversal. */
 export function searchContext(branch, boundary, state, options = {}) {
   const index = sourceIndex(branch, boundary);
-  const scope = options.sourceScope ?? options.scope ?? "active";
+  const scope = options.sourceScope ?? "active";
   const result = searchSources(index, state, { ...options, scope });
-  const repetition = options.compare === undefined ? undefined : analyzeRepeatedSelections(index, state, options.compare, scope);
-  const ranked = options.rankedSources === undefined ? undefined : rankVerifiedSources(index, state, options.rankedSources, scope);
   return {
     revision: state.revision, frame: state.frames.at(-1)?.id ?? "root", ...result,
-    ...(repetition ? { repetition } : {}),
-    ...(ranked ? { ranked } : {}),
     hits: result.hits.map((hit) => ({ ...hit, kind: state.values[hit.binding]?.kind ?? hit.kind ?? (hit.role === "user" ? "human" : "working"), pinned: state.pins.some((pin) => pin.key === hit.binding) })),
   };
 }
