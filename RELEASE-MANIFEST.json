@@ -2,10 +2,11 @@
   "name": "pi-compass-v2",
   "version": "0.10.0",
   "goalRunSchemaVersion": 8,
+  "runtimeGuardSchemaVersion": 1,
   "minimumPiVersion": "1.5.2",
   "testedPiRuntime": "Pi 1.5.2 installed projection/runner/import checks; not live provider acceptance",
   "piSubagentsPinned": "0.88.1",
-  "implementationCommit": "e4461fc",
+  "implementationCommit": "7482d91",
   "validationLog": "docs/architecture-v0.10.0.md#final-local-evidence",
   "liveEvidence": "No live Pi/provider acceptance for this candidate. Historical release evidence does not validate the current implementation.",
   "releaseCaveats": [
@@ -13,6 +14,7 @@
     "Recursive child Compass is unsupported/fail-closed under the inspected launch contract",
     "Subset relocation without shared native file revision remains unknown; semantic selection is Agent-owned, not a runtime semantic score",
     "Race-safe artifact spill/reload requires Linux /proc/self/fd; filesystem effects are not rolled back",
-    "Human-only live Pi/provider acceptance, actual token/cache behavior, natural provider fallback and parent-only cost comparison are not established"
+    "Human-only live Pi/provider acceptance, actual token/cache behavior, natural provider fallback and parent-only cost comparison are not established",
+    "Runtime guards check native tool_call observations, not later plugin mutations, independent child processes or stateful device cooldowns"
   ]
 }

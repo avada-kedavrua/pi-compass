@@ -184,13 +184,14 @@ Exit: unauthorized exploration and premature cancellation are rejected; accepted
 
 ## Final local evidence
 
-Implementation `e4461fc` ([release identity](../RELEASE-MANIFEST.json)), including semantic Goal foundation `63a14ff` and field-use corrections. The [field audit](agent-usage-audit-v0.10.0.md) records the frozen input/hash, observed failures, T1–T5 fixes and explicitly deferred work. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v4 reject unsupported snapshots without migration/reset; native raw history is unchanged.
+Implementation `7482d91` ([release identity](../RELEASE-MANIFEST.json)), including semantic Goal foundation `63a14ff` and field-use corrections. The [field audit](agent-usage-audit-v0.10.0.md) records the frozen input/hash, observed failures, T1–T5 fixes and explicitly deferred work. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v4 reject unsupported snapshots without migration/reset; native raw history is unchanged.
 
 | Check | Observed result |
 |---|---:|
-| `npm test` | 261/261, 0 skipped; 3.791 s |
-| `npm run test:core` | 82/82; 0.083 s |
-| `npm run test:non-extension` | 111/111; 0.232 s |
+| `npm test` | 275/275, 0 skipped; 4.091 s |
+| `npm run test:core` | 82/82; 0.079 s |
+| `npm run test:non-extension` | 111/111; 0.233 s |
+| `npm run test:guards` | 14/14; 0.874 s |
 | `npm run preflight` / `node scripts/preflight.mjs --static-only` | PASS; expected source/target overlap warning |
 | `node scripts/check-subagents-contract.mjs` | 36/36 against installed pi-subagents 0.88.1 |
 | Context/retention/artifact regressions | Included in full suite; installed projection/runner adapters |
@@ -207,7 +208,9 @@ Field-use repair independently re-reviewed the result/context/search/acceptance 
 
 The follow-up Agent-contract review separated query callability from native model-only mutations, checking the installed dispatcher/loadout contracts rather than retaining a duplicate nested-call hook. Root-object schemas enforce action-specific fields; native diagnostics identify the chosen action. Full-suite content-only checks preserve passing-route caveats/evidence refs, complete dispatch JSON, artifacts/images and canonical provenance. Base mutation metadata no longer repeats the Agent payload; native operation ownership stays intact. Independent bounded re-reviews found no further actionable issues in these changes. Schema size is an explicit tradeoff, not a provider-token saving claim.
 
-A subsequent legacy-feedback check reproduced a missing qualifier in full Goal details: compact state exposed pending native-input review, while full details required inferring it from IDs. The detail response now exposes the same input.id/reviewed signal; the existing Human-reaffirmation regression covers false → true without treating semantic correctness as proven. The [runtime-guard assessment](runtime-guards-design.md) is a proposal only, not an enabled capability or native integration claim.
+A subsequent legacy-feedback check reproduced a missing qualifier in full Goal details: compact state exposed pending native-input review, while full details required inferring it from IDs. The detail response now exposes the same input.id/reviewed signal; the existing Human-reaffirmation regression covers false → true without treating semantic correctness as proven. The subsequent [runtime-guard kernel](runtime-guards-design.md) is implemented under the explicitly Human-approved native tool_call observation boundary; definitions are not automatically enabled.
+
+Runtime guard verification uses actual SQLite/public sandbox/installed ExtensionRunner with temporary profiles. Independent review found and cleared cancellation/precommit, nested error notice, projection cursor, singleflight initialization, prototype-safe projection, idle-worker admission and revision/effect aggregation bugs; regressions cover each meaningful path without enabling Human profile rules. The scope revision hot path does not run a model; matching checks use fresh VMs inside one lazy worker. The documented JSON example was schema-validated, registered and triggered in a disposable fixture. Node 22.19.0 is the declared dependency minimum; actual local execution used Node 22.22.1. GoalRun v8/context v4 remain unchanged and runtime guard snapshots are v1 current-only.
 
 Native API/installed projection/runner checks do not establish a real AgentSession/provider cycle. See [measurements](./measurements-v0.10.0.md) for bounded local CPU/memory/draft/request-size data and [handoff](../handoff.md) for Human acceptance and feedback. No provider/cache/token or semantic-quality improvement is claimed from these checks.
 
