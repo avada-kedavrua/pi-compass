@@ -5,7 +5,7 @@
   "minimumPiVersion": "1.5.2",
   "testedPiRuntime": "Pi 1.5.2 installed projection/runner/import checks; not live provider acceptance",
   "piSubagentsPinned": "0.88.1",
-  "implementationCommit": "4dc29d7",
+  "implementationCommit": "7aa6105",
   "validationLog": "docs/architecture-v0.10.0.md#final-local-evidence",
   "liveEvidence": "No live Pi/provider acceptance for this candidate. Historical release evidence does not validate the current implementation.",
   "releaseCaveats": [
