@@ -96,7 +96,8 @@ test("derived writes and exports retain structured caveats and provenance", () =
   applyOperation(manager, { action: "return", exportIds: [id] });
   const hit = search(manager, id);
   assert.deepEqual(hit.caveats, ["Local evidence only; no provider acceptance."]);
-  assert.deepEqual(hit.sources, [id]);
+  assert.deepEqual(hit.provenance, [id]);
+  assert.equal(hit.sources, undefined, "search has one provenance field, not a duplicate alias");
   const exported = manager.getBranch().findLast((entry) => entry.type === "custom_message" && entry.details?.action === "export");
   assert.deepEqual(exported.details.caveats, hit.caveats);
   assert.match(JSON.stringify(exported.content), /Local evidence only; no provider acceptance/);

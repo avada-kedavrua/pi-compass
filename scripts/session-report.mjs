@@ -193,7 +193,8 @@ export async function analyzeSession(file) {
         addCount(summary.topLevelTools, name);
         if (name === "codemode") summary.codemodeCalls += 1;
         if (name.startsWith("compass_")) summary.compassTopLevelCalls += 1;
-        if (name === "compass_context") addCount(summary.context.callsByAction, item.arguments?.action ?? "unknown");
+        if (name === "compass_context_search") addCount(summary.context.callsByAction, "search");
+        if (name === "compass_context") addCount(summary.context.callsByAction, item.arguments?.operation?.action ?? item.arguments?.action ?? "unknown");
       }
     }
     if (message.role !== "toolResult") continue;
@@ -223,7 +224,8 @@ export async function analyzeSession(file) {
       summary.nestedToolCalls += 1;
       addCount(summary.nestedTools, nestedName);
       if (nestedName.startsWith("compass_")) summary.compassNestedCalls += 1;
-      if (nestedName === "compass_context") addCount(summary.context.callsByAction, call.arguments?.action ?? "unknown");
+      if (nestedName === "compass_context_search") addCount(summary.context.callsByAction, "search");
+      if (nestedName === "compass_context") addCount(summary.context.callsByAction, call.arguments?.operation?.action ?? call.arguments?.action ?? "unknown");
       if (String(call?.status ?? "").toLowerCase() === "error" || call?.isError === true) {
         summary.nestedErrors += 1;
         addCount(summary.nestedErrorsByTool, nestedName);

@@ -4,6 +4,7 @@ import { executionDriftReason } from "./write-scope.mjs";
 import { questionnaireFailureResultPatch } from "./questionnaire-integration.mjs";
 import { latestHumanSource, validateGoalSources } from "./goal-sources.mjs";
 import { agentResult } from "./compass-result.mjs";
+import { contextSearchSchema, contextToolSchema } from "./context-tool-schema.mjs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -92,6 +93,7 @@ import {
 const STATE_ENTRY_TYPE = "pi-compass-v2.goalrun";
 const ANCHOR_MESSAGE_TYPE = "pi-compass-v2.goalrun-anchor";
 const TOOL_PREFIX = "compass_";
+const CORE_TOOL_NAMES = ["compass_goal", "compass_state", "compass_context_search", "compass_context"];
 const PACKAGE_VERSION = (() => {
   try { return JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version ?? null; }
   catch { return null; }
@@ -242,14 +244,11 @@ function approvalReceipt() {
 function stateResult(data: Record<string, unknown>) {
   const receipt = { ...data, cursor: stateCursor(state, contextState.revision) };
   const { unchanged, ...payload } = receipt;
-  return agentResult({ resultStatus: unchanged === true ? "unchanged" : "applied", ...payload }, { ...receipt, stateRevision: state.stateRevision });
+  return agentResult({ resultStatus: unchanged === true ? "unchanged" : "applied", ...payload }, { cursor: receipt.cursor, stateRevision: state.stateRevision });
 }
 function planResult(data: Record<string, unknown>) {
   const request = state.plan.approvalRequest;
   return stateResult({ ...data, ...(data.unchanged !== true && !dagApprovalStatus(state).approved && request ? { approvalRequest: { id: request.id, questionnaire: request.questionnaire }, next: "Pass approvalRequest.questionnaire unchanged to ask_user_question({questions:[questionnaire]})." } : {}) });
-}
-function readResult(data: unknown, details: Record<string, unknown> = {}) {
-  return agentResult(typeof data === "string" ? { ...details, text: data } : data, details);
 }
 function sameIds(left: any[], right: any[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
@@ -1009,8 +1008,11 @@ async function handleCompassToolResult(pi: any, event: any, ctx: any) {
       : typeof event?.content === "string" && event.content
         ? [{ type: "text", text: event.content }]
         : [];
-    content.push({ type: "text", text: summary });
-    return { content, details };
+    // These owned results are object JSON. Appending prose made Code Mode's
+    // concatenated text unparseable as soon as automatic dispatch was active.
+    const receipt = JSON.parse(content[0]?.text ?? "{}");
+    if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)) throw new Error("Compass dispatch requires an object JSON receipt.");
+    return { content: [{ type: "text", text: JSON.stringify({ ...receipt, dispatch: summary }) }, ...content.slice(1)], details };
   });
 }
 
@@ -1153,7 +1155,7 @@ function registerGoalTool(pi: any) {
           afterMutation(pi, contextCwd(ctx));
         }
         return stateResult({
-          mutation: "goal_set", unchanged: !result.changed, goalVersion: state.goal.version, sourceIds: state.goal.sourceIds, ...(result.replaced ? { reset: priorWork } : {}),
+          unchanged: !result.changed, goalVersion: state.goal.version, sourceIds: state.goal.sourceIds, ...(result.replaced ? { reset: priorWork } : {}),
         });
       });
     },
@@ -1186,7 +1188,7 @@ function registerStateSnapshotTool(pi: any) {
           snapshot.delta.omitted = (snapshot.delta.omitted ?? 0) + snapshot.delta.events.length - params.maxEvents;
           snapshot.delta.events = snapshot.delta.events.slice(-params.maxEvents);
         }
-        return readResult(snapshot, { cursor: snapshot.cursor, unchanged: snapshot.unchanged === true, stateRevision: state.stateRevision });
+        return agentResult(snapshot, { cursor: snapshot.cursor, unchanged: snapshot.unchanged === true, stateRevision: state.stateRevision });
       });
     },
   });
@@ -1218,51 +1220,27 @@ function restoreContext(ctx: any) {
     throw error;
   }
 }
-function contextOperationSchema() {
-  const sourceId = Type.String({ minLength: 1, maxLength: 64, description: "Stable source entry ID returned by compass_context search; never use a message index." });
-  const version = Type.String({ pattern: "^[a-f0-9]{24}$", maxLength: 24, description: "Value version returned by search or a mutation receipt; edits fail closed if it changed." });
-  const binding = Type.String({ maxLength: 129, description: "Optional exact scoped binding from search; defaults to the current lexical binding." });
-  const range = Type.Object({ part: Type.Optional(Type.Integer({ minimum: 0 })), startLine: Type.Optional(Type.Integer({ minimum: 1 })), endLine: Type.Optional(Type.Integer({ minimum: 1 })) }, { additionalProperties: false, description: "Exact native part/line selection bound to the full source version. Images support part selection without line bounds." });
-  const selection = Type.Object({ id: sourceId, version, binding: Type.Optional(binding), range: Type.Optional(range) }, { additionalProperties: false });
-  return Type.Object({
-    action: Type.String({ enum: ["call", "return", "search", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"], description: "Required fields: call→task (capture optional); return→none (result/exportIds optional); pin/unpin→ids; mark→ids,version,handling,reason; load/move→ids,version; replace→ids,version,content; drop→ids,versions; spill→ids,version,path,purpose; transfer→watchIds,watchScope. All mutations also require expectedRevision." }),
-    expectedRevision: Type.Optional(Type.Integer({ minimum: 0, description: "Required for mutations; optional for search. Use revision from a search/receipt or the C segment of compass_state.cursor." })),
-    task: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "Required for call: the local procedure and objective." })),
-    capture: Type.Optional(Type.Array(Type.Object({ id: sourceId, mode: Type.String({ enum: ["ref", "copy"] }), version, binding: Type.Optional(binding) }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true })),
-    exportIds: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Sources explicitly returned to the parent frame; default none." })),
-    ids: Type.Optional(Type.Array(sourceId, { maxItems: 64, uniqueItems: true, description: "Exact source IDs for retrieval, retention, movement, spill, edits, or native watch transfer." })),
-    watchIds: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 8, uniqueItems: true, description: "Exact native pi-await watch IDs for action=transfer; use the native arm identity, not a display index." })),
-    watchScope: Type.Optional(Type.String({ maxLength: 64, description: "Destination frame scope for action=transfer; root or an active frame ID." })),
-
-    version: Type.Optional(version),
-    binding: Type.Optional(binding),
-    sourceScope: Type.Optional(Type.String({ enum: ["active", "parent", "history", "all"], description: "Source recovery scope; active branch only, never sibling sessions." })),
-    path: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Explicit project-relative artifact path for spill; no overwrite or symlink traversal." })),
-    handling: Type.Optional(Type.String({ enum: ["active", "handled", "retired"] })),
-    reason: Type.Optional(Type.String({ minLength: 1, maxLength: 600, description: "Handling/retirement rationale; retired values are unpinned." })),
-    lifetime: Type.Optional(Type.String({ enum: ["goal", "session"], description: "Retention lifetime, default current Goal. Frame ownership still ends on return." })),
-    purpose: Type.Optional(Type.String({ minLength: 1, maxLength: 1000, description: "Why this spill artifact is needed." })),
-    range: Type.Optional(range),
-    verifiedAgainst: Type.Optional(Type.Object({ id: sourceId, version, binding: Type.Optional(binding) }, { additionalProperties: false, description: "Complete later read payload used to verify coalescing; a selected range cannot authorize removing an uncovered remainder." })),
-    compare: Type.Optional(Type.Array(selection, { maxItems: 16, description: "For search: compare persisted successful read calls/ranges; changed or unknown file revision stays qualified. Similarity is advisory, never an edit." })),
-    rankedSources: Type.Optional(Type.Array(selection, { maxItems: 16, description: "For search: Agent-selected source ordering; runtime verifies IDs, versions and ranges, not semantic scores." })),
-    scope: Type.Optional(Type.String({ maxLength: 64, description: "Pin ownership, or transfer destination: root or an active frame ID; defaults to the current frame for pins." })),
-
-    kind: Type.Optional(Type.String({ enum: ["working", "memory", "human", "skill"], description: "Value classification, not proof or an authorization grant." })),
-    caveats: Type.Optional(Type.Array(Type.String({ maxLength: 600 }), { maxItems: 12, description: "Material qualifications; omitted writes preserve existing caveats." })),
-    sources: Type.Optional(Type.Array(sourceId, { maxItems: 32, uniqueItems: true, description: "Existing branch-local evidence source IDs for derived replacements." })),
-    versions: Type.Optional(Type.Array(Type.Object({ id: sourceId, version }, { additionalProperties: false }), { maxItems: 64, uniqueItems: true, description: "Required for action=drop: the observed version of every selected source." })),
-    content: Type.Optional(Type.String({ minLength: 1, maxLength: 8000, description: "Replacement content for action=replace." })),
-    result: Type.Optional(Type.String({ maxLength: 8000, description: "Optional bounded return value for action=return." })),
-    query: Type.Optional(Type.String({ maxLength: 400, description: "Whitespace-separated literal keywords. Default matches any keyword and ranks by matched count; no embeddings or semantic inference." })),
-    match: Type.Optional(Type.String({ enum: ["any", "all"], description: "Search only: any (default) retrieves keyword alternatives; all requires every term in one text block." })),
-    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
-  }, { additionalProperties: false });
+function registerContextSearchTool(pi: any) {
+  return registerOnce(pi, "compass_context_search", {
+    label: "Recover Context Sources",
+    description: "Read-only lexical recovery of current, parent or branch-history data. Returns revision, source IDs/bindings/versions, bounded snippets and qualifications. Keywords match any term by default; use match=all for conjunction. compare checks native read lineage; rankedSources preserves your verified selection, not a runtime semantic score. No revision lookup is needed first.",
+    promptSnippet: "Recover only missing context; read-only search may batch in Code Mode. Use returned versions/revision for a separate compass_context mutation.",
+    parameters: contextSearchSchema(),
+    async execute(_id: string, params: any, ...rest: any[]) {
+      return serialized(async () => {
+        const ctx = getContext(rest);
+        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
+        restoreContext(ctx);
+        return agentResult(searchContext(ctx?.sessionManager?.getBranch?.() ?? [], { context: contextBoundaryPreview(ctx) }, contextState, params));
+      });
+    },
+  });
 }
 function registerContextTool(pi: any) {
   return registerOnce(pi, "compass_context", {
-    label: "Context Frames",
-    description: "Retain or recover source data and isolate same-session attention. search returns IDs/bindings/versions; pin retains a selected value, mark tracks handling. call(task,capture) hides other context; return restores the parent and exports only explicit outputs. load copies data; move relocates eligible values; replace/drop edit only eligible projection values; spill writes a verified project artifact. Search can run in Code Mode. Mutations must be direct standalone calls; a queued receipt is followed by a native applied/rejected receipt with the resulting revision. Raw Pi history and filesystem effects are not rolled back.",
+    label: "Context Values and Frames",
+    exposure: "model-only",
+    description: "Use {operation:{action,...}} to retain data or isolate same-session attention. Recover IDs/bindings/versions with compass_context_search. pin retains a selected value, mark tracks handling. call(task,capture) hides other context; return restores the parent and exports only explicit outputs. load copies data; move relocates eligible values; replace/drop edit only eligible projection values; spill writes a verified project artifact. This tool is model-only: mutations must be direct standalone calls; a queued receipt is followed by a native applied/rejected receipt with the resulting revision. Raw Pi history and filesystem effects are not rolled back.",
     promptSnippet: "Retain decisions/evidence with search and pin; use call/return for same-session attention isolation. Mutations must be direct standalone calls; use their native terminal receipt, not polling.",
     promptGuidelines: [
       "Frames/edits change attention, not Pi's append-only transcript or environment. Spill writes an explicit artifact; no filesystem rollback occurs.",
@@ -1271,22 +1249,19 @@ function registerContextTool(pi: any) {
       "A ref is shared and survives interruption; a copy is private and forks on write. Human originals and executed calls are read-only; explicit private copies are data.",
       "A frame cannot return while it owns live pi-await watches; use native unwatch, or action=transfer to move an owned watch to an active parent/root scope first. Repeating wakes remain live and do not complete ownership.",
     ],
-    parameters: contextOperationSchema(),
-    async execute(toolCallId: string, params: any, ...rest: any[]) {
+    parameters: contextToolSchema(),
+    async execute(toolCallId: string, args: any, ...rest: any[]) {
       return serialized(async () => {
+        const params = args?.operation;
+        if (!params || typeof params !== "object" || Array.isArray(params)) throw new Error("Supply {operation:{action,...}}. No context changed.");
         const ctx = getContext(rest);
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         restoreContext(ctx);
         const action = String(params?.action ?? "");
-        if ((action !== "search" || params?.expectedRevision !== undefined) && (!Number.isInteger(params?.expectedRevision) || params.expectedRevision !== contextState.revision)) {
+        if (!Number.isInteger(params?.expectedRevision) || params.expectedRevision !== contextState.revision) {
           throw new Error(`Stale context revision ${params?.expectedRevision}; current revision is ${contextState.revision}. No context changed.`);
         }
-        if (action === "search") {
-          const branch = ctx?.sessionManager?.getBranch?.() ?? [];
-          const result = searchContext(branch, { context: contextBoundaryPreview(ctx) }, contextState, params);
-          return readResult(result, { contextRevision: contextState.revision });
-        }
-        if (!["call", "return", "search", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"].includes(action)) {
+        if (!["call", "return", "pin", "unpin", "transfer", "replace", "drop", "load", "move", "spill", "mark"].includes(action)) {
           throw new Error(`Unknown context action ${action}. No context changed.`);
         }
         const prepared = await prepareContextOperation({ state: contextState, branch: ctx?.sessionManager?.getBranch?.() ?? [], boundary: { context: contextBoundaryPreview(ctx) }, operation: { ...params, callId: toolCallId, goalVersion: state.goal.version }, projectRoot: contextCwd(ctx) });
@@ -1298,11 +1273,7 @@ function registerContextTool(pi: any) {
           throw error;
         }
         const receipt = {
-          action,
-          stateChanged: false,
-          contextRevision: contextState.revision,
-          ...(Array.isArray(operation.ids) && operation.ids.length ? { ids: operation.ids } : {}),
-          ...(typeof operation.scope === "string" ? { scope: operation.scope } : {}),
+          revision: contextState.revision,
           ...(operation.artifact?.path ? { artifactPath: operation.artifact.path } : {}),
           resultStatus: "queued",
           callId: toolCallId,
@@ -1376,7 +1347,7 @@ function ensureLoader(pi: any): string {
         // boundary exposes the union of loaded capabilities and current schemas.
         loadoutRefreshPending = true;
         persistState(pi);
-        return stateResult({ mutation: "open", added });
+        return stateResult({ added });
       });
     },
   });
@@ -1483,7 +1454,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const action = params.action;
           let result: any;
           if (action === "status") {
-            return readResult(routeSetStatus(state));
+            return agentResult(routeSetStatus(state));
           }
           if (action === "create") result = noMutation(() => createRouteSet(state, params));
           else if (action === "select") result = noMutation(() => selectRoute(state, params));
@@ -1494,7 +1465,23 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           else throw new Error(`Unknown RouteSet action ${action}. No state changed.`);
           state = result.state;
           afterMutation(pi, contextCwd(ctx));
-          return stateResult({ mutation: `route_${action}`, routeSet: routeSetStatus(state), ...(action === "create" || action === "propose_exploration" ? { next: "Pass routeSet.selectionRequest.questionnaire unchanged as ask_user_question({questions:[questionnaire]}). Native entry/call identity supplies authorization; do not reword or self-select." } : {}) });
+          const routeSet = state.routeSet;
+          const question = action === "create" || action === "propose_exploration";
+          const run = result.run;
+          return stateResult({ routeSet: {
+            id: routeSet.id, stateVersion: routeSet.stateVersion,
+            selectedRouteId: routeSet.selectedRouteId, winningRouteId: routeSet.winningRouteId,
+            ...(result.exploration ? { exploration: result.exploration } : {}),
+            ...(result.route ? { acceptanceGate: result.route.acceptanceGate, caveats: result.route.caveats, evidenceRefs: result.route.evidenceRefs } : {}),
+            ...(run ? { run: { runId: run.runId, routeId: run.routeId, correlationId: run.correlationId, status: run.status,
+              ...(run.result ? { acceptanceGate: run.result.acceptanceGate,
+                unresolvedCriteria: run.result.criteria.filter((criterion: { status: string }) => criterion.status !== "pass").map((criterion: { id: string; status: string }) => ({ id: criterion.id, status: criterion.status })),
+                caveats: run.result.caveats, unresolvedCaveats: run.result.unresolvedCaveats,
+              } : {}),
+              ...(run.cancellation ? { cancellation: { phase: run.cancellation.phase, requestId: run.cancellation.requestId, terminalStatus: run.cancellation.terminalStatus } } : {}),
+            } } : {}),
+            ...(question ? { selectionRequest: { id: routeSet.selectionRequest.id, status: routeSet.selectionRequest.status, questionnaire: routeSet.selectionRequest.questionnaire } } : {}),
+          }, ...(question ? { next: "Pass routeSet.selectionRequest.questionnaire unchanged to ask_user_question({questions:[questionnaire]})." } : {}) });
         });
       },
     }));
@@ -1521,7 +1508,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             afterMutation(pi, contextCwd(ctx));
             const dependencyReady = readyTasks(state.plan).map((task: any) => task.id);
             const ready = dagApprovalStatus(state).approved ? dependencyReady : [];
-            return planResult({ mutation: "plan_create", revision: state.plan.revision, ready, dependencyReady, approval: approvalReceipt() });
+            return planResult({ revision: state.plan.revision, ready, dependencyReady, approval: approvalReceipt() });
           });
         },
       }));
@@ -1542,7 +1529,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           state = result.state;
           afterMutation(pi, contextCwd(ctx));
           return stateResult({
-            mutation: "dag_approval_request",
+
             approvalRequest: { id: result.request.id, questionnaire: result.request.questionnaire },
           });
         });
@@ -1565,7 +1552,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         const approved = dagApprovalStatus(state).approved;
         const ready = approved ? dependencyReady : [];
         const blocked = plan.tasks.filter((task: any) => task.status === "blocked").map((task: any) => task.id);
-        return readResult({
+        return agentResult({
           revision: plan.revision ?? 0,
           stateVersion: plan.stateVersion ?? 0,
           total: plan.tasks.length,
@@ -1614,7 +1601,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const readyNow = dagApprovalStatus(state).approved ? dependencyReady : [];
           const blockedNow = state.plan.tasks.filter((task: any) => task.status === "blocked").map((task: any) => task.id);
           if (changed) afterMutation(pi, contextCwd(ctx));
-          return planResult({ mutation: "plan_revise", unchanged: !changed, revision: state.plan.revision, stateVersion: state.plan.stateVersion, ready: readyNow, dependencyReady, approval: approvalReceipt(), invalidated: reset, invalidatedDetails, blocked: blockedNow });
+          return planResult({ unchanged: !changed, revision: state.plan.revision, stateVersion: state.plan.stateVersion, ready: readyNow, dependencyReady, approval: approvalReceipt(), invalidated: reset, invalidatedDetails, blocked: blockedNow });
         });
       },
     }));
@@ -1657,7 +1644,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             state = result.state;
             afterMutation(pi, contextCwd(ctx));
             const readyNow = readyTasks(state.plan).map((task: any) => task.id);
-            return stateResult({ mutation: "task_assess", taskId: params.assessment.taskId, assessment: result.assessment, ready: readyNow });
+            return stateResult({ taskId: params.assessment.taskId, assessment: result.assessment, ready: readyNow });
           } else if (["done", "block", "reopen"].includes(action)) {
             if (!tasks.length || hasTaskIds || !Array.isArray(params?.tasks)) throw new Error(`action="${action}" requires tasks and forbids taskIds. No state changed.`);
             for (const [index, item] of tasks.entries()) {
@@ -1683,15 +1670,15 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const readyNow = readyTasks(state.plan).map((task: any) => task.id);
           const remaining = state.plan.tasks.filter((task: any) => task.status !== "done").length;
           afterMutation(pi, contextCwd(ctx));
-          if (action === "start") return stateResult({ mutation: "task_start", affected: result.affected, ready: readyNow });
+          if (action === "start") return stateResult({ affected: result.affected, ready: readyNow });
           if (action === "done") {
             const direct = result.completedWithoutStart ?? [];
-            return stateResult({ mutation: "task_done", affected: result.affected, completedWithoutStart: direct, ready: readyNow, remaining });
+            return stateResult({ affected: result.affected, completedWithoutStart: direct, ready: readyNow, remaining });
           }
-          if (action === "block") return stateResult({ mutation: "task_block", affected: result.affected, ready: readyNow });
+          if (action === "block") return stateResult({ affected: result.affected, ready: readyNow });
           const roots = tasks.map((item: any) => item.id);
           const downstream = result.affected.filter((id: string) => !roots.includes(id));
-          return stateResult({ mutation: "task_reopen", affected: result.affected, roots, downstream, ready: readyNow });
+          return stateResult({ affected: result.affected, roots, downstream, ready: readyNow });
         });
       },
     }));
@@ -1720,7 +1707,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             const execution = state.plan.execution;
             if (params.action === "status") {
               if (Object.keys(params).some((key) => key !== "action")) throw new Error('action="status" accepts no additional fields. No state changed.');
-              return readResult({ execution: execution ? clone(execution) : null });
+              return agentResult({ execution: execution ? clone(execution) : null });
             }
             if (params.action !== "resolve") throw new Error('action must be "status" or "resolve". No state changed.');
             if (!execution || execution.status !== "unknown") throw new Error("Only an unknown Subagent batch can be manually reconciled. No state changed.");
@@ -1802,7 +1789,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
             });
             afterMutation(pi, contextCwd(ctx));
             return stateResult({
-              mutation: "execution_reconcile",
+
               requestId: latest.requestId,
               taskIds: latest.taskIds,
               ready: readyTasks(state.plan).map((task: any) => task.id),
@@ -1825,7 +1812,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         activeCheck("acceptance");
         const current = (state.goal.criteria ?? []).filter((item: any) => item.goalVersion === state.goal.version);
-        return readResult({ goalVersion: state.goal.version, ...acceptanceStatus(state), independentlyVerified: false, criteria: current.map((item: any) => ({ id: item.id, text: item.text, status: item.status, ...(item.evidence ? { evidence: item.evidence } : {}) })) });
+        return agentResult({ goalVersion: state.goal.version, ...acceptanceStatus(state), independentlyVerified: false, criteria: current.map((item: any) => ({ id: item.id, text: item.text, status: item.status, ...(item.evidence ? { evidence: item.evidence } : {}) })) });
       },
     }));
     names.push(registerOnce(pi, "compass_acceptance_define", {
@@ -1841,7 +1828,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const result = noMutation(() => defineAcceptanceCriteria(state, params.criteria));
           state = result.state;
           if (result.changed) afterMutation(pi, contextCwd(ctx));
-          return stateResult({ mutation: "acceptance_define", unchanged: !result.changed, criteria: result.criteria.map((item: any) => ({ id: item.id, status: item.status })) });
+          return stateResult({ unchanged: !result.changed, criteria: result.criteria.map((item: any) => ({ id: item.id, status: item.status })) });
         });
       },
     }));
@@ -1862,7 +1849,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const result = noMutation(() => recordAcceptanceResult(state, { ...params, source: "agent_reported" }));
           state = result.state;
           if (result.changed) afterMutation(pi, contextCwd(ctx));
-          return stateResult({ mutation: "acceptance_record", unchanged: !result.changed, criterionId: params.criterionId, status: params.status, summary: acceptanceStatus(state) });
+          return stateResult({ unchanged: !result.changed, criterionId: params.criterionId, status: params.status, summary: acceptanceStatus(state) });
         });
       },
     }));
@@ -1885,11 +1872,11 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           assertCapability("issue_review");
           const result = noMutation(() => triageIssue(state, params));
           if (result.duplicate) {
-            return readResult({ duplicate: true, triageId: result.item.id, summary: result.summary, issueTruncated: result.item.issueTruncated === true });
+            return stateResult({ unchanged: true, triageId: result.item.id, summary: result.summary, ...(result.item.issueTruncated ? { issueTruncated: true } : {}) });
           }
           state = result.state;
           afterMutation(pi, contextCwd(ctx));
-          return readResult(result.review, { triageId: result.item.id, evidenceRefs: result.item.evidenceRefs, basedOnEventId: result.item.basedOnEventId, issueTruncated: result.issueTruncated === true });
+          return stateResult({ triageId: result.item.id, review: result.review, evidenceRefs: result.item.evidenceRefs, basedOnEventId: result.item.basedOnEventId, ...(result.issueTruncated ? { issueTruncated: true } : {}) });
         });
       },
     }));
@@ -1922,7 +1909,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           afterMutation(pi, contextCwd(ctx));
           const superseded = result.supersededDecisionIds ?? [];
           const impacted = result.impactedTaskIds ?? [];
-          return stateResult({ mutation: "decision", id: result.item.id, supersededDecisionIds: superseded, potentiallyAffectedTaskIds: impacted });
+          return stateResult({ id: result.item.id, supersededDecisionIds: superseded, potentiallyAffectedTaskIds: impacted });
         });
       },
     }));
@@ -1943,7 +1930,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
           const result = noMutation(() => recordCheckpoint(state, params));
           state = result.state;
           afterMutation(pi, contextCwd(ctx));
-          return stateResult({ mutation: "checkpoint", id: result.item.id, ref: result.item.ref || null });
+          return stateResult({ id: result.item.id, ref: result.item.ref || null });
         });
       },
     }));
@@ -1957,7 +1944,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         activeCheck("history");
         const events = buildRecentEvents(state, params.limit ?? 12);
-        return readResult({ events });
+        return agentResult({ events });
       },
     }));
     return names;
@@ -1973,7 +1960,7 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
         const ctx = getContext(rest);
         if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
         assertCapability("goal_details");
-        return readResult(buildGoalDetails(state));
+        return agentResult(buildGoalDetails(state));
       },
     }));
     return names;
@@ -2006,7 +1993,7 @@ function ensureCurrentLoadout(pi: any, ctx: any) {
   const currentLoader = ensureLoader(pi);
   const tools = registerActiveCapabilityGroups(pi);
   const activeChanged = beforeActive.join("|") !== activeCapabilities().join("|");
-  const desiredCompassNames = [...new Set(["compass_goal", "compass_state", "compass_context", currentLoader, ...tools].filter(Boolean))];
+  const desiredCompassNames = [...new Set([...CORE_TOOL_NAMES, currentLoader, ...tools].filter(Boolean))];
   const desiredSignature = loadoutSignature(activeCapabilities());
   const visibleNames = activeNames(pi);
   const visibleCompassNames = visibleNames.filter((name) => isCompassName(name));
@@ -2098,7 +2085,7 @@ function supportsSameNameSchemaReplacement(pi: any): boolean {
       label: "Internal schema replacement probe",
       description: "Internal preflight probe; never exposed to the model.",
       parameters: Type.Object({ firstProbeField: Type.String() }, { additionalProperties: false }),
-      execute: async () => readResult("hidden preflight probe"),
+      execute: async () => agentResult("hidden preflight probe"),
     });
     pi.registerTool({
       name: probeName,
@@ -2106,7 +2093,7 @@ function supportsSameNameSchemaReplacement(pi: any): boolean {
       label: "Internal schema replacement probe",
       description: "Internal preflight probe; never exposed to the model.",
       parameters: Type.Object({ replacementProbeField: Type.String() }, { additionalProperties: false }),
-      execute: async () => readResult("hidden preflight probe"),
+      execute: async () => agentResult("hidden preflight probe"),
     });
     const tool = (pi.getAllTools() ?? []).find((item: any) => item?.name === probeName);
     const schema = tool?.parameters ?? tool?.inputSchema;
@@ -2145,10 +2132,11 @@ export default function (pi: any) {
   // These small core tools work even before a semantic Goal has been set.
   registerGoalTool(pi);
   registerStateSnapshotTool(pi);
+  registerContextSearchTool(pi);
   registerContextTool(pi);
   // Before a Goal exists no capability is applicable, so the capability loader stays hidden.
   ensureLoader(pi);
-  try { setCompassLoadout(pi, ["compass_goal", "compass_state", "compass_context", loaderName].filter(Boolean)); } catch { /* preflight reports unsupported runtime */ }
+  try { setCompassLoadout(pi, [...CORE_TOOL_NAMES, loaderName].filter(Boolean)); } catch { /* preflight reports unsupported runtime */ }
 
   pi.on("session_start", async (_event: any, ctx: any) => {
     branchGeneration += 1;
@@ -2163,7 +2151,7 @@ export default function (pi: any) {
       const allowed = capabilitiesFor();
       setActiveCapabilities(activeCapabilities().filter((capability) => allowed.includes(capability)));
       const tools = registerActiveCapabilityGroups(pi);
-      setCompassLoadout(pi, ["compass_goal", "compass_state", "compass_context", currentLoader, ...tools].filter(Boolean));
+      setCompassLoadout(pi, [...CORE_TOOL_NAMES, currentLoader, ...tools].filter(Boolean));
       lastLoadoutSignature = loadoutSignature(activeCapabilities());
       loadoutRefreshPending = false;
       persistState(pi);
@@ -2344,9 +2332,6 @@ export default function (pi: any) {
         : { bound: false };
       if (routeBound.bound) state = routeBound.state;
       if (bound.bound || routeBound.bound) persistState(pi);
-    }
-    if (event?.toolName === "compass_context" && event?.parentToolCallId && event?.input?.action !== "search") {
-      return { block: true, reason: "Context mutations require a direct standalone compass_context call, not a nested Code Mode call. No context changed." };
     }
     const rawTargets = explicitWriteTargets(event);
     if (!rawTargets.length) return;

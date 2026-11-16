@@ -118,8 +118,8 @@ function* uniqueCandidates(index, state, scope, ids) {
     const request = group && rawMessage(index.byId.get(group.ids[0]));
     const native = rawMessage(entry);
     const nested = native?.nestedCalls;
-    const directSearch = native?.toolName === "compass_context" && request?.content?.some?.((part) => part.type === "toolCall" && part.name === "compass_context" && part.arguments?.action === "search");
-    const nestedSearch = native?.toolName === "codemode" && nested?.complete === true && nested.calls?.length > 0 && nested.calls.every((call) => call.name === "compass_context" && call.arguments?.action === "search");
+    const directSearch = native?.toolName === "compass_context_search" || native?.toolName === "compass_context" && request?.content?.some?.((part) => part.type === "toolCall" && part.name === "compass_context" && (part.arguments?.operation?.action ?? part.arguments?.action) === "search");
+    const nestedSearch = native?.toolName === "codemode" && nested?.complete === true && nested.calls?.length > 0 && nested.calls.every((call) => call.name === "compass_context_search" || call.name === "compass_context" && (call.arguments?.operation?.action ?? call.arguments?.action) === "search");
     if (!ids?.size && (directSearch || nestedSearch)) continue;
     const key = `${candidate.binding}:${candidate.version}`;
     if (seen.has(key)) continue;

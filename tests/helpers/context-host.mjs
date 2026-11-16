@@ -34,7 +34,7 @@ export function queueOperation(manager, parameters, options = {}) {
   const callId = options.callId ?? `context-${++nextCall}`;
   const operation = { expectedRevision: restoreContextState(manager.getBranch()).revision, ...parameters };
   const message = {
-    role: "assistant", content: [{ type: "toolCall", id: callId, name: "compass_context", arguments: operation }],
+    role: "assistant", content: [{ type: "toolCall", id: callId, name: "compass_context", arguments: { operation } }],
     api: "test", provider: "test", model: "test", usage: {}, stopReason: options.outcome === "aborted" ? "aborted" : "toolUse", timestamp: Date.now(),
   };
   const result = {

@@ -7,6 +7,8 @@ description: Use Compass for retained Goal/evidence state, same-session attentio
 
 Work normally. Compass changes retained state and future context, not Pi's raw history or filesystem. Use the smallest useful operation; no obligatory Goal, frame, DAG, review or ceremony.
 
+If Compass is absent from the available tools (check `compass_context_search` in Code Mode `ALL_TOOLS`), the Skill alone has not loaded the extension. `compass_context` is model-only and is intentionally absent from Code Mode discovery. `compass_open` cannot fix that. Human can load the local package with `pi -e /absolute/path/to/pi-compass`, or enable/trust the configured project package and `/reload`; `/compass-preflight` then reports the registry. Do not alter global settings or assume children inherit Compass.
+
 ## Goal and evidence
 
 - When Goal tracking helps, `compass_goal({expectedVersion:0,current,constraints,acceptanceCriteria?})` creates your semantic interpretation. Human sources default to the latest native input. Submit the complete constraint list; your interpretation is not Human approval.
@@ -17,12 +19,14 @@ Work normally. Compass changes retained state and future context, not Pi's raw h
 
 ## Retain or recover context
 
-1. `compass_context({action:"search",query,sourceScope?})` returns the context revision and bounded sources with exact `id`, `binding`, `version` and ranges. No prior state call is needed. Default scope is active; use parent/history/all for omitted sources. Keywords match **any** term by default and rank by matched count; use `match:"all"` for conjunction. This is literal recovery, not semantic inference. Do not slice away IDs/versions needed for the next operation.
+Read with `compass_context_search({...})`; mutate with direct `compass_context({operation:{action,...}})`. Required/allowed fields are in each schema. Model-only mutation stays available even in Code Mode-only mode; no flat mutation adapter is retained.
+
+1. `compass_context_search({query,sourceScope?})` returns the context revision and bounded sources with exact `id`, `binding`, `version` and ranges. No prior state call is needed. Default scope is active; use parent/history/all for omitted sources. Keywords match **any** term by default and rank by matched count; use `match:"all"` for conjunction. This is literal recovery, not semantic inference. Do not slice away IDs/versions needed for the next operation.
 2. Pin material instructions/evidence with `action:"pin",expectedRevision,ids`. Pins are qualified context, not extra system authority. Lifetime defaults to the current Goal, or session when no Goal exists; set session explicitly when required. Use `mark` with version, handling and reason to record active/handled/retired state. Retirement unpins; it is not deletion of raw history.
 3. `load` makes a version/range-checked data copy; `move` relocates an eligible value/range. Original Human instructions and executed calls remain immutable. `replace` edits eligible working data; `drop` needs every selected source's version and preserves complete tool exchanges.
 4. Spill only when a verified artifact is worth its filesystem and recovery cost: `spill` needs IDs/version, a new project-relative path and purpose; Compass writes/readbacks the artifact. `load` verifies its receipt. Do not prewrite the destination. Failed later commits can leave an artifact; no filesystem rollback is implied.
 
-Search may run in Code Mode. **All context mutations must be direct standalone calls**, not nested or parallel with another tool. Supply `expectedRevision` from search/receipt or the cursor's C segment. Validation errors happen before queued when possible. `queued` means no context commit yet; the native boundary then emits a correlated `applied` or `rejected` receipt with the actual revision. Use that receipt; do not poll. A boundary can still reject a queued operation if another extension changed its preconditions.
+Search may run in Code Mode. **All context mutations must be direct standalone calls**, not nested or parallel with another tool. Supply mutation `expectedRevision` from search/receipt or the cursor's C segment. Validation errors happen before queued when possible. `queued` means no context commit yet; the native boundary then emits a correlated `applied` or `rejected` receipt with the actual revision. Use that receipt; do not poll. A boundary can still reject a queued operation if another extension changed its preconditions.
 
 ## Same-session attention frame
 

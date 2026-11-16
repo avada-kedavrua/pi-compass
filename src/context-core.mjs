@@ -951,6 +951,6 @@ export function searchContext(branch, boundary, state, options = {}) {
     revision: state.revision, frame: state.frames.at(-1)?.id ?? "root", ...result,
     ...(repetition ? { repetition } : {}),
     ...(ranked ? { ranked } : {}),
-    hits: result.hits.map((hit) => ({ ...hit, sources: hit.provenance, kind: state.values[hit.binding]?.kind ?? hit.kind ?? (hit.role === "user" ? "human" : "working"), pinned: state.pins.some((pin) => pin.key === hit.binding) })),
+    hits: result.hits.map((hit) => ({ ...hit, kind: state.values[hit.binding]?.kind ?? hit.kind ?? (hit.role === "user" ? "human" : "working"), pinned: state.pins.some((pin) => pin.key === hit.binding) })),
   };
 }

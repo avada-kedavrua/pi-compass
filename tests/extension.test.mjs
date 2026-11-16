@@ -186,7 +186,7 @@ test("Human prose is observed without creating, replacing, or classifying a Goal
   const pi = fakePi();
   extensionFactory(pi);
   await pi.events.get("session_start")({}, ctx(pi));
-  assert.deepEqual(pi.activeNames().filter((name) => name.startsWith("compass_")).sort(), ["compass_context", "compass_goal", "compass_state"]);
+  assert.deepEqual(pi.activeNames().filter((name) => name.startsWith("compass_")).sort(), ["compass_context", "compass_context_search", "compass_goal", "compass_state"]);
   for (const text of ["你好", "Goal: quoted example\nAcceptance criteria:\n- Never erase data", "目标：换一个目标。一定要使用 Compass。"] ) {
     await sendHuman(pi, text);
     assert.equal(latestState(pi).goal.current, null);
@@ -315,7 +315,7 @@ test("simple Goals keep a light loadout while optional capability choice stays A
   const pi = fakePi();
   extensionFactory(pi);
   await captureGoal(pi, "Fix a typo", { planning: false });
-  assert.deepEqual(pi.activeNames().filter((name) => name.startsWith("compass_")).sort(), ["compass_context", "compass_goal", "compass_open", "compass_state"]);
+  assert.deepEqual(pi.activeNames().filter((name) => name.startsWith("compass_")).sort(), ["compass_context", "compass_context_search", "compass_goal", "compass_open", "compass_state"]);
   const available = currentTool(pi, "compass_open").parameters.properties.capabilities.items.enum;
   assert.deepEqual(available, ["planning", "routes", "acceptance", "history", "goal_details", "issue_review"]);
   for (const path of ["a.ts", "b.ts", "c.ts"]) await pi.events.get("tool_call")({ toolName: "write", input: { path } }, ctx(pi));
@@ -427,7 +427,9 @@ test("RouteSet capability exposes structured selection without creating a DAG", 
     routes: [{ routeId: "routeA", summary: "Use the existing path" }, { routeId: "routeB", summary: "Use a replacement path" }],
   }, undefined, undefined, ctx(pi));
   assert.equal(latestState(pi).plan.tasks.length, 0);
-  assert.equal(created.details.routeSet.routes.length, 2);
+  assert.equal(created.details.routeSet, undefined, "private metadata does not duplicate Agent-visible RouteSet data");
+  assert.equal(JSON.parse(created.content[0].text).routeSet.routes, undefined, "mutation receipt does not echo the submitted alternatives");
+  assert.equal(JSON.parse(created.content[0].text).mutation, undefined);
   assert.deepEqual(JSON.parse(created.content[0].text).routeSet.selectionRequest.questionnaire, latestState(pi).routeSet.selectionRequest.questionnaire);
   assert.equal(JSON.parse(created.content[0].text).questionnaire, undefined, "questionnaire is emitted once, not duplicated");
 });
@@ -459,6 +461,23 @@ test("native route questionnaire hook roundtrip selects the exact Human answer",
   } }, ctx(pi));
   assert.equal(latestState(pi).routeSet.exploration.authorized, true);
   assert.equal(latestState(pi).routeSet.exploration.budget, 2);
+  const run = { runId: "native-first", routeId: "first", baselineRef: "git:base", correlationId: "first-correlation" };
+  const registered = JSON.parse((await routeTool.execute("register", { action: "register_competitor", expectedStateVersion: latestState(pi).routeSet.stateVersion, ...run }, undefined, undefined, ctx(pi))).content[0].text);
+  assert.equal(registered.routeSet.selectionRequest, undefined, "ordinary mutations do not repeat the full questionnaire");
+  const criterionId = latestState(pi).routeSet.acceptanceCriteria[0].id;
+  const recorded = JSON.parse((await routeTool.execute("result", { action: "result", expectedStateVersion: latestState(pi).routeSet.stateVersion, ...run, criteria: [{ id: criterionId, status: "fail", evidence: "observed local failure" }], caveats: ["local replay only"], unresolvedCaveats: ["provider unchecked"] }, undefined, undefined, ctx(pi))).content[0].text);
+  assert.equal(recorded.routeSet.run.acceptanceGate, "failed");
+  assert.deepEqual(recorded.routeSet.run.unresolvedCriteria, [{ id: criterionId, status: "fail" }]);
+  assert.deepEqual(recorded.routeSet.run.caveats, ["local replay only"]);
+  assert.deepEqual(recorded.routeSet.run.unresolvedCaveats, ["provider unchecked"]);
+  assert.equal(recorded.routeSet.run.result, undefined, "submitted criterion bodies are not echoed");
+  const status = JSON.parse((await routeTool.execute("status", { action: "status" }, undefined, undefined, ctx(pi))).content[0].text);
+  assert.equal(status.competitorRuns[0].result.criteria[0].evidence, "observed local failure", "on-demand status retains full evidence");
+  await routeTool.execute("updated-result", { action: "result", expectedStateVersion: latestState(pi).routeSet.stateVersion, ...run, criteria: [{ id: criterionId, status: "pass", evidence: "local check passed" }], caveats: ["local replay only"], evidenceRefs: ["test:1"] }, undefined, undefined, ctx(pi));
+  const selected = JSON.parse((await routeTool.execute("select", { action: "select", expectedStateVersion: latestState(pi).routeSet.stateVersion, routeId: "first" }, undefined, undefined, ctx(pi))).content[0].text);
+  assert.equal(selected.routeSet.acceptanceGate, "passed");
+  assert.deepEqual(selected.routeSet.caveats, ["local replay only"], "a passing selection must not shed its qualifications");
+  assert.deepEqual(selected.routeSet.evidenceRefs, ["test:1"]);
 });
 
 
@@ -500,7 +519,8 @@ test("one compass_open call loads multiple capabilities atomically with a minima
   const result = await open.execute("open", { capabilities: ["history", "acceptance", "goal_details"] }, undefined, undefined, ctx(pi));
   assert.deepEqual(JSON.parse(result.content[0].text).added, ["history", "acceptance", "goal_details"]);
   assert.doesNotMatch(result.content[0].text, /Loaded capabilities:/, "do not repeat the entire cumulative loadout");
-  assert.deepEqual(result.details.added, ["history", "acceptance", "goal_details"]);
+  assert.deepEqual(JSON.parse(result.content[0].text).added, ["history", "acceptance", "goal_details"]);
+  assert.equal(result.details.added, undefined, "domain payload has one serialized owner");
   await pi.events.get("context")({ messages: [] }, ctx(pi));
   assert.deepEqual(currentTool(pi, "compass_open").parameters.properties.capabilities.items.enum, ["routes", "issue_review"]);
   await currentTool(pi, "compass_open").execute("open-rest", { capabilities: ["routes", "issue_review"] }, undefined, undefined, ctx(pi));
@@ -651,13 +671,16 @@ test("independent Code Mode work proceeds while the background Subagent wave is 
   const codeResult = await taskTool.execute("finish-code-while-children-run", {
     action: "done", tasks: [{ id: "code", evidence: "Metadata parsed deterministically by Code Mode; result.json:1" }],
   }, undefined, undefined, ctx(pi));
-  await pi.events.get("tool_result")({ toolName: "compass_task", input: { action: "done" }, content: codeResult.content, details: codeResult.details, isError: false }, ctx(pi));
+  const progressed = await pi.events.get("tool_result")({ toolName: "compass_task", input: { action: "done" }, content: codeResult.content, details: codeResult.details, isError: false }, ctx(pi));
   assert.equal(latestState(pi).plan.tasks.find((item) => item.id === "code").status, "done");
   assert.deepEqual(latestState(pi).plan.tasks.filter((item) => item.executor === "subagent").map((item) => item.status), ["in_progress", "in_progress"], "parent/Code Mode work can progress without waiting for Subagent feedback");
 
   for (const release of releases) release();
   await waitFor(() => latestState(pi)?.plan?.execution?.status === "completed", { message: "background child results consumed" });
   assert.deepEqual(latestState(pi).plan.tasks.map((item) => item.status), ["done", "done", "done"]);
+  const receipt = JSON.parse(progressed.content.map((part) => part.text ?? "").join("\n"));
+  assert.equal(receipt.resultStatus, "applied");
+  assert.match(receipt.dispatch, /awaiting|independent/);
 });
 
 test("a detached provider fallback cannot cross into another approved branch", async () => {
@@ -1035,7 +1058,7 @@ test("already-completed ready tasks can be closed without a redundant start call
   await approveDag(pi);
   const done = currentTool(pi, "compass_task");
   const result = await done.execute("direct-done", { action: "done", tasks: [{ id: "api", evidence: "Read the route and verified the health handler." }] }, undefined, undefined, ctx(pi));
-  assert.deepEqual(result.details.completedWithoutStart, ["api"]);
+  assert.deepEqual(JSON.parse(result.content[0].text).completedWithoutStart, ["api"]);
   assert.deepEqual(JSON.parse(result.content[0].text).completedWithoutStart, ["api"]);
   assert.equal(latestState(pi).plan.tasks.find((task) => task.id === "api").status, "done");
   await assert.rejects(
@@ -1121,8 +1144,8 @@ test("plan revision explains each invalidated task in the mutation result", asyn
     acceptanceCriteria: criteria,
     tasks: revisedTasks.map((task) => ({ ...task, executor: "code" })),
   }, undefined, undefined, ctx(pi));
-  assert.deepEqual(revised.details.invalidated, ["api", "smoke"]);
-  assert.equal(revised.details.invalidatedDetails.length, 2);
+  assert.deepEqual(JSON.parse(revised.content[0].text).invalidated, ["api", "smoke"]);
+  assert.equal(JSON.parse(revised.content[0].text).invalidatedDetails.length, 2);
   const invalidated = JSON.parse(revised.content[0].text).invalidatedDetails;
   assert.deepEqual(invalidated.map(({ id, from, to }) => ({ id, from, to })), [{ id: "api", from: "done", to: "pending" }, { id: "smoke", from: "done", to: "pending" }]);
   assert.match(invalidated[0].reason, /definition or dependencies changed/);
@@ -1137,13 +1160,11 @@ test("identical acceptance reports and no-op plan revisions do not bump state re
   await currentTool(pi, "compass_acceptance_define").execute("define", { criteria: ["The health check returns 200"] }, undefined, undefined, ctx(pi));
   const defined = latestState(pi);
   const defineAgain = await currentTool(pi, "compass_acceptance_define").execute("define-again", { criteria: ["The health check returns 200"] }, undefined, undefined, ctx(pi));
-  assert.equal(defineAgain.details.unchanged, true);
   assert.equal(JSON.parse(defineAgain.content[0].text).resultStatus, "unchanged");
   assert.equal(latestState(pi).stateRevision, defined.stateRevision);
   await currentTool(pi, "compass_acceptance_record").execute("record", { criterionId: "AC1", status: "reported_pass", evidence: "curl /health returned HTTP 200" }, undefined, undefined, ctx(pi));
   const recorded = latestState(pi);
   const duplicate = await currentTool(pi, "compass_acceptance_record").execute("record-again", { criterionId: "AC1", status: "reported_pass", evidence: "curl /health returned HTTP 200" }, undefined, undefined, ctx(pi));
-  assert.equal(duplicate.details.unchanged, true);
   assert.equal(JSON.parse(duplicate.content[0].text).resultStatus, "unchanged");
   assert.equal(latestState(pi).stateRevision, recorded.stateRevision);
 
@@ -1157,7 +1178,7 @@ test("identical acceptance reports and no-op plan revisions do not bump state re
     acceptanceCriteria: criteria,
     tasks,
   }, undefined, undefined, ctx(pi));
-  assert.equal(noOp.details.unchanged, true);
+  assert.equal(JSON.parse(noOp.content[0].text).resultStatus, "unchanged");
   assert.equal(latestState(pi).stateRevision, beforeNoopRevision);
 });
 
@@ -1169,7 +1190,7 @@ test("acceptance tool accepts bounded evidence above the old 1200-character sche
   await currentTool(pi, "compass_acceptance_define").execute("define", { criteria: ["The acceptance artifact is reproducible"] }, undefined, undefined, ctx(pi));
   const evidence = `result=PASS; artifact=out/acceptance.json; ${"command and observed output provenance ".repeat(45)}`.slice(0, 1682);
   const result = await currentTool(pi, "compass_acceptance_record").execute("record-long-evidence", { criterionId: "AC1", status: "reported_pass", evidence }, undefined, undefined, ctx(pi));
-  assert.equal(result.details.unchanged, false);
+  assert.equal(JSON.parse(result.content[0].text).resultStatus, "applied");
   assert.equal(latestState(pi).goal.criteria[0].evidence, evidence);
 });
 
@@ -1205,7 +1226,7 @@ test("material history works without a DAG", async () => {
   assert.equal("state" in result.details, false, "tool result details stay compact when appendEntry works");
   const corrected = await currentTool(pi, "compass_decision").execute("decision-correction", { summary: "Use a disposable database instead", rationale: "New evidence shows the shared database can be reset safely in the test harness", supersedesDecisionIds: ["D1"] }, undefined, undefined, ctx(pi));
   assert.equal(latestState(pi).decisions.find((item) => item.id === "D1").supersededBy, "D2");
-  assert.deepEqual(corrected.details.supersededDecisionIds, ["D1"]);
+  assert.deepEqual(JSON.parse(corrected.content[0].text).supersededDecisionIds, ["D1"]);
   assert.deepEqual(JSON.parse(corrected.content[0].text).supersededDecisionIds, ["D1"]);
   assert.ok(pi.activeNames().includes("compass_checkpoint"));
 });
@@ -1629,6 +1650,6 @@ test("triage uses evidence references and returns a compact duplicate result", a
   const first = await triage.execute("triage", { evidenceRefs: [event.id] }, undefined, undefined, ctx(pi));
   assert.match(first.content[0].text, new RegExp(event.id));
   const second = await currentTool(pi, "compass_triage").execute("triage2", { evidenceRefs: [event.id] }, undefined, undefined, ctx(pi));
-  assert.match(second.content[0].text, /"duplicate":true/);
+  assert.equal(JSON.parse(second.content[0].text).resultStatus, "unchanged");
   assert.ok(second.content[0].text.length < 900);
 });

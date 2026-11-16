@@ -35,6 +35,19 @@ The [field-use audit and resolved TODOs](docs/agent-usage-audit-v0.10.0.md) reco
 
 From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v8/context v4 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
 
+### Tool missing?
+
+Seeing the Compass Skill or starting Pi in this repository does not load `src/index.ts`. For a single invocation without changing settings, use `pi -e /absolute/path/to/pi-compass`, then `/compass-preflight`. If the package is already declared, grant project trust and `/reload`, checking any load error. Both context tools are registered before any Goal; `compass_open` is not their activation switch. `compass_context_search` is discoverable/callable in Code Mode; `compass_context` is model-only and stays directly declared even in Code Mode-only mode. Compass is not inherited by child sessions.
+
+Context mutations now use `compass_context({operation:{action,...}})`; reload the current schemas before testing. For example, read-only recovery in Code Mode:
+
+```js
+const result = JSON.parse(await tools.compass_context_search({query:"material constraint"}));
+text(result);
+```
+
+Mutations remain direct standalone calls and require the returned revision; do not batch a pin/frame operation in Code Mode.
+
 ## Local validation
 
 ```bash
@@ -54,7 +67,7 @@ In a disposable Pi session rooted at this package (or an explicit safe fixture p
 
 1. Run `/compass-preflight` and confirm the active registry and native dependencies.
 2. Ask the Agent to record a simple semantic Goal via `compass_goal`; verify a DAG is not required. Send a clarification: raw text must not replace the Goal. The Agent explicitly reviews/reaffirms or updates it.
-3. Use `compass_context` for a small `call`/`return`. Check the footer changes between `frame: root` and the committed frame identity, then search and pin one qualified value. Compact or navigate only through native Pi operations and verify the value remains qualified.
+3. Use `compass_context` for a small `call`/`return`. Check the footer changes between `frame: root` and the committed frame identity, then recover a source with `compass_context_search` and pin it with `compass_context`. Compact or navigate only through native Pi operations and verify the value remains qualified.
 4. Only when provider cost is acceptable, ask the Agent to create a small read-only DAG: two independent inspections and a third depending on both. Review and answer the exact native Human approval questionnaire. The Agent must assess prerequisite evidence before the dependent task starts; parent/Code Mode work must stay with the parent.
 5. Inspect actual native child identities, task evidence, assessments and unknown/stale handling. Export a redacted report with `node scripts/session-report.mjs <session.jsonl> --json`. A local test pass is not live provider acceptance.
 
