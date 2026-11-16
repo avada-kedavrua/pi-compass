@@ -996,6 +996,7 @@ export function buildGoalDetails(stateValue) {
   return {
     goal: state.goal.current ? { version: state.goal.version, original: state.goal.original, current: state.goal.current, originalSourceIds: state.goal.originalSourceIds, sourceIds: state.goal.sourceIds, constraints: state.goal.constraints } : null,
     reviewedInputId: state.goal.reviewedInputId,
+    ...(state.latestHumanEntryId ? { input: { id: state.latestHumanEntryId, reviewed: state.goal.reviewedInputId === state.latestHumanEntryId } } : {}),
     criteria: state.goal.criteria.filter((item) => item.goalVersion === state.goal.version).map((item) => ({ id: item.id, text: item.text, status: item.status })),
     humanAnswers: state.humanDecisions.filter((item) => item.goalVersion === state.goal.version).map((item) => ({ id: item.id, sourceEntryId: item.sourceEntryId, sourceCallId: item.sourceCallId, ...(item.questionnaire ? { questionnaire: item.questionnaire } : { text: item.text }) })),
   };

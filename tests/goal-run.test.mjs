@@ -994,10 +994,12 @@ test("new Human input locks approval until explicitly acknowledged without rebin
   assert.equal(dagApprovalStatus(state).approved, true);
   state = observeHumanInput(state, "newest-entry").state;
   assert.equal(dagApprovalStatus(state).approved, false);
+  assert.deepEqual(buildGoalDetails(state).input, { id: "newest-entry", reviewed: false });
   state = setGoal(state, { expectedVersion: 1, current: state.goal.current,
     sourceIds: [...state.goal.sourceIds, "newest-entry"], constraints: [] }).state;
   assert.equal(dagApprovalStatus(state).approved, true);
   assert.equal(state.plan.approvalRequest.id, requestId);
+  assert.deepEqual(buildGoalDetails(state).input, { id: "newest-entry", reviewed: true });
 });
 
 test("same-text constraint changes preserve evidence but invalidate approval; replacement guards unknown identity", () => {
