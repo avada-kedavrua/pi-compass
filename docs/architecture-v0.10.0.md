@@ -184,13 +184,13 @@ Exit: unauthorized exploration and premature cancellation are rejected; accepted
 
 ## Final local evidence
 
-Implementation `7aa6105` ([release identity](../RELEASE-MANIFEST.json)), including semantic Goal foundation `63a14ff` and field-use corrections. The [field audit](agent-usage-audit-v0.10.0.md) records the frozen input/hash, observed failures, T1–T5 fixes and explicitly deferred work. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v4 reject unsupported snapshots without migration/reset; native raw history is unchanged.
+Implementation `e4461fc` ([release identity](../RELEASE-MANIFEST.json)), including semantic Goal foundation `63a14ff` and field-use corrections. The [field audit](agent-usage-audit-v0.10.0.md) records the frozen input/hash, observed failures, T1–T5 fixes and explicitly deferred work. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v4 reject unsupported snapshots without migration/reset; native raw history is unchanged.
 
 | Check | Observed result |
 |---|---:|
-| `npm test` | 261/261, 0 skipped; 3.788 s |
-| `npm run test:core` | 82/82; 0.081 s |
-| `npm run test:non-extension` | 111/111; 0.227 s |
+| `npm test` | 261/261, 0 skipped; 3.791 s |
+| `npm run test:core` | 82/82; 0.083 s |
+| `npm run test:non-extension` | 111/111; 0.232 s |
 | `npm run preflight` / `node scripts/preflight.mjs --static-only` | PASS; expected source/target overlap warning |
 | `node scripts/check-subagents-contract.mjs` | 36/36 against installed pi-subagents 0.88.1 |
 | Context/retention/artifact regressions | Included in full suite; installed projection/runner adapters |
@@ -206,6 +206,8 @@ The semantic Goal audit also reproduced a real pause/fallback race: a primary te
 Field-use repair independently re-reviewed the result/context/search/acceptance seams. Review found a near-limit metadata/commit-size mismatch; the failure was reproduced, canonical metadata budgeting corrected, and a near-budget roundtrip regression added. The bounded re-review found no further actionable issues. Early validation and actual native commit remain distinct; generated questionnaires are now available directly in model-visible content, without unsolicited startup prompts. Final parent checks also cover complete structured Goal reads and cursor-validation errors before persistence.
 
 The follow-up Agent-contract review separated query callability from native model-only mutations, checking the installed dispatcher/loadout contracts rather than retaining a duplicate nested-call hook. Root-object schemas enforce action-specific fields; native diagnostics identify the chosen action. Full-suite content-only checks preserve passing-route caveats/evidence refs, complete dispatch JSON, artifacts/images and canonical provenance. Base mutation metadata no longer repeats the Agent payload; native operation ownership stays intact. Independent bounded re-reviews found no further actionable issues in these changes. Schema size is an explicit tradeoff, not a provider-token saving claim.
+
+A subsequent legacy-feedback check reproduced a missing qualifier in full Goal details: compact state exposed pending native-input review, while full details required inferring it from IDs. The detail response now exposes the same input.id/reviewed signal; the existing Human-reaffirmation regression covers false → true without treating semantic correctness as proven. The [runtime-guard assessment](runtime-guards-design.md) is a proposal only, not an enabled capability or native integration claim.
 
 Native API/installed projection/runner checks do not establish a real AgentSession/provider cycle. See [measurements](./measurements-v0.10.0.md) for bounded local CPU/memory/draft/request-size data and [handoff](../handoff.md) for Human acceptance and feedback. No provider/cache/token or semantic-quality improvement is claimed from these checks.
 
