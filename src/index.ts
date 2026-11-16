@@ -1,4 +1,5 @@
 import { Type } from "typebox";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import { executionDriftReason } from "./write-scope.mjs";
 import { questionnaireFailureResultPatch } from "./questionnaire-integration.mjs";
@@ -2442,7 +2443,7 @@ export default function (pi: any) {
     persistState(pi);
   }));
 
-  registerRuntimeGuards(pi);
+  const runtimeGuards = registerRuntimeGuards(pi, { profileDir: getAgentDir });
 
   pi.registerCommand("compass-preflight", {
     description: "Check Compass progressive disclosure and required tools in the active Pi session",
@@ -2454,6 +2455,9 @@ export default function (pi: any) {
       const inventory = toolInventory(pi);
       const subagentInstalled = inventory.subagents.registered || inventory.subagentLoader.registered;
       const subagentVisible = inventory.subagents.active;
+      let guardFailure = "";
+      try { await runtimeGuards.control({ action: "get" }, ctx); }
+      catch (error) { guardFailure = error instanceof Error ? error.message : String(error); }
       const checks = [
         { label: "GoalRun module export contract", ok: GOAL_RUN_API_VERSION === 8 && GOAL_RUN_RELEASE === PACKAGE_VERSION && typeof shouldSurfaceIssueReview === "function" && typeof buildStateSnapshot === "function" && typeof triageIssue === "function" },
         { label: "Pi active-tool read/write", ok: dynamic },
@@ -2461,6 +2465,7 @@ export default function (pi: any) {
         { label: "Compass loader", ok: allNames.some((name) => name === "compass_open") || availableCapabilities(state).every((name) => activeCapabilities().includes(name)) },
         { label: "Compact state tool registered", ok: allNames.some((name) => name === "compass_state") },
         { label: "Runtime guard controller registered", ok: allNames.includes("runtime_guard") },
+        { label: "Runtime guard host/scope read", ok: !guardFailure },
         { label: "codemode", ok: names.some((name) => /code.?mode/i.test(name)) },
         { label: "pi-subagents registered", ok: subagentInstalled },
         { label: "Structured delegation event bus surface", ok: Boolean(pi.events && typeof pi.events.on === "function" && typeof pi.events.emit === "function" && delegationRuntimes.get(pi)?.installed) },
@@ -2468,6 +2473,7 @@ export default function (pi: any) {
       ];
       const lines = [`Compass v${GOAL_RUN_RELEASE} preflight`];
       for (const check of checks) lines.push(`${check.ok ? "PASS" : "WARN"} ${check.label}${check.ok ? "" : " — not visible or unsupported"}`);
+      if (guardFailure) lines.push(`BLOCKER: runtime guard state is unavailable; tool calls will be blocked. ${guardFailure}`);
       lines.push(`Loaded Compass capabilities: ${activeCapabilities().join(", ") || "none"}`);
       if (!schemaReplacement) lines.push("BLOCKER: same-name schema replacement did not verify. Do not use this build; dynamic schemas require this Pi runtime behavior.");
       lines.push(`Active Compass tools: ${names.filter(isCompassName).join(", ") || "none"}`);

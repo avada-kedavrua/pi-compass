@@ -49,6 +49,8 @@ text(result);
 
 Mutations remain direct standalone calls and require the returned revision; do not batch a pin/frame operation in Code Mode.
 
+Full preflight additionally exercises the real native loader/factory and guard Worker/SQLite in a disposable profile without test SDK aliases. `/compass-preflight` checks readable guard state in the running session, not just controller registration. Neither requests a provider turn.
+
 ## Runtime guards
 
 Use `runtime_guard({operation:{action:"get"}})` once to recover scope revisions. Put a worthwhile mechanical check under a stable ID, then reuse its mutation receipt to refine/remove it. No Goal or DAG is required. `warn` keeps normal results intact; `block` prevents the observed call and returns a short native error. Source/cases are fetched only with get+id.

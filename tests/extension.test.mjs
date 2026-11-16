@@ -1543,6 +1543,10 @@ test("preflight reports dynamic tool activation and native dependencies", async 
   assert.match(notice, /activation owned by Pi\/pi-subagents and the user/);
   assert.match(notice, /pi-await: watch=true; watches=true; unwatch=true/);
   assert.match(notice, /PASS ask-user-questions/);
+  assert.match(notice, /PASS Runtime guard host\/scope read/);
+  await pi.commands.get("compass-preflight").handler("", { ...ctx(pi), sessionManager: { getSessionId() { throw new Error("fixture host read failed"); } }, ui: { notify(message) { notice = message; } } });
+  assert.match(notice, /BLOCKER: runtime guard state is unavailable/);
+  assert.match(notice, /fixture host read failed/);
 });
 
 

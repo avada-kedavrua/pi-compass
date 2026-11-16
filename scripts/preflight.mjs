@@ -17,8 +17,8 @@ function add(level, label, detail) {
   results.push({ level, label, detail });
 }
 
-function run(command, args) {
-  const result = spawnSync(command, args, { encoding: "utf8", timeout: 10000, stdio: ["ignore", "pipe", "pipe"] });
+function run(command, args, timeout = 10000) {
+  const result = spawnSync(command, args, { encoding: "utf8", timeout, stdio: ["ignore", "pipe", "pipe"] });
   if (result.error) return { ok: false, text: result.error.message, status: null };
   return {
     ok: result.status === 0,
@@ -138,6 +138,9 @@ if (staticOnly) {
   const entryCheck = run("node", ["--import", hostTypeboxLoader, "--experimental-strip-types", "--input-type=module", "-e", `import(${JSON.stringify(pathToFileURL(entryPath).href)}).then((m) => { if (typeof m.default !== "function") process.exit(2); }).catch((e) => { console.error(e?.stack || e); process.exit(1); })`]);
   if (entryCheck.ok) add("PASS", "Extension entry import", "src/index.ts resolves TypeBox through Pi's host package and exports the extension factory");
   else add("FAIL", "Extension entry import", entryCheck.text || "Host-mapped extension entry import failed");
+  const hostCheck = run(process.execPath, ["--test", path.join(packageRoot, "tests/runtime-guard-host.test.mjs")], 30000);
+  if (hostCheck.ok) add("PASS", "Native runtime guard factory", "Unpatched Pi loader, empty-policy state read, owned Worker predicate and temporary profile SQLite passed; no provider request");
+  else add("FAIL", "Native runtime guard factory", hostCheck.text || "Native guard factory smoke test failed");
 }
 
 if (!fs.existsSync(targetRoot) || !fs.statSync(targetRoot).isDirectory()) {

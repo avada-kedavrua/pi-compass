@@ -1,6 +1,6 @@
 # Runtime guards：执行契约与设计边界
 
-`runtime_guard` 已实现为独立于 Goal/DAG 的共享内核，由 Compass 的一个 Pi 适配器注册。它不解析 Human 自然语言、不自动生成规则、不改变 AGENTS/NOTES，也不要求创建 Goal。
+`runtime_guard` 已实现为独立于 Goal/DAG 的共享内核，由 Compass 的一个 Pi 适配器注册。它不解析 Human 自然语言、不自动生成规则、不改变 AGENTS/NOTES，也不要求创建 Goal。Pi 入口通过原生 loader 静态导入 getAgentDir 并注入 profile provider；内核不自行动态查找全局安装的宿主 SDK。
 
 **Human 已明确选择原生 hook 范围**：检查 `tool_call` 当时观察到的参数，覆盖直接和 Code Mode 嵌套调用；不保证后续插件再次改参，也不覆盖独立 child/remote 进程或扩展内部 exec。不是最终参数检查器或 OS 安全沙箱。无需修改已安装 Pi。
 
@@ -40,7 +40,7 @@
 
 | action | 输入与行为 |
 |---|---|
-| get | 默认返回各 scope 的 revision 和简短规则列表；scope 可筛选，cursor 原样回传；完全未变只回 unchanged/cursor。指定 id 时默认 session，返回该规则源码/案例/来源。过滤器参与 cursor。 |
+| get | 默认返回各 scope 的 revision 和简短规则列表；scope 可筛选，cursor 原样回传；完全未变只回 unchanged/cursor。指定 id 时默认 session，返回该规则源码/案例/来源。scope/ID 及列表/详情投影参与 cursor；一条规则的详情不能让完整列表误报 unchanged。 |
 | put | expectedRevision + rule；创建或完整替换同 scope 的 ID。验证结构、纯函数表达式和提供的案例，再 CAS 激活。完全相同的定义不重跑 VM 或写入。 |
 | test | scope/id + cases；只运行判定，返回逐例结果，stateChanged=false。不执行真实工具或真实设备动作。 |
 | remove | scope/id + expectedRevision；只删除该 scope 的定义。删除也推进 scope revision，不能以重用旧 ID 绕过版本检查。 |
@@ -88,7 +88,7 @@ unknown、坏返回值、异常、超预算、取消和超时不伪装成语义�
 
 Global/local 共用 `<getAgentDir()>/runtime-guards.sqlite`，首次写入才创建，数据库权限 0600。使用 Node 内置 SQLite/WAL、零 busy 等待及 BEGIN IMMEDIATE/CAS；没有自制文件租约或第二个语义规范仓库。SQLite 在 Node 22 的实验性提示不等于测试失败。
 
-热路径只读 namespace revision；版本不变复用已验证快照，变化后重新加载。VM await 不持数据库事务锁，检查完成后再核对版本；竞争直接报未执行，不无限循环重试。不同进程共用版本检查，不靠 fs.watch 假定即时一致。已打开的存储消失或被替换会失败可见，不静默变成空规则。
+热路径只读 namespace revision；版本不变复用已验证快照，变化后重新加载。VM await 不持数据库事务锁，检查完成后再核对版本；竞争直接报未执行，不无限循环重试。不同进程共用版本检查，不靠 fs.watch 假定即时一致。已打开的存储消失或被替换会失败可见，不静默变成空规则。控制操作在入队时绑定原生 epoch，读取状态或运行 VM 的 await 后再次校验；旧分支既不能向新分支提交规则或空策略准入，也不能把迟到提醒投递进去。
 
 Schema v1 current-only；不迁移、不清空未知版本。规则源码是 Agent 编译的操作性产物；AGENTS/NOTES 与原生 Human 记录仍拥有语义来源。
 
@@ -123,6 +123,7 @@ Agent 负责函数漏检/误报和案例质量；框架负责正确交付观察�
 ## 证据与验收
 
 - `src/runtime-guard*.mjs`：纯数据/schema、scope store、VM/Worker、Pi 适配，控制工具只有一个入口。
+- `tests/runtime-guard-host.test.mjs`：独立 Node 子进程清除 NODE_OPTIONS 且不加载测试解析 hook；实际 public SDK discoverAndLoadExtensions/factory/Runner 检查空规则读取、真正 Worker 判定与临时 profile SQLite。full preflight 复用该检查；不发 provider 请求、不接触 Human profile。
 - `tests/runtime-guard*.test.mjs`：实际 SQLite/public sandbox/installed ExtensionRunner，覆盖 CRUD、CAS、原生分支、warn 结果保持、nested 提醒、已接受的后续改参边界、取消、原型安全、超时恢复、idle 退出期间准入、存储损坏。
 - `scripts/measure-runtime-guards.mjs`：临时 profile 与内存 branch adapter，不创建 Human profile 规则。无规则、未匹配、匹配通过和阻止分别计量。
 - [canonical local evidence](architecture-v0.10.0.md#final-local-evidence)：实际完整验证结果。Registry/branch adapter 测试不是 live AgentSession/provider 验收。

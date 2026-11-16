@@ -47,6 +47,8 @@ test("native session guard CRUD: immediate block, idempotence, cases, stale revi
   await assert.rejects(h.control({ action: "remove", id: "exact-cd", expectedRevision: 0 }), /Stale/);
   await assert.rejects(h.control({ action: "put", expectedRevision: 1, rule: { ...rule(), cases: [{ event: { toolName: "bash", input: { command: "cd x" } }, expected: "pass" }] } }), /cases failed/);
   assert.equal((await h.control({ action: "get" })).scopes.session, 1);
+  const detail = await h.control({ action: "get", id: "exact-cd" });
+  assert.notEqual((await h.control({ action: "get", cursor: detail.cursor })).unchanged, true, "a single-rule detail cannot satisfy a full-list projection");
   const verified = await h.control({ action: "test", id: "exact-cd", cases: [{ event: { toolName: "bash", input: { command: "cd x" } }, expected: "violation" }] });
   assert.equal(verified.stateChanged, false);
   assert.equal(verified.cases[0].passed, true);
@@ -169,6 +171,69 @@ test("controller cancellation cannot activate a rule; concurrent initialization 
   const [first, second] = await Promise.all([runtime.store(), runtime.store()]);
   assert.equal(first, second);
   assert.equal(fs.existsSync(first.path), false, "initialization itself never creates persistent data");
+});
+
+test("queued controls cannot activate on a different native branch", async (t) => {
+  let enter;
+  let release;
+  const entered = new Promise((resolve) => { enter = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  let first = true;
+  const h = fixture(t, { vm: { async evaluate(checks) {
+    if (first) { first = false; enter(); await held; }
+    return checks.map(() => ({ verdict: "pass" }));
+  }, async close() {} } });
+  h.manager.appendCustomEntry("fixture.branch", { name: "A" });
+  const running = h.control({ action: "put", expectedRevision: 0, rule: rule() });
+  await entered;
+  const queued = h.control({ action: "put", expectedRevision: 0, rule: { ...rule(), id: "queued" } });
+  const settled = Promise.allSettled([running, queued]);
+  h.manager.resetLeaf();
+  h.manager.appendCustomEntry("fixture.branch", { name: "B" });
+  h.guards.restore(h.ctx);
+  release();
+  assert.deepEqual((await settled).map((item) => item.status), ["rejected", "rejected"]);
+  assert.equal((await h.control({ action: "get" })).scopes.session, 0);
+});
+
+test("a late nested check cannot add its notice to a different native branch", async (t) => {
+  let enter;
+  let release;
+  const entered = new Promise((resolve) => { enter = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  let pause = false;
+  const h = fixture(t, { vm: { async evaluate(checks) {
+    if (pause) { enter(); await held; }
+    return checks.map(() => ({ verdict: "pass" }));
+  }, async close() {} } });
+  await h.control({ action: "put", expectedRevision: 0, rule: rule() });
+  pause = true;
+  const checking = h.call("pwd", { toolCallId: "old/1", parentToolCallId: "old" });
+  await entered;
+  h.manager.resetLeaf();
+  h.manager.appendCustomEntry("fixture.branch", { name: "new" });
+  h.guards.restore(h.ctx);
+  release();
+  assert.equal((await checking).block, true);
+  assert.equal(h.guards.flush({ entries: [] }), undefined, "old-branch failure must not contaminate new-branch context");
+});
+
+test("a check awaiting profile initialization cannot admit against another branch's empty policy", async (t) => {
+  let enter;
+  let release;
+  const entered = new Promise((resolve) => { enter = resolve; });
+  const held = new Promise((resolve) => { release = resolve; });
+  const h = fixture(t, { profileDir: async () => { enter(); await held; return path.join(h.dir, "profile"); } });
+  const checking = h.call("pwd", { toolCallId: "old/1", parentToolCallId: "old" });
+  const reading = Promise.allSettled([h.control({ action: "get" })]);
+  await entered;
+  h.manager.resetLeaf();
+  h.manager.appendCustomEntry("fixture.branch", { name: "new" });
+  h.guards.restore(h.ctx);
+  release();
+  assert.equal((await reading)[0].status, "rejected", "a pending control read cannot return another branch's state");
+  assert.equal((await checking)?.block, true, "even an empty policy cannot authorize a stale-branch call");
+  assert.equal(h.guards.flush({ entries: [] }), undefined);
 });
 
 test("every nested runtime block remains visible if Code Mode discards the error", async (t) => {

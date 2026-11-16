@@ -15,6 +15,7 @@ const canonical = (cwd) => { try { return fs.realpathSync(cwd); } catch { return
 
 export class RuntimeGuards {
   constructor(pi, { profileDir, vm = new GuardVM() } = {}) {
+    if (typeof profileDir !== "function" && (typeof profileDir !== "string" || !profileDir)) throw new Error("Runtime guards require the host profileDir provider.");
     this.pi = pi;
     this.profileDir = profileDir;
     this.vm = vm;
@@ -40,8 +41,7 @@ export class RuntimeGuards {
   }
   async store() {
     this.storeReady ??= (async () => {
-      const dir = typeof this.profileDir === "function" ? await this.profileDir()
-        : this.profileDir ?? (await import("@earendil-works/pi-coding-agent")).getAgentDir();
+      const dir = typeof this.profileDir === "function" ? await this.profileDir() : this.profileDir;
       if (this.closed) throw new Error("Guard runtime is closed.");
       return this.database = new GuardStore({ path: path.join(dir, "runtime-guards.sqlite"), normalize: normalizeGuardState });
     })();
@@ -62,7 +62,11 @@ export class RuntimeGuards {
     return { states, cursor, project, keys, store };
   }
   control(operation, ctx, signal = ctx.signal) {
-    const result = this.pending.then(() => this.#control(operation, ctx, signal));
+    const epoch = this.epoch;
+    const result = this.pending.then(() => {
+      if (epoch !== this.epoch) throw new Error("Guard branch changed while the operation was queued; no state changed.");
+      return this.#control(operation, ctx, signal);
+    });
     this.pending = result.catch(() => {});
     return result;
   }
@@ -81,8 +85,9 @@ export class RuntimeGuards {
     const scope = op.scope ?? "session";
     if (!GUARD_SCOPES.includes(scope)) throw new Error("scope must be global|local|session.");
     const view = await this.snapshot(ctx);
+    if (epoch !== this.epoch) throw new Error("Guard branch changed during state loading; no state changed.");
     if (op.action === "get") {
-      if (op.scope) view.cursor = createHash("sha256").update(`${view.cursor}:${scope}`).digest("hex").slice(0, 32);
+      if (op.scope || op.id) view.cursor = createHash("sha256").update(JSON.stringify([view.cursor, scope, op.id ?? null])).digest("hex").slice(0, 32);
       if (op.cursor === view.cursor && !op.id) return { cursor: view.cursor, unchanged: true };
       if (op.id) {
         const rule = view.states[scope].rules.find((item) => item.id === op.id);
@@ -158,8 +163,8 @@ export class RuntimeGuards {
     if (this.notices.size < 16) this.notices.set(key, { toolCallId: root, ...hit, count: 1 });
     else this.omitted++;
   }
-  block(event, reason) {
-    if (event.parentToolCallId) this.note(event, { runtimeError: true, effect: "block", verdict: "unknown", reason });
+  block(event, reason, epoch) {
+    if (epoch === this.epoch && event.parentToolCallId) this.note(event, { runtimeError: true, effect: "block", verdict: "unknown", reason });
     return { block: true, reason };
   }
   async check(event, ctx) {
@@ -170,6 +175,7 @@ export class RuntimeGuards {
     try {
       if (this.restoreError) throw this.restoreError;
       view = await this.snapshot(ctx);
+      if (epoch !== this.epoch) return this.block(event, "Guard branch changed during state loading. This call was not executed.", epoch);
       const selected = GUARD_SCOPES.flatMap((scope) => view.states[scope].rules.filter((rule) => matchesGuard(rule, event.toolName)).map((rule) => ({ scope, revision: view.states[scope].revision, rule })));
       if (!selected.length) return;
       const checks = selected.map(({ rule }) => {
@@ -181,7 +187,7 @@ export class RuntimeGuards {
       catch (error) { results = selected.map(() => ({ verdict: "unknown", error: String(error.message).slice(0, 240) })); }
       const latest = view.store.versions(view.keys);
       if (epoch !== this.epoch || view.states.session.revision !== this.session.revision || latest.some((revision, index) => revision !== view.states[index === 0 ? "global" : "local"].revision)) {
-        return this.block(event, "Guard scope changed during checking. This call was not executed; reassess with the current scope.");
+        return this.block(event, "Guard scope changed during checking. This call was not executed; reassess with the current scope.", epoch);
       }
       let block;
       for (let index = 0; index < selected.length; index++) {
@@ -194,7 +200,7 @@ export class RuntimeGuards {
         if (rule.effect === "block" && !block) block = { block: true, reason: `Guard ${scope}/${rule.id}@${revision} ${result.verdict === "violation" ? "blocked" : "could not check"}: ${hit.reason ? `${hit.reason}. ` : ""}${rule.hint}` };
       }
       return block;
-    } catch (error) { return this.block(event, `Guard runtime unavailable; call not executed. Repair via runtime_guard. ${String(error.message).slice(0, 240)}`); }
+    } catch (error) { return this.block(event, `Guard runtime unavailable; call not executed. Reload the extension or repair its host/store. ${String(error.message).slice(0, 240)}`, epoch); }
   }
   flush(event) {
     this.parents.clear();
