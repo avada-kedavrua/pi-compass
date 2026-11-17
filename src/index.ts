@@ -19,6 +19,9 @@ import { CONTEXT_MESSAGE_TYPE, CONTEXT_STATE_TYPE, emptyContextState, normalizeC
 
 const STATE_ENTRY_TYPE = "pi-compass-v2.goalrun";
 const MAX_TRACE_ENTRIES = 24;
+// A settled-UNKNOWN request keeps its correlation so a genuinely late terminal
+// event stays attributable evidence. Bounded so abandoned children cannot pin memory.
+const LATE_RESULT_RETENTION_MS = 10 * 60_000;
 const PACKAGE_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 export default function (pi: any) {
@@ -200,8 +203,14 @@ function ensureDelegationRuntime(pi: any) {
     if (!pending) return;
     if (pending.ackTimer) clearTimeout(pending.ackTimer);
     if (pending.responseTimer) clearTimeout(pending.responseTimer);
+    if (pending.retainTimer) clearTimeout(pending.retainTimer);
     runtime.pending.delete(pending.request.requestId);
-    pending.resolve(payload && typeof payload === "object" ? { ...payload, __compassProgress: pending.progress ?? null } : payload);
+    const value = payload && typeof payload === "object" ? { ...payload, __compassProgress: pending.progress ?? null } : payload;
+    // UNKNOWN forbids a second dispatch, never observation. A late correlated
+    // terminal result is still evidence for this exact request.
+    if (pending.settled) { applyLateDelegationOutcome(pi, pending, value); return; }
+    pending.settled = true;
+    pending.resolve(value);
   });
   subscribe(DELEGATION_EVENTS.response, (payload) => {
     const probe = runtime.probeWaiters.get(payload?.requestId);
@@ -222,15 +231,26 @@ function dispatchOneDelegation(pi: any, generation: number, runtime: any, reques
       request,
       generation,
       resolve,
+      settled: false,
       started: false,
       ackTimer: null,
       responseTimer: null,
+      retainTimer: null,
     };
     const finishUnknown = (reason: string) => {
-      if (!runtime.pending.has(request.requestId)) return;
+      if (pending.settled) return;
       if (pending.ackTimer) clearTimeout(pending.ackTimer);
       if (pending.responseTimer) clearTimeout(pending.responseTimer);
-      runtime.pending.delete(request.requestId);
+      pending.ackTimer = null;
+      pending.responseTimer = null;
+      pending.settled = true;
+      // Settling the caller must not delete the correlation: a late terminal
+      // response is the only recovery path that avoids a second dispatch.
+      pending.retainTimer = setTimeout(() => {
+        if (runtime.pending.get(request.requestId) === pending) runtime.pending.delete(request.requestId);
+      }, LATE_RESULT_RETENTION_MS);
+      // Retention is background bookkeeping; it must never hold the process open.
+      pending.retainTimer.unref?.();
       resolve({ __compassUnknown: true, requestId: request.requestId, ownerRunId: request.ownerRunId, nodeId: request.nodeId, model: request.model, reason });
     };
     runtime.pending.set(request.requestId, pending);
@@ -369,48 +389,71 @@ function setExecutionResult(pi: any, generation: number, waveId: string, taskId:
 function parsedTaskEvidence(parsed: any): string {
   return clip([parsed.summary, ...(parsed.evidence ?? []).map((item: string) => `Evidence: ${item}`)].filter(Boolean).join("\n"), 1600);
 }
-async function applyDelegationOutcome(pi: any, generation: number, waveId: string, task: any, parsed: any, fallbackAttempted: boolean, primaryError = "") {
-  await serializedInBranch(pi, generation, async () => {
-    let execution = state.plan?.execution;
-    if (!execution || execution.requestId !== waveId) return;
-    let index = executionResultIndex(execution, task.id);
-    if (index < 0) return;
-    const currentResult = execution.results[index];
-    if (parsed?.status === "done" && state.plan.tasks.find((item: any) => item.id === task.id)?.status === "in_progress") {
-      const evidence = parsedTaskEvidence(parsed);
+function applyDelegationOutcome(pi: any, generation: number, waveId: string, task: any, parsed: any, fallbackAttempted: boolean, primaryError = "") {
+  return serializedInBranch(pi, generation, () => applyDelegationOutcomeUnlocked(pi, waveId, task, parsed, fallbackAttempted, primaryError));
+}
+// Absorb a terminal result that arrived after the request was settled UNKNOWN.
+// Only an execution still awaiting this exact request may take it: a manually
+// reconciled or superseded batch is evidence too and must not be overwritten.
+function applyLateDelegationOutcome(pi: any, pending: any, value: any) {
+  const parsed = parseSubagentDelegationResponse(value, {
+    requestId: pending.request.requestId,
+    ownerRunId: pending.request.ownerRunId,
+    nodeId: pending.request.nodeId,
+    model: pending.request.model,
+  });
+  if (!parsed) return;
+  void serializedInBranch(pi, pending.generation, () => {
+    const execution = state.plan?.execution;
+    if (!execution || execution.requestId !== pending.request.ownerRunId) return;
+    const index = executionResultIndex(execution, pending.request.nodeId);
+    const recorded = index < 0 ? null : execution.results[index];
+    if (!recorded || recorded.requestId !== pending.request.requestId || recorded.status !== "unknown") return;
+    applyDelegationOutcomeUnlocked(pi, pending.request.ownerRunId, { id: pending.request.nodeId }, parsed, recorded.fallbackAttempted === true, recorded.primaryError || "");
+  }).catch(() => {});
+}
+function applyDelegationOutcomeUnlocked(pi: any, waveId: string, task: any, parsed: any, fallbackAttempted: boolean, primaryError = "") {
+  let execution = state.plan?.execution;
+  if (!execution || execution.requestId !== waveId) return;
+  let index = executionResultIndex(execution, task.id);
+  if (index < 0) return;
+  const currentResult = execution.results[index];
+  const taskStatus = state.plan.tasks.find((item: any) => item.id === task.id)?.status;
+  if (taskStatus === "in_progress") {
+    if (parsed?.status === "done") {
       // A correlated terminal response is a fact, not approval for further work.
       // Preserve it even if new Human input has paused semantic progression.
-      state.plan = updateTasks(state.plan, [{ id: task.id, status: "done", evidence }]);
-    } else if (state.plan.tasks.find((item: any) => item.id === task.id)?.status === "in_progress") {
+      state.plan = updateTasks(state.plan, [{ id: task.id, status: "done", evidence: parsedTaskEvidence(parsed) }]);
+    } else {
       const reason = clip(`${parsed?.terminalStatus ? `Subagent ${parsed.terminalStatus}: ` : ""}${parsed?.reason || parsed?.summary || "Subagent returned no valid task evidence."}`, 600);
       state.plan = updateTasks(state.plan, [{ id: task.id, status: "blocked", reason }]);
     }
-    execution = state.plan?.execution;
-    if (!execution || execution.requestId !== waveId) return;
-    index = executionResultIndex(execution, task.id);
-    if (index < 0) return;
-    execution.results[index] = {
-      ...execution.results[index],
-      status: parsed?.status === "done" ? "done" : parsed?.status === "failed" ? "failed" : "blocked",
-      model: parsed?.model || currentResult.model,
-      fallbackAttempted,
-      runId: parsed?.runId || currentResult.runId || null,
-      error: parsed?.status === "done" ? "" : clip(parsed?.reason || parsed?.error || "Subagent did not complete the task.", 600),
-      primaryError: clip(primaryError || currentResult.primaryError || "", 400),
-      summary: clip(parsed?.summary || "", 800),
-      usage: parsed?.usage || currentResult.usage || null,
-      providerDiagnostics: parsed?.providerDiagnostics || currentResult.providerDiagnostics || null,
-      observedToolCount: Number.isFinite(parsed?.observedToolCount) ? parsed.observedToolCount : currentResult.observedToolCount ?? null,
-      observedTools: Array.isArray(parsed?.observedTools) ? parsed.observedTools.slice(0, 12) : currentResult.observedTools ?? [],
-    };
-    state = recordExecutionEvent(state, {
-      status: execution.results[index].status,
-      summary: `Subagent task ${task.id}: ${execution.results[index].status}${fallbackAttempted ? " via DeepSeek fallback" : ""}.`,
-      text: clip(`${execution.results[index].summary}${execution.results[index].error ? `\nReason: ${execution.results[index].error}` : ""}`, 1200),
-      ref: execution.results[index].runId || "",
-    });
-    persistState(pi);
+  }
+  execution = state.plan?.execution;
+  if (!execution || execution.requestId !== waveId) return;
+  index = executionResultIndex(execution, task.id);
+  if (index < 0) return;
+  execution.results[index] = {
+    ...execution.results[index],
+    status: parsed?.status === "done" ? "done" : parsed?.status === "failed" ? "failed" : "blocked",
+    model: parsed?.model || currentResult.model,
+    fallbackAttempted,
+    runId: parsed?.runId || currentResult.runId || null,
+    error: parsed?.status === "done" ? "" : clip(parsed?.reason || parsed?.error || "Subagent did not complete the task.", 600),
+    primaryError: clip(primaryError || currentResult.primaryError || "", 400),
+    summary: clip(parsed?.summary || "", 800),
+    usage: parsed?.usage || currentResult.usage || null,
+    providerDiagnostics: parsed?.providerDiagnostics || currentResult.providerDiagnostics || null,
+    observedToolCount: Number.isFinite(parsed?.observedToolCount) ? parsed.observedToolCount : currentResult.observedToolCount ?? null,
+    observedTools: Array.isArray(parsed?.observedTools) ? parsed.observedTools.slice(0, 12) : currentResult.observedTools ?? [],
+  };
+  state = recordExecutionEvent(state, {
+    status: execution.results[index].status,
+    summary: `Subagent task ${task.id}: ${execution.results[index].status}${fallbackAttempted ? " via DeepSeek fallback" : ""}.`,
+    text: clip(`${execution.results[index].summary}${execution.results[index].error ? `\nReason: ${execution.results[index].error}` : ""}`, 1200),
+    ref: execution.results[index].runId || "",
   });
+  persistState(pi);
 }
 async function runReadySubagentWaves(pi: any, generation: number, ctx: any) {
   if (!inCurrentBranch(pi, generation)) return;
@@ -676,12 +719,12 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
             model: clip(item.model || "unknown", 120),
             fallbackAttempted: item.fallbackAttempted === true,
             fallbackReason: clip(item.fallbackReason || "", 80) || null,
-            providerErrorCount: Number.isFinite(item.providerDiagnostics?.errorCount) ? item.providerDiagnostics.errorCount : null,
-            providerLastErrorKind: item.providerDiagnostics?.lastError?.kind ?? null,
-            providerRetryPhase: item.providerDiagnostics?.retry?.phase ?? null,
+            providerDiagnostics: normalizeProviderDiagnostics(item.providerDiagnostics),
+            primaryProviderDiagnostics: normalizeProviderDiagnostics(item.primaryProviderDiagnostics),
             cost: Number.isFinite(item.usage?.cost) ? item.usage.cost : null,
             primaryCost: Number.isFinite(item.primaryUsage?.cost) ? item.primaryUsage.cost : null,
             durationMs: Number.isFinite(item.usage?.durationMs) ? item.usage.durationMs : null,
+            primaryDurationMs: Number.isFinite(item.primaryUsage?.durationMs) ? item.primaryUsage.durationMs : null,
             input: Number.isFinite(item.usage?.input) ? item.usage.input : null,
             output: Number.isFinite(item.usage?.output) ? item.usage.output : null,
             toolCalls: Number.isFinite(item.usage?.toolCalls) ? item.usage.toolCalls : null,
@@ -945,12 +988,6 @@ function messageText(message: any): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content.map((part: any) => part?.type === "text" && typeof part.text === "string" ? part.text : "").filter(Boolean).join("\n").trim();
-}
-function resultText(result: any): string {
-  if (typeof result === "string") return result;
-  if (typeof result?.output === "string") return result.output;
-  if (typeof result?.text === "string") return result.text;
-  return messageText({ content: result?.content });
 }
 function explicitWriteTargets(event: any): string[] {
   const tool = String(event?.toolName ?? "");
@@ -1272,7 +1309,7 @@ pi.on("session_shutdown", async (_event: any, ctx: any) => {
   await serialized(() => { if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; } if (markUnresolvedExecutionUnknown("Pi session shut down; verify recorded native child runs before reconciliation.")) persistState(pi); });
   const runtime = delegationRuntimes.get(pi);
   if (runtime) {
-    for (const pending of runtime.pending.values()) { clearTimeout(pending.ackTimer); clearTimeout(pending.responseTimer); pending.resolve({ __compassUnknown: true, reason: "Runtime shut down; native child outcome requires reconciliation." }); }
+    for (const pending of runtime.pending.values()) { clearTimeout(pending.ackTimer); clearTimeout(pending.responseTimer); clearTimeout(pending.retainTimer); if (pending.settled) continue; pending.settled = true; pending.resolve({ __compassUnknown: true, reason: "Runtime shut down; native child outcome requires reconciliation." }); }
     runtime.pending.clear();
     for (const probe of runtime.probeWaiters.values()) probe.resolve(null);
     runtime.probeWaiters.clear();
@@ -1313,7 +1350,7 @@ pi.on("session_shutdown", async (_event: any, ctx: any) => {
 
   // Goal state is reconciled by revision, not blindly overwritten by whichever
   // branch snapshot happens to be returned during context assembly.
-  pi.on("context", async (event: any, ctx: any) => {
+  pi.on("context", async (_event: any, ctx: any) => {
     await mutationQueue;
     try {
       if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }

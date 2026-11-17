@@ -39,6 +39,6 @@ A RouteSet is a set of alternative strategies for the same Goal version and base
 - Pi baseline: 1.5.2 for the current `context_with_system`, native boundary and installed projection behavior. Pi 0.87.0 introduced Context Edit, but Compass uses only the validated boundaries supported by the installed host.
 - pi-subagents: the installed structured delegation contract owns child execution, status and cancellation; Compass does not assume extension inheritance.
 - Node.js: `>=22.19.0` for the pinned public Code Mode runtime used by guards.
-- GoalRun schema/API: v8; context schema v5. Start a new session or select a supported native branch when old GoalRun snapshots are present; unsupported schemas fail visibly without migration or reset.
+- GoalRun schema/API: v9; context schema v5. Start a new session or select a supported native branch when old GoalRun snapshots are present; unsupported schemas fail visibly without migration or reset.
 
 Historical v0.9.0 architecture and implementation boundaries are in [`architecture-v0.9.0.md`](./architecture-v0.9.0.md). Historical v0.8.0 implementation details remain in [`design-v0.8.0.md`](./design-v0.8.0.md).

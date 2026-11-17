@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { emptyDagState, readyTasks, createOrRevisePlan, taskAssessmentBinding, taskAssessmentIsCurrent } from "./dag-core.mjs";
 import { approvalIsCurrent, clearDagApprovalAnswer, createDagApprovalRequest, dagApprovalBinding, matchesDagApprovalQuestion } from "./dag-approval.mjs";
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
+import { normalizeProviderDiagnostics } from "./execution-orchestrator.mjs";
 
 export const GOAL_RUN_API_VERSION = 9;
 export const GOAL_RUN_RELEASE = "0.10.0";
@@ -94,27 +95,6 @@ function questionnaireSummary(questionnaire, fallbackText) {
   if (questionnaire.unanswered?.length) answers.push(`${questionnaire.unanswered.length} question(s) left unanswered`);
   if (questionnaire.globalNote) answers.push(`note: ${questionnaire.globalNote}`);
   return clip(answers.join("; ") || String(fallbackText || "").replace(/\s+/g, " "), 420);
-}
-function normalizeProviderDiagnostics(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const kinds = new Set(["rate_limited", "transient_other", "unknown"]);
-  const last = value.lastError && typeof value.lastError === "object" ? value.lastError : null;
-  const retryValue = value.retry && typeof value.retry === "object" ? value.retry : null;
-  return {
-    errorCount: Number.isSafeInteger(value.errorCount) && value.errorCount >= 0 ? value.errorCount : null,
-    lastError: last && kinds.has(last.kind) ? {
-      kind: last.kind,
-      message: clip(last.message, 160),
-      at: Number.isFinite(last.at) && last.at >= 0 ? last.at : null,
-    } : null,
-    retry: retryValue && ["backoff", "in_flight"].includes(retryValue.phase) ? {
-      phase: retryValue.phase,
-      attempt: Number.isSafeInteger(retryValue.attempt) && retryValue.attempt >= 0 ? retryValue.attempt : null,
-      maxAttempts: Number.isSafeInteger(retryValue.maxAttempts) && retryValue.maxAttempts >= 0 ? retryValue.maxAttempts : null,
-      delayMs: Number.isFinite(retryValue.delayMs) && retryValue.delayMs >= 0 ? retryValue.delayMs : null,
-      scheduledAt: Number.isFinite(retryValue.scheduledAt) && retryValue.scheduledAt >= 0 ? retryValue.scheduledAt : null,
-    } : null,
-  };
 }
 function normalizeExecutionRecord(value, fallbackRevision = 1) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -408,12 +388,12 @@ export function normalizeGoalRunState(input) {
         model: clip(metric.model || "unknown", 120),
         fallbackAttempted: metric.fallbackAttempted === true,
         fallbackReason: clip(metric.fallbackReason || "", 80) || null,
-        providerErrorCount: Number.isSafeInteger(metric.providerErrorCount) && metric.providerErrorCount >= 0 ? metric.providerErrorCount : null,
-        providerLastErrorKind: ["rate_limited", "transient_other", "unknown"].includes(metric.providerLastErrorKind) ? metric.providerLastErrorKind : null,
-        providerRetryPhase: ["backoff", "in_flight"].includes(metric.providerRetryPhase) ? metric.providerRetryPhase : null,
+        providerDiagnostics: normalizeProviderDiagnostics(metric.providerDiagnostics),
+        primaryProviderDiagnostics: normalizeProviderDiagnostics(metric.primaryProviderDiagnostics),
         cost: Number.isFinite(metric.cost) && metric.cost >= 0 ? metric.cost : null,
         primaryCost: Number.isFinite(metric.primaryCost) && metric.primaryCost >= 0 ? metric.primaryCost : null,
         durationMs: Number.isFinite(metric.durationMs) && metric.durationMs >= 0 ? metric.durationMs : null,
+        primaryDurationMs: Number.isFinite(metric.primaryDurationMs) && metric.primaryDurationMs >= 0 ? metric.primaryDurationMs : null,
         input: Number.isFinite(metric.input) && metric.input >= 0 ? metric.input : null,
         output: Number.isFinite(metric.output) && metric.output >= 0 ? metric.output : null,
         toolCalls: Number.isFinite(metric.toolCalls) && metric.toolCalls >= 0 ? metric.toolCalls : null,

@@ -32,6 +32,9 @@ function fakePi(options = {}) {
       return;
     }
     delegation.push(structuredClone(request));
+    // Model a bridge that accepts the request and then faults before acknowledging
+    // it: the caller must fail closed without losing the correlation.
+    if (options.faultDispatch) throw new Error("delegation bridge faulted after accepting the request");
     queueMicrotask(() => {
       emit("prompt-template:subagent:started", { requestId: request.requestId, ownerRunId: request.ownerRunId, nodeId: request.nodeId });
       const response = options.respondDelegation
@@ -271,6 +274,37 @@ test("interactive approval dispatches exactly the read-only Subagent wave and co
   assert.equal(summary.plan.done, 2);
   assert.equal(summary.plan.remaining, 0);
   assert.equal(summary.outcome, "incomplete", "child completion is not Goal acceptance");
+});
+
+test("an uncertain dispatch keeps its correlation and absorbs the late terminal result", async () => {
+  const pi = fakePi({ faultDispatch: true });
+  await plannedGoal(pi);
+  await approve(pi);
+  await waitFor(() => stateOf(pi).plan.execution?.status === "unknown", "both faulted dispatches are recorded");
+  const state = stateOf(pi);
+  assert.deepEqual(state.plan.execution.results.map((item) => item.status), ["unknown", "unknown"], "a faulted dispatch is unknown, never done");
+  assert.equal(state.plan.execution.status, "unknown", "an uncertain batch is not presented as completed");
+  assert.equal(state.plan.tasks.every((task) => task.status === "in_progress"), true);
+  assert.equal(pi.delegation.length, 2);
+
+  // A terminal event that arrives after the fault is evidence for that exact
+  // request. Dropping it would leave the task unrecoverable without a re-dispatch.
+  const accepted = pi.delegation[0];
+  pi.events.emit("prompt-template:subagent:response", {
+    requestId: accepted.requestId,
+    ownerRunId: accepted.ownerRunId,
+    nodeId: accepted.nodeId,
+    status: "completed",
+    runId: "run-late",
+    model: accepted.model,
+    result: { kind: "structured", value: { status: "done", summary: "Late inspection finished.", evidence: ["src/late.ts:1"], reason: "" } },
+    usage: { input: 5, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1, toolCalls: 1, durationMs: 10 },
+  });
+  await waitFor(() => stateOf(pi).plan.tasks.find((task) => task.id === accepted.nodeId)?.status === "done", "the late terminal result is reconciled");
+  const reconciled = stateOf(pi).plan.execution.results.find((item) => item.id === accepted.nodeId);
+  assert.equal(reconciled.status, "done");
+  assert.equal(reconciled.runId, "run-late", "the late result stays bound to its original request");
+  assert.equal(pi.delegation.length, 2, "an unknown outcome never triggers a second dispatch");
 });
 
 test("new Human input pauses approved dispatch until the Agent reaffirms the Goal", async () => {

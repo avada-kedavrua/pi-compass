@@ -198,13 +198,16 @@ test("provider diagnostics survive bounded response parsing and GoalRun normaliz
       primaryProviderDiagnostics: { errorCount: 1, lastError: { kind: "unknown", message: "Primary account quota exhausted", at: 9 } },
       usage: { input: 1, output: 1, cost: 0.01, toolCalls: 1, durationMs: 20 } }],
   };
-  state.plan.executionHistory = [{ requestId: "wave-provider", taskIds: ["provider"], status: "completed", taskMetrics: [{ id: "provider", model: PRIMARY_MODEL, fallbackAttempted: true, fallbackReason: "primary_account_quota_exhausted", providerErrorCount: 2, providerLastErrorKind: "unknown", providerRetryPhase: "in_flight" }] }];
+  state.plan.executionHistory = [{ requestId: "wave-provider", taskIds: ["provider"], status: "completed", taskMetrics: [{ id: "provider", model: PRIMARY_MODEL, fallbackAttempted: true, fallbackReason: "primary_account_quota_exhausted", providerDiagnostics: parsed.providerDiagnostics, primaryProviderDiagnostics: { errorCount: 1, lastError: { kind: "unknown", message: "Primary account quota exhausted", at: 9 } }, primaryDurationMs: 20 }] }];
   const normalized = normalizeGoalRunState(state);
   assert.equal(normalized.plan.execution.results[0].fallbackReason, "primary_account_quota_exhausted");
   assert.equal(normalized.plan.execution.results[0].providerDiagnostics.lastError.kind, "unknown");
   assert.equal(normalized.plan.execution.results[0].primaryProviderDiagnostics.errorCount, 1);
-  assert.equal(normalized.plan.executionHistory[0].taskMetrics[0].providerErrorCount, 2);
-  assert.equal(normalized.plan.executionHistory[0].taskMetrics[0].providerRetryPhase, "in_flight");
+  // The primary provider fault must survive history normalization: the fallback's
+  // own diagnostics cannot stand in for why the primary attempt ended.
+  assert.equal(normalized.plan.executionHistory[0].taskMetrics[0].providerDiagnostics.retry.phase, "in_flight");
+  assert.equal(normalized.plan.executionHistory[0].taskMetrics[0].primaryProviderDiagnostics.lastError.message, "Primary account quota exhausted");
+  assert.equal(normalized.plan.executionHistory[0].taskMetrics[0].primaryDurationMs, 20);
 });
 
 test("missing provider usage fields remain unknown instead of being reported as zero cost", () => {

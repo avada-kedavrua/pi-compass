@@ -6,7 +6,7 @@ This is an Agent-only local Pi extension. Keep changes scoped, evidence-driven, 
 
 - Goal: lower total cost to complete arbitrary Goals without lowering delivery quality.
 - Use code for deterministic mechanics: state transitions, dependency readiness, schema validation, visibility gates, duplicate detection, path-scope checks, and measurement.
-- Keep `parent`, `code`, and `subagent` executor intent explicit on DAG tasks. A Subagent task must be read-only. GoalRun schema v8 and context schema v5 are current-only; unsupported snapshots fail visibly without migration or silent reset.
+- Keep `parent`, `code`, and `subagent` executor intent explicit on DAG tasks. A Subagent task must be read-only. GoalRun schema v9 and context schema v5 are current-only; unsupported snapshots fail visibly without migration or silent reset.
 - The model chooses decomposition and executor; code validates state and safety boundaries.
 - Compass automatically dispatches only exactly Human-approved, ready `executor=subagent` + `writeScope=read-only` tasks through the documented pi-subagents structured delegation API at the `tool_result` boundary. A `before_agent_start` sweep recovers a persisted ready DAG if that boundary was missed, after checking the latest Human instruction and exact Current Goal. It consumes structured results; it never ignores child feedback.
 - Do not call the model-visible `subagent` tool recursively from a `tool_call` hook. Use the documented structured-delegation event contract from a supported event callback/application step.
