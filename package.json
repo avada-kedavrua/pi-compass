@@ -31,6 +31,7 @@
     "@earendil-works/pi-codemode": "1.5.2"
   },
   "peerDependencies": {
-    "typebox": "*"
+    "typebox": "*",
+    "@earendil-works/pi-coding-agent": ">=1.5.2"
   }
 }
