@@ -1,5 +1,26 @@
 # v0.10 Agent consumer-contract audit
 
+## Active field failure ledger — R0–R4
+
+This ledger supersedes broad readiness claims below for the next delivery. Evidence: native session `01a1e440-e1bf-73d6-b115-c55015c5a744`, SHA-256 `ebb0ffb4911f7f9b2adc53284f88061a3b011ba01e1dc67d1ba627e2a914863b`. Raw transcript remains private and unchanged. Reproduction uses scripts/session-report.mjs and installed in-memory native projection; no provider request. The Human explicitly exercised every tool, so this is not an unbiased daily-overhead benchmark.
+
+| ID | Confirmed defect / friction | Root and proving check | Milestone / status |
+|---|---|---|---|
+| F1 | Return emits empty compaction, log L744 | Absent current summary undefined versus saved null; no-summary call/return must emit none, real child-compaction restoration must still work | R1 open |
+| F2 | Goal memory explicitly exported at L741 loses its pin at L1100 | Export does not transfer retained lifetime; same-Goal compaction retains exported memory, new Goal expires it; ordinary exports stay unpinned | R1 open |
+| F3 | Remember rejected in sibling batch, L59 | Blanket standalone restriction applies to data-only memory; permit one memory operation with siblings, retain standalone projection-changing operations | R1 open |
+| F4 | Criterion definition fails after DAG adoption, L169 | Duplicate Goal/plan definition writers and stored lists; Goal alone defines criteria, plan/evidence consume exact IDs | R2 open |
+| F5 | Three Human questionnaires fail association, L154/177/194 | Model must retype 1,994–2,934-char preview; first differs by four characters; code must expand an opaque proposal ref into exact native UI input and verify the actual shown answer | R2 open |
+| F6 | Newly opened acceptance tool missing at L151 | Late registration/loadout transition; all eight tools registered at factory startup, no loader/capability state | R3 open |
+| F7 | Read/status and plan tools overlap | One read tool with requested views, one DAG mutation tool, one evidence writer; obsolete registrations/exports/tests removed rather than wrapped | R3 open |
+| F8 | Return generates 351 edits / 528,242 bytes | Native restore requires payload edits; replay proves 11 / 11,961 bytes are redundant. Skip provable no-ops, preserve necessary raw-owned omissions and pairing | R1 open |
+| F9 | Replacement export can lose Agent-derived authorship | Source review of sourceDataDraft/currentValue; derive authorship once from the head, prove replace→export remains qualified | R1 open |
+| F10 | Valid 32-source value can export unrecoverable 33-source provenance | Export unconditionally appends payload entry ID; validate drafts before publication and use existing origin identity without inflating provenance | R1 open |
+| F11 | Plan creation can silently shorten acceptance text | Plan schema omits per-criterion bound; revisePlanState clips to 300 before sync. Remove plan-owned definitions; Goal validates complete text before mutation | R2 open |
+| F12 | RPC question fallback echoes an unshown full preview | Installed rpc-fallback.ts displays only 600 characters but echoes all; automatic Compass authorization supports verified interactive Pi TUI only, fails closed for RPC/unknown/no UI and never treats echo alone as display proof | R2 open |
+
+R0 design decision: keep JSON for machine composition and preserve complete requested evidence/caveats; do not add a Markdown-plus-JSON duplicate. Native ask_user_question is model-only, so do not recursively invoke it. Its caller forwards a small code-generated questionnaire containing an opaque proposal ref. The documented mutable tool_call input boundary expands that ref into the stored complete questionnaire before the native UI; authorization additionally verifies the native answer's echoed preview, identity, current binding and absence of conditions. No silent authorization, homemade UI, tool recursion or weakened exact-definition check. Pi docs: extensions.md, Tool Events / tool_call and Tool Exposure. A later plugin mutation must fail closed at answer verification. This automatic authorization path is limited to the installed interactive Pi TUI with full-preview custom UI; RPC, print, unknown mode and missing custom UI fail closed. The installed questionnaire RPC fallback shows only 600 preview characters but echoes the full string (rpc-fallback.ts:35,76–82,139–147); an echo is not complete-display evidence. A focused regression must capture this truncated fallback and withhold authorization. Native structured answers are trusted as native Human records; no claim is made that software can prove a Human read or understood the presented text.
+
 ## Outcome and scope
 
 The previous readiness criterion was insufficient: passing state/protocol tests did not prove that an Agent could cheaply consume the interface. This revision replaces the public Goal/context contract rather than adding another compatibility layer or asking the Agent to learn internal binding/revision rules. [Current operations](tool-contract.md) are authoritative; the previous public arguments are rejected.

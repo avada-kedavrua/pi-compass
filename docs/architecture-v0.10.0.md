@@ -2,6 +2,33 @@
 
 Status: v0.10 local candidate. M0–M7 local delivery gates are complete, with explicit native reuse/unsupported decisions below. Implementation snapshot and final local checks are recorded in [Final local evidence](#final-local-evidence). Human live Pi/provider acceptance remains open; local tests and scoped source reviews are not that acceptance.
 
+## Active delivery — R0–R4 consumer convergence
+
+Human's current instruction supersedes the old public tool layout, not native safety/ownership requirements. Current implementation remains the preceding snapshot until each milestone below lands. No legacy tool aliases, capability registry, migrations or second workflow loop will be retained. Raw Pi records and Git history remain immutable.
+
+Target: eight initially registered, stable tools. goal alone owns semantic Goal/constraint/criterion definitions and Goal-level decisions/checkpoints; state owns all reads; context_search retrieves evidence; context writes memory/attention/work values; plan owns DAG definition/task/approval/reconciliation; acceptance records criterion evidence only; route owns alternatives and competitor authorization; runtime_guard owns executable mechanical checks. Internal revisions/bindings never become required Agent bookkeeping. Compact JSON serves composition; requested evidence/caveats remain complete. No schema/status churn or Compass loader.
+
+- **R0 — Contract and failure ledger**
+  - [x] Verify all eight responsibilities and schema/result journeys against the implementation and documented host boundaries; record F1–F12 and proving checks in the existing consumer audit.
+  - [x] Resolve approval composition without another UI/control plane or model copying long payloads. Independent design re-review cleared the interactive-only/full-preview qualification; no code execution claimed. R0 is the design/ledger delivery commit; implementation gates remain open below.
+- **R1 — Context root fixes**
+  - [ ] Distinguish no summary from changed summary; no false return checkpoint. Preserve real inner-compaction restoration and complete exchanges.
+  - [ ] Explicitly exporting a retained value preserves its declared retention lifetime in the parent. Unexported local work stays local.
+  - [ ] Allow one ordinary memory mutation alongside sibling tools; keep projection-changing operations standalone. Reject ambiguous multiple mutations without partial changes.
+  - [ ] Eliminate demonstrably redundant restoration edits, not required history/provenance. Reuse narrow existing tests and the frozen native replay; review, commit and push.
+- **R2 — Single definitions and safe approval**
+  - [ ] Goal is the only criterion-definition owner; remove duplicated plan criterion storage/writers and obsolete triage/capability state. Unsupported GoalRun snapshots fail visibly, no adapter.
+  - [ ] Code transports the complete exact proposal to the native questionnaire; Agent transports only a proposal ref. Require supported interactive Pi full-preview TUI, canonical expanded input/echo, native identity and current binding before authorization. RPC/unknown/no-UI fail closed; a full echo is not proof that a truncated host showed the full proposal. Declined/partial/custom/UI-error cases stay distinct.
+  - [ ] Retain explicit parent/code/read-only-subagent intent, semantic task assessments, unknown-run reconciliation and correlated route/competitor safety. Review, commit and push.
+- **R3 — Eight-tool public surface**
+  - [ ] Replace, rather than wrap, old registrations with fixed nonoverlapping action schemas. Delete loader/loadout/capability plumbing and obsolete exports/tests.
+  - [ ] A single compact read surface provides requested views; mutation results return the next usable domain refs/state, not internal audits or whole stores. Native tool preferences remain native-owned.
+  - [ ] Exercise public calls through installed native loading/dispatch, including initial registration, approval and Code Mode callability. Review, commit and push.
+- **R4 — Occam and final delivery**
+  - [ ] Reconcile every ledger item, inspect all runtime modules/callers and remove dead/duplicate code and tests. Keep targeted behavioral guards, not test volume.
+  - [ ] Run focused checks first, mandatory full/core/non-extension/static/native gates at delivery; compare suite duration, tool/schema/result bytes, actual nonempty replay and context CPU/draft sizes. Do not infer provider quality/cache/cost from local measurements.
+  - [ ] Align one Skill, current tool contract, release identity and handoff; independent code and consumer reviews; commit, push and verify remote identity. Mark unproven live/provider behavior explicitly.
+
 ## Source of requirements
 
 Original Pi session `01a1b90f-8faa-752a-bb77-8132146df4d9`:
