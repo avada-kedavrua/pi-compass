@@ -1244,7 +1244,7 @@ function registerContextTool(pi: any, extended = activeCapabilities().includes("
   return registerDynamic(pi, "compass_context", {
     label: "Working Context",
     exposure: "model-only",
-    description: "Remember compact conclusions with their source refs, or pin original source content when it must remain visible. Reuse refs unchanged; no revision, binding or scope bookkeeping. Mutations must be direct standalone calls. queued is not committed: wait for the native applied/rejected receipt. Open the context capability once for optional frames, edits and artifacts.",
+    description: "Remember compact conclusions with their source refs, or pin original source content when it must remain visible. Reuse refs unchanged; no revision, binding or scope bookkeeping. Use one direct context mutation per batch; frame/edit operations must be standalone, while pin/unpin/remember may accompany other tools. queued is not committed: wait for the native applied/rejected receipt. Open the context capability once for optional frames, edits and artifacts.",
     parameters: contextToolSchema(extended),
     async execute(toolCallId: string, args: any, ...rest: any[]) {
       return serialized(async () => {

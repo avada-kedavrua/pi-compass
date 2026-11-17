@@ -1,4 +1,4 @@
-import { bindingKey, contentVersion, currentValue, logicalSource, rawMessage, snapshotHead, sourceQualifications, valueContent } from "./context-values.mjs";
+import { agentAuthored, bindingKey, contentVersion, currentValue, logicalSource, rawMessage, snapshotHead, sourceQualifications, valueContent } from "./context-values.mjs";
 
 const RESERVED = new Set(["pi-compass-v2.goalrun-state", "pi-compass-v2.goalrun-anchor", "pi-compass-v2.conventions"]);
 const MAX_SCAN = 1024;
@@ -18,7 +18,7 @@ function record(index, id, binding, origin, content, head = null, visibility = "
   const exchangeComplete = Boolean(group && !group.duplicate && group.calls.size === group.results.size);
   const qualification = sourceQualifications(entry, index.readRequests?.get(id), exchangeComplete);
   const editId = head?.editId ?? projectionEditId;
-  const authored = head?.field === "operation" || head?.origin?.authorship === "agent-memory";
+  const authored = agentAuthored(head);
   const derived = authored || editId !== null || head?.field === "snapshot";
   const authorship = authored ? "agent-derived" : editId !== null ? "projection-derived" : head?.field === "snapshot" ? "retained-source-data" : message.role === "toolResult" ? "tool-observation" : message.role === "user" ? "human-original" : "agent-message";
   const caveats = [...new Set([...(qualification.caveats ?? []), ...(head?.caveats ?? [])])];
@@ -114,12 +114,10 @@ function* uniqueCandidates(index, state, scope, ids) {
   for (const candidate of candidates(index, state, scope, ids)) {
     if (!candidate) continue;
     const entry = index.byId.get(candidate.id);
-    const group = index.groups?.get(candidate.id);
-    const request = group && rawMessage(index.byId.get(group.ids[0]));
     const native = rawMessage(entry);
     const nested = native?.nestedCalls;
-    const directSearch = native?.toolName === "compass_context_search" || native?.toolName === "compass_context" && request?.content?.some?.((part) => part.type === "toolCall" && part.name === "compass_context" && (part.arguments?.operation?.action ?? part.arguments?.action) === "search");
-    const nestedSearch = native?.toolName === "codemode" && nested?.complete === true && nested.calls?.length > 0 && nested.calls.every((call) => call.name === "compass_context_search" || call.name === "compass_context" && (call.arguments?.operation?.action ?? call.arguments?.action) === "search");
+    const directSearch = native?.toolName === "compass_context_search";
+    const nestedSearch = native?.toolName === "codemode" && nested?.complete === true && nested.calls?.length > 0 && nested.calls.every((call) => call.name === "compass_context_search");
     if (!ids?.size && (directSearch || nestedSearch)) continue;
     const key = `${candidate.binding}:${candidate.version}`;
     if (seen.has(key)) continue;
@@ -184,10 +182,6 @@ export function searchSources(index, state, { query = "", ids = [], scope = "act
   }
   return { method: "lexical", scope, query, match, hits, scanned, truncated: truncated || matches > limit };
 }
-function textOf(content) {
-  const blocks = typeof content === "string" ? [{ type: "text", text: content }] : content;
-  return blocks.filter((part) => part.type === "text").map((part) => part.text).join("\n").slice(0, 8192);
-}
 function canonicalPath(value) {
   if (typeof value !== "string" || !value.trim()) return null;
   const input = value.trim();
@@ -240,27 +234,14 @@ function readRequest(index, id) {
 export function readOnlyObservation(index, id) { return readRequest(index, id); }
 
 /** Cross-call exact/subset findings use persisted read identity, never bare text equality. */
-function selectedReadWindow(observation, range) {
-  if (!range) return { startLine: observation.startLine, endLine: observation.endLine, lines: observation.lines };
-  if ((range.part ?? 0) !== 0) return null;
-  const startLine = range.startLine ?? 1;
-  const endLine = range.endLine ?? observation.lines.length;
-  if (startLine < 1 || endLine < startLine || endLine > observation.lines.length) return null;
-  return {
-    startLine: observation.startLine + startLine - 1,
-    endLine: observation.startLine + endLine - 1,
-    lines: observation.lines.slice(startLine - 1, endLine),
-  };
-}
-function readWindowMap(window) {
-  return new Map(window.lines.map((line, offset) => [window.startLine + offset, line]));
-}
 function matchingIntersection(left, right) {
   const startLine = Math.max(left.startLine, right.startLine);
   const endLine = Math.min(left.endLine, right.endLine);
   if (endLine < startLine) return null;
-  const a = readWindowMap(left), b = readWindowMap(right);
-  for (let line = startLine; line <= endLine; line++) if (!a.has(line) || !b.has(line) || a.get(line) !== b.get(line)) return { startLine, endLine, matches: false };
+  for (let line = startLine; line <= endLine; line++) {
+    const a = line - left.startLine, b = line - right.startLine;
+    if (a >= left.lines.length || b >= right.lines.length || left.lines[a] !== right.lines[b]) return { startLine, endLine, matches: false };
+  }
   return { startLine, endLine, matches: true };
 }
 function observedAt(index, state, selection, inputIndex, scope) {
@@ -270,11 +251,8 @@ function observedAt(index, state, selection, inputIndex, scope) {
   const identity = readObservationIdentity(index, item.id);
   if (!identity) return null;
   const observation = readRequest(index, item.id);
-  if (!observation || observation.payloadVersion !== contentVersion(item.content)) return { id: item.id, version: item.version, inputIndex, identity, observation: null, content: item.content };
-  const selected = selection.range ? selectSourceRange(item.content, selection.range) : { content: item.content, range: null };
-  const window = selectedReadWindow(observation, selected.range);
-  if (!window) return null;
-  return { id: item.id, version: item.version, inputIndex, identity, observation, window, content: selected.content };
+  if (!observation || observation.payloadVersion !== contentVersion(item.content)) return { id: item.id, version: item.version, inputIndex, identity, observation: null };
+  return { id: item.id, version: item.version, inputIndex, identity, observation, window: observation };
 }
 
 /** Cross-call findings require persisted successful read calls and source/range identity. */
@@ -286,20 +264,10 @@ export function analyzeRepeatedSelections(index, state, selections, scope = "all
   const subsets = [];
   const changed = [];
   const unknown = [];
-  const similarities = [];
   for (let left = 0; left < resolved.length; left++) for (let right = left + 1; right < resolved.length; right++) {
     const a = resolved[left], b = resolved[right];
     if (a.id === b.id || (a.observation && b.observation && a.observation.callId === b.observation.callId)) continue;
-    if (a.identity.path !== b.identity.path) {
-      if (!a.observation || !b.observation) continue;
-      const termsA = new Set(textOf(a.content).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
-      const termsB = new Set(textOf(b.content).toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
-      let intersection = 0;
-      for (const term of termsA) if (termsB.has(term)) intersection++;
-      const score = termsA.size && termsB.size ? intersection / (termsA.size + termsB.size - intersection) : 0;
-      if (score >= 0.35) similarities.push({ first: a.inputIndex, second: b.inputIndex, score: Number(score.toFixed(3)), advisory: "Different read source; lexical similarity is not source identity. No automatic edit or relocation." });
-      continue;
-    }
+    if (a.identity.path !== b.identity.path) continue;
     const revisionChanged = a.identity.revision && b.identity.revision && a.identity.revision !== b.identity.revision;
     if (revisionChanged) {
       changed.push({ first: a.inputIndex, second: b.inputIndex, firstId: a.id, secondId: b.id, path: a.identity.path, reason: "Native file revision changed, including a non-relocatable read result." });
@@ -348,7 +316,7 @@ export function analyzeRepeatedSelections(index, state, selections, scope = "all
       return shared !== undefined && newer !== undefined && (index.positions.get(newer) ?? -1) > pairPosition;
     });
   };
-  return { exact: exact.filter((item) => !invalidatedByLaterChange(item)), subsets: subsets.filter((item) => !invalidatedByLaterChange(item)), changed, unknown, similarities, automaticEdits: 0 };
+  return { exact: exact.filter((item) => !invalidatedByLaterChange(item)), subsets: subsets.filter((item) => !invalidatedByLaterChange(item)), changed, unknown };
 }
 
 export function resolveSource(index, state, { id, binding, version, range } = {}, scope = "all") {

@@ -33,14 +33,14 @@ All mutation names below are actions of `compass_context({operation:{action,...}
 - Copy returned refs unchanged. Never construct IDs, binding paths or versions, decode refs, or extract a context revision from a cursor. Stale mutations reject instead of silently selecting newer content.
 - Prefer remember({text,sources,caveats?}) for compact conclusions/decisions with their sources and caveats. It is Agent-authored memory, not a new observation or Human instruction. pin({sources}) retains complete originals and can cost more; use it only when full content must stay visible. Use skill=true only for the exact complete native Skill-file read.
 - Lifetime defaults to the current Goal, or session before a Goal exists. Explicit lifetime=goal requires a Goal. unpin releases retention without deleting raw history.
-- Context mutations are model-only **direct standalone calls**, never nested/parallel. queued is not committed; the native boundary supplies applied/rejected. Do not poll or retry unknown outcomes blindly. Other plugins may invalidate a queued operation.
+- Context mutations are model-only direct calls, never nested. One pin/unpin/remember may accompany sibling tools; frame/edit operations must be standalone. queued is not committed; the native boundary supplies applied/rejected. Do not poll or retry unknown outcomes blindly. Other plugins may invalidate a queued operation.
 
 ## Optional attention and edits
 
 Open compass_open({capabilities:["context"]}) once when these help; no Goal is required.
 
 - call takes a task and optional capture. ref shares its outer value; copy is private. The applied receipt returns sources in capture order: use those returned refs to edit copies, not the original refs.
-- return exports only exportSources and result; other local work is released. Shared-ref writes survive interruption/return. Frames use the same native session and do not roll back filesystem/environment changes.
+- return exports only exportSources and result; other local work is released. Explicitly exported retained values keep their Goal/session lifetime in the parent; ordinary working exports are not automatically pinned. Shared-ref writes survive interruption/return. Frames use the same native session and do not roll back filesystem/environment changes.
 - load creates a version-checked data copy; replace edits eligible working values; drop preserves complete exchanges; mark records handling. Human originals and executed calls are not editable originals. Source ranges are content-relative, not file coordinates. After replace/spill or a remainder-changing move, use the applied receipt’s updated ref for that value; the old ref no longer names its current content.
 - spill needs a source ref, new project-relative path and purpose. It writes/readbacks a verified artifact; later rejection can leave a reported artifact. No filesystem rollback or silent fallback from a bad artifact is promised.
 - move can relocate eligible working values or verify a complete repeated read against verifiedAgainst. The runtime checks identity/ranges, conflicts and qualifications; no separate comparison/ranking call is needed.

@@ -54,7 +54,7 @@ test("keyword bags rank literal matches; strict all is explicit and result snipp
 
 test("completed search-only Code Mode results do not recursively rank themselves", () => {
   const { index, state } = fixture();
-  const echo = { id: "search-echo", type: "message", message: { role: "toolResult", toolName: "codemode", content: [{ type: "text", text: "needle" }], nestedCalls: { complete: true, calls: [{ name: "compass_context", arguments: { action: "search" } }] } } };
+  const echo = { id: "search-echo", type: "message", message: { role: "toolResult", toolName: "codemode", content: [{ type: "text", text: "needle" }], nestedCalls: { complete: true, calls: [{ name: "compass_context_search", arguments: { query: "needle" } }] } } };
   index.branch.push(echo); index.byId.set(echo.id, echo);
   assert.equal(searchSources(index, state, { scope: "history", query: "needle" }).hits.length, 0);
   assert.equal(searchSources(index, state, { scope: "history", ids: [echo.id], query: "needle" }).hits[0].id, echo.id, "explicit source lookup remains recoverable");

@@ -1,10 +1,11 @@
 import {
-  VALUE_MESSAGE_TYPE, adoptValue, bindingKey, contextRef, contentVersion, copyValue, currentValue, dataBlocks, isValueMessage, logicalSource, questionnaireContent,
+  VALUE_MESSAGE_TYPE, adoptValue, agentAuthored, bindingKey, contextRef, contentVersion, copyValue, currentValue, dataBlocks, isValueMessage, logicalSource, questionnaireContent,
   nativeValueViews, sourceEntries, rawMessage as messageOf, releaseFrameValues, renderValue, snapshotHead, validateValue, valueBinding, valueContent, valueMessage, writeValue,
 } from "./context-values.mjs";
 import { analyzeRepeatedSelections, readObservationIdentity, readOnlyObservation, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
 import { loadContextArtifact, writeContextArtifact } from "./context-artifacts.mjs";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 export { contentVersion } from "./context-values.mjs";
 
 export const CONTEXT_STATE_TYPE = "pi-compass-v2.context";
@@ -243,9 +244,11 @@ function operationFromBoundary(boundary, toolName) {
   const calls = boundary.message?.role === "assistant" ? boundary.message.content.filter((part) => part.type === "toolCall") : [];
   const own = calls.filter((call) => call.name === toolName);
   if (!own.length) return null;
-  if (calls.length !== 1 || boundary.toolResults?.length !== 1) fail("Context mutation must be a standalone tool call, not part of a parallel tool batch.");
-  const result = boundary.toolResults[0];
-  if (result.isError) return null;
+  if (own.length !== 1) fail("Use one context mutation per tool batch.");
+  const result = boundary.toolResults?.find((item) => item.toolCallId === own[0].id);
+  if (!result || result.isError) return null;
+  const ordinaryMemory = ["remember", "pin", "unpin"].includes(result.details?.contextOperation?.action);
+  if (!ordinaryMemory && (calls.length !== 1 || boundary.toolResults?.length !== 1)) fail("Projection-changing context operations must be standalone tool calls.");
   if (result.toolCallId !== own[0].id || !object(result.details?.contextOperation)) return null;
   return { ...result.details.contextOperation, callId: own[0].id, id: boundary.messageEntryId };
 }
@@ -309,7 +312,7 @@ function planReturn({ next, index, boundary, operation }) {
   const summary = frame.summaryId === null ? null : index.byId.get(frame.summaryId);
   if (frame.summaryId !== null && summary?.type !== "compaction") fail("Parent summary is unavailable on this branch.");
   const firstKeptEntryId = frame.saved[0]?.id ?? summary?.id ?? owned.find(external)?.id ?? null;
-  const entries = latestSummary(boundary)?.id !== frame.summaryId
+  const entries = (latestSummary(boundary)?.id ?? null) !== frame.summaryId
     ? [nativeCheckpoint(summary?.summary ?? "", firstKeptEntryId, operation.id)] : [];
   // Iterate raw owned entries, not just the currently visible tail: compaction can hide local process.
   for (const entry of owned) if (!savedIds.has(entry.id) && !external(entry)) entries.push(nativeEdit(entry.id, null));
@@ -325,7 +328,8 @@ function planReturn({ next, index, boundary, operation }) {
       if (forkedView) content = sharedPin ? content : null;
       else content = renderValue(value);
     }
-    entries.push(nativeEdit(saved.id, content));
+    const current = index.active.get(saved.id)?.messages[0];
+    if (content === null || !current || !isDeepStrictEqual(current.content, content)) entries.push(nativeEdit(saved.id, content));
     if (forkedView) entries.push(valueMessage(value));
     if (changed && !forkedView) {
       const owner = next.frames.find((item) => item.id === saved.binding.split("/")[0]);
@@ -336,7 +340,14 @@ function planReturn({ next, index, boundary, operation }) {
   for (const [number, id] of (operation.exportIds ?? []).entries()) {
     const value = selectedValue(next, index, operation, id);
     ensureContent(value.content);
-    entries.push(sourceDataDraft(next, operation, { ...value, caveats: value.head.caveats, provenance: [...new Set([...value.head.sources, value.head.entryId])], readStatus: value.head.readStatus }, "export", number, frame.parent));
+    const draft = sourceDataDraft(next, operation, { ...value, caveats: value.head.caveats, provenance: value.head.sources, readStatus: value.head.readStatus }, "export", number, frame.parent);
+    const retained = next.pins.find((pin) => pin.key === value.key && pin.scope === frame.id);
+    if (retained) {
+      const id = draft.details.sourceId;
+      next.values[draft.details.key] = snapshotHead({ ...draft, id });
+      next.pins.push({ ...retained, id, key: draft.details.key, scope: frame.parent });
+    }
+    entries.push(draft);
   }
   if (operation.result !== undefined && operation.result !== "") {
     ensureText(operation.result, "Return value");
@@ -474,7 +485,7 @@ function sourceDataDraft(state, operation, selected, action, number = 0, owner =
   const content = dataBlocks(selected.content);
   if (!content.length) fail("Selection has no displayable source data; select a text or image part.");
   const id = `${operation.id}:${action}:${number}`;
-  const authored = ["agent-memory", "agent-derived"].includes(selected.authorship ?? selected.head?.origin?.authorship);
+  const authored = agentAuthored(selected.head) || ["agent-memory", "agent-derived"].includes(selected.authorship);
   const selections = selected.selections ?? selected.head?.origin?.selections;
   const binding = selected.binding ?? selected.key;
   const head = {
@@ -483,6 +494,7 @@ function sourceDataDraft(state, operation, selected, action, number = 0, owner =
     ...(selected.readStatus ? { readStatus: { ...structuredClone(selected.readStatus), fullSkillFile: selected.readStatus.fullSkillFile === true && !selected.range && contentVersion(content) === selected.readStatus.payloadVersion } } : {}),
     origin: { id: selected.id, version: selected.version, range: selected.range ?? null, ...(authored ? { authorship: "agent-memory" } : {}), ...(selections ? { selections } : {}), ...(binding ? { ref: contextRef({ binding, version: selected.version }) } : {}) },
   };
+  validateValue(head);
   const draft = valueMessage({ id, key: `${owner}/${id}`, head }, content);
   Object.assign(draft.details, { action, derived: true, referenceId: id, origin: head.origin });
   return draft;
@@ -651,7 +663,7 @@ function planMove({ next, index, operation, boundary, moveComparison }) {
     if (contentVersion(verifiedCut.selected) !== contentVersion(operation.selectedRange) || (!preserveSource && contentVersion(verifiedCut.remaining) !== contentVersion(operation.remaining))) fail(`Selected range payload changed after preparation for source ${id}.`);
     const moved = sourceDataDraft(next, operation, {
       id: value.id, version: value.version, key: value.key, head: value.head, range: operation.range, content: operation.selectedRange,
-      caveats: value.head.caveats, provenance: [...new Set([...value.head.sources, value.id])], readStatus: value.head.readStatus,
+      caveats: value.head.caveats, provenance: value.head.sources, readStatus: value.head.readStatus,
     }, "move-range");
     if (preserveSource) return [moved];
     const head = {

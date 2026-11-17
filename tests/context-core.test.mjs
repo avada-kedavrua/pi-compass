@@ -75,7 +75,9 @@ test("same-session call preserves reserved state, scopes inputs, and restores ra
   assertPaired(manager);
   const recovered = SessionManager.inMemory("/context-core", undefined, [manager.getHeader(), ...manager.getEntries()]);
   assert.equal(restoreContextState(recovered.getBranch()).frames.length, 1);
-  applyOperation(recovered, { action: "return", result: "bounded return" });
+  const returned = applyOperation(recovered, { action: "return", result: "bounded return" });
+  assert.equal(returned.planned.entries.some((entry) => entry.type === "compaction"), false, "an absent summary is not a changed summary");
+  assert.equal(returned.planned.entries.some((entry) => entry.type === "context_edit" && entry.targetId === input), false, "unchanged captured content needs no restore copy");
   assert.match(modelText(recovered), /PARENT PRIVATE CONTEXT/);
   assert.match(modelText(recovered), /bounded return/);
   assert.doesNotMatch(modelText(recovered), /local procedure/);
@@ -103,6 +105,8 @@ test("uncaptured parent ranges load as editable data copies with actionable expo
   const receipt = returned.planned.entries.findLast((entry) => entry.details?.references?.length);
   const exported = receipt.details.references[0];
   assert.equal(sourceVersion(manager, exported.id), exported.version);
+  const foundExport = searchContext(manager.getBranch(), { context: contextPreview(manager) }, returned.state, { ids: [exported.id] });
+  assert.equal(foundExport.hits[0].authorship, "agent-derived");
   assert.match(modelText(manager), /local interpretation/);
   assert.deepEqual(manager.getEntry(parent), original);
   assertPaired(manager);
@@ -280,6 +284,29 @@ test("moving a result payload keeps its complete parallel execution envelope", (
   const before = manager.getEntries().length;
   assert.throws(() => planContextBoundary({ state: control, branch: manager.getBranch(), boundary: stale }), /changed/);
   assert.equal(manager.getEntries().length, before);
+});
+
+test("explicit export preserves retained lifetime and bounded provenance, not ordinary working retention", () => {
+  for (const lifetime of ["goal", "session"]) {
+    const manager = host();
+    const sources = Array.from({ length: 32 }, (_, n) => user(manager, `evidence ${n}`));
+    const selections = sources.map((id) => ({ id, binding: `root/${id}`, version: sourceVersion(manager, id) }));
+    applyOperation(manager, { action: "call", task: "qualified memory" });
+    const remembered = applyOperation(manager, { action: "remember", content: "EXPORTED_CLAIM", selections, lifetime, goalVersion: 1 });
+    const id = remembered.state.pins[0].id;
+    const working = value(manager, "ordinary working export");
+    const returned = applyOperation(manager, { action: "return", exportIds: [id, working] });
+    const refs = returned.planned.entries.findLast((entry) => entry.details?.references?.length).details.references;
+    assert.equal(returned.state.pins.length, 1);
+    assert.equal(returned.state.pins[0].id, refs[0].id);
+    assert.equal(returned.state.pins[0].scope, "root");
+    const recovered = searchContext(manager.getBranch(), { context: contextPreview(manager) }, returned.state, { ids: [refs[0].id] });
+    assert.equal(recovered.hits[0].provenance.length, 32);
+    manager.appendCompaction("summary", null, 0, {}, true);
+    assert.match(JSON.stringify(pinnedContextOverlay(manager.getBranch(), returned.state, [], 1)), /EXPORTED_CLAIM/);
+    assert.equal(/EXPORTED_CLAIM/.test(JSON.stringify(pinnedContextOverlay(manager.getBranch(), returned.state, [], 2))), lifetime === "session");
+    assertPaired(manager);
+  }
 });
 
 test("Goal-scoped retention expires without retiring explicit session data", () => {
@@ -587,7 +614,21 @@ test("native cancellation uses exact arm identity and transfer releases a frame 
   assert.equal(restoreContextState(manager.getBranch()).frames.length, 0);
 });
 
-test("a context mutation in a parallel tool batch is rejected explicitly", () => {
+test("one ordinary memory may accompany sibling tools; projection changes remain standalone", () => {
+  const memory = host();
+  const memoryBoundary = queueOperation(memory, { action: "remember", content: "compact claim", selections: [] });
+  memoryBoundary.message.content.push({ type: "toolCall", id: "other", name: "read", arguments: { path: "x" } });
+  const result = { role: "toolResult", toolCallId: "other", toolName: "read", content: [{ type: "text", text: "sibling output" }], isError: false };
+  memoryBoundary.toolResults.push(result);
+  memoryBoundary.toolResultEntryIds.push(memory.appendMessage(result));
+  memoryBoundary.context = contextPreview(memory);
+  const planned = planContextBoundary({ state: emptyContextState(), branch: memory.getBranch(), boundary: memoryBoundary });
+  appendDrafts(memory, planned.entries);
+  assert.equal(restoreContextState(memory.getBranch()).pins.length, 1);
+  assert.match(modelText(memory), /compact claim|sibling output/);
+  assertPaired(memory);
+
+
   const manager = host();
   user(manager, "parent");
   const boundary = queueOperation(manager, { action: "call", task: "local" });

@@ -235,8 +235,11 @@ export function dataBlocks(content) {
   }
   return blocks;
 }
+export function agentAuthored(head) {
+  return head?.field === "operation" || head?.origin?.authorship === "agent-memory";
+}
 export function renderValue(value, content = value.content, head = value.head) {
-  const label = head.field === "operation" || head.origin?.authorship === "agent-memory" ? "Agent-authored derived value; not a new tool observation or Human instruction" : head.field === "snapshot" ? "Selected source data; not a new tool execution or Human message" : "Retained source value";
+  const label = agentAuthored(head) ? "Agent-authored derived value; not a new tool observation or Human instruction" : head.field === "snapshot" ? "Selected source data; not a new tool execution or Human message" : "Retained source value";
   const handling = head.handling !== "active" ? `\nHandling: ${head.handling}. ${head.handlingReason ?? ""}` : "";
   const header = `[Compass ${contextRef({ binding: value.key, version: head.version })}] ${label}.${handling}`;
   const qualifiers = head.caveats.length ? `\nCaveats:\n${head.caveats.map((text) => `- ${text}`).join("\n")}` : "";

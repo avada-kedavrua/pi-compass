@@ -30,7 +30,7 @@ export function contextToolSchema(extended = false) {
   ];
   if (extended) operations.push(
     operation("call", { task: string(4000, { minLength: 1, description: "Same-session attention frame, not a child Agent or filesystem rollback." }), capture: { ...array(object({ ref, mode: { ...choice("ref", "copy"), description: "ref shares the enclosing value; copy is private. Edit copies only through the new refs returned by call." } }, ["ref", "mode"]), 64), description: "Default none. Applied receipt sources correspond to this order; copies have new refs." } }, ["task"]),
-    operation("return", { result: string(8000), exportSources: { ...array(ref, 64), description: "Only selected values are exported. Other local work is released; writes through shared refs survive." } }),
+    operation("return", { result: string(8000), exportSources: { ...array(ref, 64), description: "Only selected values export; retained values keep their lifetime in the parent. Other local work releases; shared-ref writes survive." } }),
     operation("load", { source: ref, range }, ["source"]),
     operation("replace", { source: ref, text: string(8000, { minLength: 1, description: "Agent-derived replacement. Human originals and executed calls require a private copy. Unpin a pinned value before editing. Use the applied receipt's updated ref for subsequent operations." }), caveats }, ["source", "text"]),
     operation("drop", { sources }, ["sources"]),

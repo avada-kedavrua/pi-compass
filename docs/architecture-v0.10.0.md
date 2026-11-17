@@ -12,15 +12,16 @@ Target: eight initially registered, stable tools. goal alone owns semantic Goal/
   - [x] Verify all eight responsibilities and schema/result journeys against the implementation and documented host boundaries; record F1–F12 and proving checks in the existing consumer audit.
   - [x] Resolve approval composition without another UI/control plane or model copying long payloads. Independent design re-review cleared the interactive-only/full-preview qualification; no code execution claimed. R0 is the design/ledger delivery commit; implementation gates remain open below.
 - **R1 — Context root fixes**
-  - [ ] Distinguish no summary from changed summary; no false return checkpoint. Preserve real inner-compaction restoration and complete exchanges.
-  - [ ] Explicitly exporting a retained value preserves its declared retention lifetime in the parent. Unexported local work stays local.
-  - [ ] Allow one ordinary memory mutation alongside sibling tools; keep projection-changing operations standalone. Reject ambiguous multiple mutations without partial changes.
-  - [ ] Eliminate demonstrably redundant restoration edits, not required history/provenance. Reuse narrow existing tests and the frozen native replay; review, commit and push.
-- **R2 — Single definitions and safe approval**
-  - [ ] Goal is the only criterion-definition owner; remove duplicated plan criterion storage/writers and obsolete triage/capability state. Unsupported GoalRun snapshots fail visibly, no adapter.
+  - [x] Distinguish no summary from changed summary; no false return checkpoint. Preserve real inner-compaction restoration and complete exchanges.
+  - [x] Explicitly exporting a retained value preserves its declared retention lifetime in the parent. Unexported local work stays local; derived authorship and bounded provenance remain recoverable.
+  - [x] Allow one ordinary memory mutation alongside sibling tools; keep projection-changing operations standalone. Reject ambiguous multiple mutations without partial changes.
+  - [x] Eliminate demonstrably redundant restoration edits, not required raw-owned omissions. Native replay: no false checkpoint, 342 edits / 516,412 bytes. Four before-fix behavioral failures; 283/283 full in 4.259 s, core/non-extension/static/native gates PASS. Independent bounded source re-review OK; R1 commit records this delivery.
+- **R2 — Safe approval transport and strict inputs**
+  - [ ] Validate complete criterion text before mutation under the current interface. Canonical definition/storage ownership moves atomically with the eight-tool interface in R3: splitting that shape/API change would require a temporary adapter or a broken intermediate commit.
   - [ ] Code transports the complete exact proposal to the native questionnaire; Agent transports only a proposal ref. Require supported interactive Pi full-preview TUI, canonical expanded input/echo, native identity and current binding before authorization. RPC/unknown/no-UI fail closed; a full echo is not proof that a truncated host showed the full proposal. Declined/partial/custom/UI-error cases stay distinct.
   - [ ] Retain explicit parent/code/read-only-subagent intent, semantic task assessments, unknown-run reconciliation and correlated route/competitor safety. Review, commit and push.
-- **R3 — Eight-tool public surface**
+- **R3 — Eight-tool public surface and canonical definitions**
+  - [ ] Goal alone defines criteria; remove duplicate plan storage/writers and obsolete triage/capability state in one current-only GoalRun schema change. No adapter or migration.
   - [ ] Replace, rather than wrap, old registrations with fixed nonoverlapping action schemas. Delete loader/loadout/capability plumbing and obsolete exports/tests.
   - [ ] A single compact read surface provides requested views; mutation results return the next usable domain refs/state, not internal audits or whole stores. Native tool preferences remain native-owned.
   - [ ] Exercise public calls through installed native loading/dispatch, including initial registration, approval and Code Mode callability. Review, commit and push.
