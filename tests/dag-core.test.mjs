@@ -15,7 +15,7 @@ function plan(state = emptyDagState(), tasks = [
 ]) {
   return createOrRevisePlan(state, {
     goal: "Create a repeatable full-stack smoke test",
-    acceptanceCriteria: ["One documented command or sequence checks the intended critical path", "Failure output identifies which layer failed", "The run cleans up processes it starts"],
+    definitionKey: "fixture-[\"One documented command or sequence checks the intended critical path\", \"Failure output identifies which layer failed\", \"The run cleans up processes it starts\"]",
     tasks,
   });
 }
@@ -84,12 +84,12 @@ test("preserves status only for unchanged tasks under the same goal", () => {
   assert.equal(revised.revision, 2);
 });
 
-test("changing acceptance criteria preserves unchanged task status and evidence", () => {
+test("changing the Goal definition digest preserves task evidence but invalidates assessments", () => {
   let state = plan();
   state = updateTasks(state, [{ id: "inspect-api", status: "done", evidence: "API routes inspected." }]);
   const changed = createOrRevisePlan(state, {
     goal: state.goal,
-    acceptanceCriteria: [...state.acceptanceCriteria, "Smoke must run in CI"],
+    definitionKey: "fixture-[...state.acceptanceCriteria, \"Smoke must run in CI\"]",
     tasks: state.tasks.map(({ id, title, acceptance, dependsOn, output, writeScope }) => ({ id, title, acceptance, dependsOn, output, writeScope })),
   });
   assert.equal(changed.tasks.find((task) => task.id === "inspect-api").status, "done");
@@ -134,7 +134,7 @@ test("material replans preserve a concise reason and changed-task history", () =
   state = updateTasks(state, [{ id: "inspect-api", status: "done", evidence: "API routes inspected." }]);
   const revised = createOrRevisePlan(state, {
     goal: state.goal,
-    acceptanceCriteria: state.acceptanceCriteria,
+    definitionKey: "fixture-state.acceptanceCriteria",
     changeReason: "The first route depended on a liveness-only endpoint; inspect readiness before selecting the smoke path.",
     tasks: [
       { id: "inspect-api", title: "Inspect backend API", acceptance: "Readiness behavior documented", dependsOn: [], writeScope: "read-only" },

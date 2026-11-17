@@ -41,9 +41,8 @@ async function setup(laterHandler, earlierContextHandler, cwd = "/context-integr
   runner.errorListeners.add((error) => errors.push(error));
   runner.abortFn = () => { aborted = true; };
   await runner.emit({ type: "session_start" });
-  // Goal capture itself is unrelated to native provider execution.
+  // Goal capture itself is unrelated to native provider execution; context is a fixed tool.
   await handlers.get("before_agent_start")[0]({ prompt: "Goal: preserve parent context while working locally." }, runner.createContext());
-  await tools.get("compass_open").execute("fixture-context", { capabilities: ["context"] }, undefined, undefined, runner.createContext());
   await runner.emitContext(manager.buildSessionProjection().messages);
   user(manager, "PARENT ONLY");
   // Native protocol fixtures use entry IDs; actual public calls use only refs.
@@ -71,14 +70,14 @@ async function setup(laterHandler, earlierContextHandler, cwd = "/context-integr
     const input = intent(parameters);
     const id = `integration-${++nextCall}`;
     const message = {
-      role: "assistant", content: [{ type: "toolCall", id, name: "compass_context", arguments: { operation: input } }],
+      role: "assistant", content: [{ type: "toolCall", id, name: "compass_context", arguments: input }],
       api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now(),
     };
     const messageEntryId = manager.appendMessage(message);
     let output;
     try {
       const tool = tools.get("compass_context");
-      output = await tool.execute(id, validateToolArguments(tool, { name: tool.name, arguments: { operation: input } }), undefined, undefined, runner.createContext());
+      output = await tool.execute(id, validateToolArguments(tool, { name: tool.name, arguments: input }), undefined, undefined, runner.createContext());
     }
     catch (error) { output = { isError: true, content: [{ type: "text", text: String(error.message) }] }; }
     const result = { role: "toolResult", toolCallId: id, toolName: "compass_context", ...output, timestamp: Date.now() };
@@ -157,7 +156,7 @@ test("Agent data-only path enters a long frame and receives correlated terminal 
   assert.equal(JSON.parse(receipt.content).resultStatus, "applied");
   assert.equal(receipt.details.revision, 2);
   assert.match(receipt.details.callId, /^integration-/);
-  await assert.rejects(() => tool.execute("invalid-mark", { operation: { action: "mark", source: source.ref } }, undefined, undefined, host.runner.createContext()), /Handling rationale|Mark requires/);
+  await assert.rejects(() => tool.execute("invalid-mark", { action: "mark", source: source.ref }, undefined, undefined, host.runner.createContext()), /Handling rationale|Mark requires/);
   assert.equal(restoreContextState(host.manager.getBranch()).revision, 2, "invalid mutation is rejected before returning queued");
   await host.turn({ action: "return", expectedRevision: 2, result: "evidence retained" });
   assert.equal(restoreContextState(host.manager.getBranch()).frames.length, 0);
@@ -199,7 +198,7 @@ test("verified repeat relocation crosses the native tool schema and keeps both r
   const compared = structuredClone(host.manager.getEntry(second));
   const beforeBytes = Buffer.byteLength(modelText(host.manager));
   const version = sourceVersion(host.manager, first);
-  assert.ok(host.tools.get("compass_context").parameters.properties.operation.anyOf.flatMap((variant) => variant.anyOf ?? [variant]).some((variant) => variant.properties.verifiedAgainst));
+  assert.ok(host.tools.get("compass_context").parameters.anyOf.flatMap((variant) => variant.anyOf ?? [variant]).some((variant) => variant.properties.verifiedAgainst));
   await host.turn({ action: "move", expectedRevision: 0, ids: [first], version, verifiedAgainst: { id: second, version } });
   assert.deepEqual(host.manager.getEntry(first), prior);
   assert.deepEqual(host.manager.getEntry(second), compared);
@@ -483,7 +482,7 @@ test("spill verifies a project artifact before removing context and load recheck
     assertPaired(host.manager);
     const before = restoreContextState(host.manager.getBranch());
     await writeFile(path.join(root, "evidence.json"), "tampered");
-    await assert.rejects(host.tools.get("compass_context").execute("failed-load", { operation: { action: "load", source: host.ref(id) } }, undefined, undefined, host.runner.createContext()), /digest|byte length/);
+    await assert.rejects(host.tools.get("compass_context").execute("failed-load", { action: "load", source: host.ref(id) }, undefined, undefined, host.runner.createContext()), /digest|byte length/);
     assert.deepEqual(restoreContextState(host.manager.getBranch()), before);
     assert.deepEqual(host.errors, []);
   } finally { await rm(root, { recursive: true, force: true }); }

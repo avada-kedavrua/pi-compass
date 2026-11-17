@@ -1,6 +1,7 @@
 import {
   VALUE_MESSAGE_TYPE, adoptValue, agentAuthored, bindingKey, contextRef, contentVersion, copyValue, currentValue, dataBlocks, isValueMessage, logicalSource, questionnaireContent,
   nativeValueViews, sourceEntries, rawMessage as messageOf, releaseFrameValues, renderValue, snapshotHead, validateValue, valueBinding, valueContent, valueMessage, writeValue,
+  RESERVED_CUSTOM_TYPES,
 } from "./context-values.mjs";
 import { analyzeRepeatedSelections, readObservationIdentity, readOnlyObservation, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
 import { loadContextArtifact, writeContextArtifact } from "./context-artifacts.mjs";
@@ -18,7 +19,7 @@ const MAX_CONTROL_BYTES = 2 * 1024 * 1024;
 const MAX_PINS = 64;
 const MAX_CONTENT_BYTES = 128 * 1024;
 const EXTERNAL_MESSAGES = new Set(["watch-condition", "watch-lost", "subagent-result"]);
-const RESERVED_MESSAGES = new Set(["pi-compass-v2.goalrun-state", "pi-compass-v2.goalrun-anchor", "pi-compass-v2.conventions"]);
+const RESERVED_MESSAGES = new Set(RESERVED_CUSTOM_TYPES);
 
 function fail(message) { throw new Error(`${message} No context changed.`); }
 function recoveryRequired(message) {

@@ -3,7 +3,7 @@ import { emptyDagState, readyTasks, createOrRevisePlan, taskAssessmentBinding, t
 import { approvalIsCurrent, clearDagApprovalAnswer, createDagApprovalRequest, dagApprovalBinding, matchesDagApprovalQuestion } from "./dag-approval.mjs";
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 
-export const GOAL_RUN_API_VERSION = 8;
+export const GOAL_RUN_API_VERSION = 9;
 export const GOAL_RUN_RELEASE = "0.10.0";
 
 const MAX_DECISIONS = 8;
@@ -26,7 +26,7 @@ const CANCELLATION_TERMINAL_STATUSES = new Set([
 
 export function emptyGoalRunState() {
   return {
-    schemaVersion: 8,
+    schemaVersion: 9,
     stateRevision: 0,
     eventSeq: 1,
     events: [],
@@ -38,7 +38,6 @@ export function emptyGoalRunState() {
       originalSourceIds: [],
       reviewedInputId: null,
       constraints: [],
-      acceptanceCriteria: [],
       criteria: [],
       nextAcceptanceNumber: 1,
       version: 0,
@@ -53,11 +52,7 @@ export function emptyGoalRunState() {
     nextDecisionNumber: 1,
     nextCheckpointNumber: 1,
     trace: { failures: [], writes: [] },
-    activeCapabilities: [],
-    triageRuns: [],
-    nextTriageNumber: 1,
     projectRoot: null,
-    nativeToolSignature: null,
   };
 }
 
@@ -267,7 +262,7 @@ function normalizeRouteSet(value, fallbackGoalVersion = 1) {
     id: clip(value.id, 128),
     goalVersion,
     baselineRef: clip(value.baselineRef, 300),
-    acceptanceCriteria: normalizeRouteCriteria(value.acceptanceCriteria),
+    criteria: normalizeRouteCriteria(value.criteria),
     routes,
     selectedRouteId: routeIds.has(value.selectedRouteId) ? value.selectedRouteId : null,
     winningRouteId: routeIds.has(value.winningRouteId) ? value.winningRouteId : null,
@@ -306,33 +301,41 @@ function routeSetBinding(routeSet, goal = "") {
     goalVersion: routeSet.goalVersion,
     goal,
     baselineRef: routeSet.baselineRef,
-    acceptanceCriteria: routeSet.acceptanceCriteria,
+    criteria: routeSet.criteria,
     routes: routeSet.routes.map((route) => ({ ...route })),
     exploration: Object.fromEntries(Object.entries(routeSet.exploration).filter(([key]) => key !== "proposalBinding")),
   })).digest("hex");
 }
 const nonEmpty = (value, name, max = 4000) => {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${name} must be a non-empty string.`);
-  return clip(value, max);
+  const text = value.trim();
+  if (text.length > max) throw new Error(`${name} must be at most ${max} characters; text is never clipped.`);
+  return text;
 };
 
-function textFingerprint(text) {
-  return createHash("sha256").update(text).digest("hex");
-}
 
-export function normalizeGoalRunState(raw) {
+export function normalizeGoalRunState(input) {
   const empty = emptyGoalRunState();
-  if (!raw) return empty;
-  if (typeof raw !== "object" || raw.schemaVersion !== 8) throw new Error("Unsupported Compass GoalRun schema. Open a new session or navigate to a supported branch; no state changed.");
-  const rawGoal = raw.goal && typeof raw.goal === "object" ? raw.goal : {};
+  if (input === undefined || input === null) return empty;
+  if (typeof input !== "object" || Array.isArray(input) || input.schemaVersion !== 9) throw new Error("Unsupported Compass GoalRun schema. Open a new session or navigate to a supported branch; no state changed.");
+  // Every transition owns its entire candidate, including nested proposal/assessment records.
+  // Never mutate a previous state or Pi's persisted entry through a shallow copy.
+  const raw = structuredClone(input);
+  if (!raw.goal || typeof raw.goal !== "object" || !raw.plan || !Array.isArray(raw.plan.tasks)
+    || !Number.isSafeInteger(raw.goal.version) || raw.goal.version < 0
+    || !(raw.goal.current === null || typeof raw.goal.current === "string" && raw.goal.current.trim() && raw.goal.current.length <= 4000)
+    || !Array.isArray(raw.goal.constraints) || raw.goal.constraints.length > 24 || raw.goal.constraints.some((text) => typeof text !== "string" || !text.trim() || text.length > 600)
+    || !Array.isArray(raw.goal.criteria) || raw.goal.criteria.length > MAX_ACCEPTANCE_CRITERIA
+    || raw.goal.criteria.some((item) => !item || !/^AC[1-9]\d*$/.test(item.id) || typeof item.text !== "string" || !item.text.trim() || item.text.length > 300)
+    || raw.plan.tasks.length > 24 || raw.plan.tasks.some((task) => !task || !["parent", "code", "subagent"].includes(task.executor) || task.executor === "subagent" && task.writeScope !== "read-only")
+    || (!raw.goal.current && (raw.goal.version !== 0 || raw.plan.tasks.length || raw.routeSet || raw.goal.criteria.length))) throw new Error("Invalid current GoalRun metadata; no reset or state change. Recover a supported native branch.");
+  const rawGoal = raw.goal;
   const state = {
     ...empty,
-    schemaVersion: 8,
+    schemaVersion: 9,
     stateRevision: Number.isSafeInteger(raw.stateRevision) && raw.stateRevision >= 0 ? raw.stateRevision : 0,
     eventSeq: Number.isSafeInteger(raw.eventSeq) && raw.eventSeq >= 1 ? raw.eventSeq : 1,
     events: Array.isArray(raw.events) ? raw.events.slice(-MAX_EVENTS) : [],
-    triageRuns: Array.isArray(raw.triageRuns) ? raw.triageRuns.slice(-6) : [],
-    nextTriageNumber: Number.isInteger(raw.nextTriageNumber) ? raw.nextTriageNumber : 1,
     goal: {
       ...empty.goal,
       original: rawGoal.original ?? null,
@@ -342,7 +345,6 @@ export function normalizeGoalRunState(raw) {
       originalSourceIds: Array.isArray(rawGoal.originalSourceIds) ? rawGoal.originalSourceIds : [],
       reviewedInputId: rawGoal.reviewedInputId ?? null,
       constraints: Array.isArray(rawGoal.constraints) ? rawGoal.constraints : [],
-      acceptanceCriteria: Array.isArray(rawGoal.acceptanceCriteria) ? rawGoal.acceptanceCriteria : [],
       criteria: Array.isArray(rawGoal.criteria) ? rawGoal.criteria : [],
       nextAcceptanceNumber: rawGoal.nextAcceptanceNumber,
       version: rawGoal.version,
@@ -363,17 +365,12 @@ export function normalizeGoalRunState(raw) {
       writes: Array.isArray(raw.trace?.writes) ? raw.trace.writes.slice(-MAX_WRITES) : [],
     },
     projectRoot: typeof raw.projectRoot === "string" ? raw.projectRoot : null,
-    nativeToolSignature: typeof raw.nativeToolSignature === "string" ? raw.nativeToolSignature : null,
   };
-  state.triageRuns = Array.isArray(state.triageRuns) ? state.triageRuns.slice(-6) : [];
-  const maxTriageNumber = state.triageRuns.reduce((max, item) => Math.max(max, Number(String(item?.id ?? "").replace(/^T/, "")) || 0), 0) + 1;
-  state.nextTriageNumber = Math.max(Number.isInteger(state.nextTriageNumber) ? state.nextTriageNumber : 1, maxTriageNumber);
   state.goal.version = Number.isInteger(state.goal.version) && state.goal.version >= 0 ? state.goal.version : 0;
   state.goal.sourceIds = Array.isArray(state.goal.sourceIds) ? state.goal.sourceIds.filter((id) => typeof id === "string").slice(0, 16) : [];
   state.goal.originalSourceIds = Array.isArray(state.goal.originalSourceIds) ? state.goal.originalSourceIds.filter((id) => typeof id === "string").slice(0, 16) : [];
   state.goal.reviewedInputId = typeof state.goal.reviewedInputId === "string" ? state.goal.reviewedInputId : null;
   state.goal.constraints = Array.isArray(state.goal.constraints) ? state.goal.constraints.filter((item) => typeof item === "string").slice(0, 24) : [];
-  state.goal.acceptanceCriteria = Array.isArray(state.goal.acceptanceCriteria) ? state.goal.acceptanceCriteria.filter((item) => typeof item === "string" && item.trim()).slice(0, MAX_ACCEPTANCE_CRITERIA) : [];
   const validAcceptanceStatuses = new Set(["unverified", "reported_pass", "failed", "blocked", "inconclusive"]);
   state.goal.criteria = Array.isArray(state.goal.criteria) ? state.goal.criteria.filter((item) => item && typeof item === "object" && typeof item.text === "string" && item.text.trim()).slice(0, MAX_ACCEPTANCE_CRITERIA).map((item, index) => ({
     ...item,
@@ -389,7 +386,6 @@ export function normalizeGoalRunState(raw) {
   state.plan = {
     ...emptyDagState(),
     ...state.plan,
-    acceptanceCriteria: Array.isArray(state.plan.acceptanceCriteria) ? state.plan.acceptanceCriteria : [],
     planHistory: Array.isArray(state.plan.planHistory) ? state.plan.planHistory.slice(-8) : [],
     activity: Array.isArray(state.plan.activity) ? state.plan.activity.slice(-8) : [],
     executionHistory: Array.isArray(state.plan.executionHistory) ? state.plan.executionHistory.slice(-8).filter((item) => item && typeof item === "object" && typeof item.requestId === "string").map((item) => ({
@@ -443,7 +439,6 @@ export function normalizeGoalRunState(raw) {
     state.goal.originalSourceIds = [];
     state.goal.reviewedInputId = null;
     state.goal.constraints = [];
-    state.goal.acceptanceCriteria = [];
     state.goal.criteria = [];
     state.plan = emptyDagState();
     state.routeSet = null;
@@ -452,10 +447,6 @@ export function normalizeGoalRunState(raw) {
   if (!state.trace || typeof state.trace !== "object") state.trace = { failures: [], writes: [] };
 
   const version = state.goal.version;
-  state.activeCapabilities = Array.isArray(raw.activeCapabilities)
-    ? [...new Set(raw.activeCapabilities.filter((item) => typeof item === "string" && item !== "root"))]
-    : [];
-  if (state.goal.criteria.length) state.goal.acceptanceCriteria = state.goal.criteria.filter((item) => item.goalVersion === version).map((item) => item.text);
   for (const item of state.humanDecisions) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
   for (const item of state.decisions) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
   for (const item of state.checkpoints) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
@@ -484,7 +475,7 @@ function appendEvent(state, kind, input = {}) {
   return event;
 }
 
-function syncAcceptanceCriteria(state, criteria, source = "plan") {
+function syncAcceptanceCriteria(state, criteria, source = "goal") {
   const texts = validateGoalCriteria(criteria);
   const prior = new Map((state.goal.criteria ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => [item.text, item]));
   const next = [];
@@ -501,7 +492,6 @@ function syncAcceptanceCriteria(state, criteria, source = "plan") {
       });
     }
   }
-  state.goal.acceptanceCriteria = texts;
   state.goal.criteria = next;
   return next;
 }
@@ -565,22 +555,6 @@ function outcomeSummary(state, acceptance = acceptanceSummary(state)) {
   };
 }
 
-export function defineAcceptanceCriteria(stateValue, criteria) {
-  const state = normalizeGoalRunState(stateValue);
-  if (!state.goal.current) throw new Error("No Goal exists in this session.");
-  if (!Array.isArray(criteria) || criteria.length < 1) throw new Error("Provide at least one concrete acceptance criterion.");
-  const normalized = validateGoalCriteria(criteria);
-  if (state.plan.tasks.length && JSON.stringify(normalized) !== JSON.stringify(state.plan.acceptanceCriteria)) {
-    throw new Error("A DAG exists. Change Goal-level acceptance criteria through the DAG revision so task dependencies and acceptance stay consistent.");
-  }
-  const before = JSON.stringify(state.goal.acceptanceCriteria);
-  syncAcceptanceCriteria(state, normalized, "explicit_goal_criteria");
-  if (JSON.stringify(state.goal.acceptanceCriteria) !== before) {
-    appendEvent(state, "acceptance_defined", { summary: `Defined ${state.goal.acceptanceCriteria.length} acceptance criteria.` });
-  }
-  return { state, criteria: state.goal.criteria, changed: JSON.stringify(state.goal.acceptanceCriteria) !== before };
-}
-
 export function recordAcceptanceResult(stateValue, input) {
   const state = normalizeGoalRunState(stateValue);
   const criterionId = nonEmpty(input?.criterionId, "criterionId", 24);
@@ -625,13 +599,17 @@ function validateSourceIds(value) {
 }
 
 function validateGoalCriteria(value) {
-  if (!Array.isArray(value) || value.length > MAX_ACCEPTANCE_CRITERIA) throw new Error(`acceptanceCriteria must be an array of at most ${MAX_ACCEPTANCE_CRITERIA} strings.`);
+  if (!Array.isArray(value) || value.length > MAX_ACCEPTANCE_CRITERIA) throw new Error(`criteria must be an array of at most ${MAX_ACCEPTANCE_CRITERIA} strings.`);
   const items = value.map((item, index) => {
-    if (typeof item !== "string" || !item.trim() || item.trim().length > 300) throw new Error(`acceptanceCriteria[${index}] must be a non-empty string of at most 300 characters.`);
+    if (typeof item !== "string" || !item.trim() || item.trim().length > 300) throw new Error(`criteria[${index}] must be a non-empty string of at most 300 characters.`);
     return item.trim();
   });
-  if (new Set(items).size !== items.length) throw new Error("acceptanceCriteria must not contain duplicates.");
+  if (new Set(items).size !== items.length) throw new Error("criteria must not contain duplicates.");
   return items;
+}
+
+function goalDefinitionKey(goal) {
+  return createHash("sha256").update(JSON.stringify({ current: goal.current, constraints: goal.constraints, criteria: goal.criteria.filter((item) => item.goalVersion === goal.version).map(({ id, text }) => ({ id, text })) })).digest("hex");
 }
 
 export function setGoal(stateValue, input = {}) {
@@ -648,16 +626,14 @@ export function setGoal(stateValue, input = {}) {
   if (new Set(constraints).size !== constraints.length) throw new Error("constraints must not contain exact duplicates.");
   const replacing = Boolean(state.goal.current) && state.goal.current !== current;
   const creating = !state.goal.current;
-  const criteriaProvided = Object.hasOwn(input, "acceptanceCriteria");
-  const criteria = criteriaProvided ? validateGoalCriteria(input.acceptanceCriteria)
+  const criteriaProvided = Object.hasOwn(input, "criteria");
+  const criteria = criteriaProvided ? validateGoalCriteria(input.criteria)
     : (creating || replacing ? [] : (state.goal.criteria ?? []).filter((item) => item.goalVersion === state.goal.version).map((item) => item.text));
   if (replacing && hasUnresolvedExecution(state)) throw new Error("Cannot replace the Goal while native execution or competitor identity is unresolved. No state changed.");
-  if (!replacing && !creating && state.plan.tasks.length && criteriaProvided && JSON.stringify(criteria) !== JSON.stringify(state.goal.acceptanceCriteria)) {
-    throw new Error("A DAG exists; change acceptance criteria through revisePlanState. No state changed.");
-  }
   const oldConstraints = JSON.stringify(state.goal.constraints ?? []);
   const oldCriteria = JSON.stringify((state.goal.criteria ?? []).filter((item) => item.goalVersion === state.goal.version).map((item) => item.text));
   const semanticChanged = oldConstraints !== JSON.stringify(constraints) || oldCriteria !== JSON.stringify(criteria);
+  if (!creating && semanticChanged && hasUnresolvedExecution(state)) throw new Error("Cannot change Goal definitions while native execution or competitor identity is unresolved. Consume terminal results or reconcile first. No state changed.");
   const sameTextMetadataChanged = !creating && !replacing && (semanticChanged
     || JSON.stringify(state.goal.sourceIds) !== JSON.stringify(sourceIds)
     || state.goal.reviewedInputId !== state.latestHumanEntryId);
@@ -673,13 +649,21 @@ export function setGoal(stateValue, input = {}) {
     state.plan = emptyDagState();
     state.routeSet = null;
     state.goal.criteria = [];
-    state.goal.acceptanceCriteria = [];
   }
   state.goal.current = current;
   state.goal.sourceIds = [...sourceIds];
   state.goal.reviewedInputId = state.latestHumanEntryId;
   state.goal.constraints = constraints;
-  if (criteriaProvided || creating || replacing) syncAcceptanceCriteria(state, criteria, "explicit_goal_criteria");
+  if (criteriaProvided || creating || replacing) syncAcceptanceCriteria(state, criteria, "goal");
+  if (semanticChanged && !creating && !replacing) {
+    state.routeSet = null;
+    state.plan.routeId = null;
+    if (state.plan.tasks.length) {
+      state.plan.definitionKey = goalDefinitionKey(state.goal);
+      state.plan.approval = null;
+      state.plan.approvalRequest = criteria.length ? createDagApprovalRequest(state) : null;
+    }
+  }
   if (criteriaProvided && oldCriteria !== JSON.stringify(criteria)) appendEvent(state, "acceptance_defined", { summary: `Defined ${criteria.length} explicit acceptance criteria.` });
   if (creating) appendEvent(state, "goal_created", { summary: `Explicit Goal created from ${sourceIds.length} Human source reference(s).`, ref: sourceIds[0] });
   else if (replacing) appendEvent(state, "goal_replaced", { summary: `Current Goal replaced at version ${state.goal.version}.`, ref: sourceIds[0] });
@@ -731,8 +715,8 @@ export function captureHumanDecision(stateValue, input) {
   };
   state.humanDecisions = [...state.humanDecisions, item].slice(-MAX_HUMAN_DECISIONS);
   if (correlatedApprovalAnswer) {
-    approvalRequest.status = "answered";
-    const approvalAnswerClear = clearDagApprovalAnswer(approvalRequest, questionnaire);
+    const approvalAnswerClear = clearDagApprovalAnswer(approvalRequest, questionnaire, rawDetails);
+    approvalRequest.status = questionnaire?.outcome === "declined" ? "declined" : approvalAnswerClear ? "answered" : "modified";
     const approvalDefinitionCurrent = approvalRequest.binding === dagApprovalBinding(state);
     if (approvalAnswerClear && approvalDefinitionCurrent) {
       state.plan.approval = {
@@ -920,76 +904,6 @@ export function mergeTrace(stateValue, traceEntries = []) {
   return state;
 }
 
-export function hasUsefulTrace(stateValue) {
-  const state = normalizeGoalRunState(stateValue);
-  const version = state.goal.version ?? 1;
-  return state.trace.failures.some((item) => item.goalVersion === version) || state.trace.writes.some((item) => item.goalVersion === version);
-}
-
-function stripQuotedRegions(text) {
-  if (typeof text !== "string") return "";
-  const output = [];
-  let fence = null;
-  for (const line of text.split(/\r?\n/)) {
-    const marker = line.match(/^\s*(`{3,}|~{3,})/);
-    if (marker) {
-      const token = marker[1];
-      if (!fence) fence = { char: token[0], length: token.length };
-      else if (token[0] === fence.char && token.length >= fence.length) fence = null;
-      continue;
-    }
-    if (fence || /^\s*>/.test(line)) continue;
-    output.push(line);
-  }
-  return output.join("\n").trim();
-}
-
-function normalizeHeading(line) {
-  return String(line ?? "").trim().replace(/^#{1,6}\s*/, "").replace(/\s*[:：]\s*$/, "").trim();
-}
-
-function isAcceptanceHeading(line) {
-  const value = String(line ?? "").trim().replace(/^#{1,6}\s*/, "");
-  return /^(?:acceptance(?:\s+(?:criteria|conditions?|checks?))?|验收(?:标准|条件|准则|要求)?)\s*(?:\([^)]*\))?\s*(?:[:：].*)?$/i.test(value);
-}
-
-function isConventionHeading(line) {
-  const raw = String(line ?? "").trim().replace(/^#{1,6}\s*/, "");
-  const value = raw.replace(/\s*[:：].*$/, "").trim();
-  return /^(?:conventions?|working conventions?|coding conventions?|preferences?|coding preferences|工作约定|编码约定|开发习惯|工作偏好|偏好)$/i.test(value);
-}
-
-function isOtherSectionHeading(line) {
-  const raw = String(line ?? "").trim();
-  if (/^#{1,6}\s+/.test(raw)) return true;
-  const value = String(raw).replace(/\s*[:：].*$/, "").trim();
-  return /^(?:goal|objective|scope|current state|context|background|deliverables?|constraints?|restrictions?|requirements?|rules?|implementation plan|workflow|interaction flow|core effects|verification|约束|限制|需求|要求|交付物|范围|当前状态|上下文|背景|核心效果|交互流程|实现流程|验证|必读契约|已完成|已知问题|问题列表|仓库与现状)$/i.test(value);
-}
-
-function failureSignature(item) {
-  const error = String(item?.error ?? "").toLowerCase()
-    .replace(/(?:[a-z]:)?[\\/][^\s:'"<>]+/g, "<path>")
-    .replace(/\b\d+\b/g, "#")
-    .replace(/\s+/g, " ")
-    .trim();
-  return `${item?.tool || "unknown"}|${error.slice(0, 140)}`;
-}
-
-export function shouldSurfaceIssueReview(stateValue) {
-  const state = normalizeGoalRunState(stateValue);
-  const version = state.goal.version;
-  const failures = state.trace.failures.filter((item) => item.goalVersion === version).slice(-6);
-  if (failures.length < 3) return false;
-  const last = failures.slice(-3);
-  if (new Set(last.map((item) => item.tool)).size > 2) return false;
-  const counts = new Map();
-  for (const item of last) {
-    const signature = failureSignature(item);
-    counts.set(signature, (counts.get(signature) ?? 0) + 1);
-  }
-  return [...counts.values()].some((count) => count >= 2);
-}
-
 export function buildGoalDetails(stateValue) {
   const state = normalizeGoalRunState(stateValue);
   return {
@@ -999,49 +913,6 @@ export function buildGoalDetails(stateValue) {
     criteria: state.goal.criteria.filter((item) => item.goalVersion === state.goal.version).map((item) => ({ id: item.id, text: item.text, status: item.status })),
     humanAnswers: state.humanDecisions.filter((item) => item.goalVersion === state.goal.version).map((item) => ({ id: item.id, sourceEntryId: item.sourceEntryId, sourceCallId: item.sourceCallId, ...(item.questionnaire ? { questionnaire: item.questionnaire } : { text: item.text }) })),
   };
-}
-
-export function buildIssueReview(stateValue, issue, evidenceRefs = []) {
-  const state = normalizeGoalRunState(stateValue);
-  const version = state.goal.version ?? 1;
-  const refs = [...new Set((Array.isArray(evidenceRefs) ? evidenceRefs : []).map((value) => String(value)))].slice(0, 8);
-  const referenced = refs.map((id) => state.events.find((event) => event.id === id && event.goalVersion === version)).filter(Boolean);
-  const issueText = String(issue || referenced.map((item) => item.summary).join("; ") || "unspecified");
-  const lines = [
-    "Route review: evidence only; Agent owns semantic choice.",
-    `Issue: ${clip(issueText, 240)}`,
-    ...(issueText.length > 240 ? [`Issue preview only (${issueText.length} input characters); detailed evidence should be referenced by event ID, not copied into future reviews.`] : []),
-    `Goal v${version}: ${clip(state.goal.current || "unknown", 260)}`,
-    ...(state.goal.current !== state.goal.original ? [`Original Goal (historical): ${clip(state.goal.original || "unknown", 180)}`] : []),
-    `Acceptance: ${acceptanceStatus(state).status} (${acceptanceStatus(state).passed}/${acceptanceStatus(state).total} reported pass; ${acceptanceStatus(state).failed} failed; ${acceptanceStatus(state).blocked} blocked).`,
-    `Goal outcome: ${goalOutcomeStatus(state).status}; evidence=${goalOutcomeStatus(state).evidenceLevel}; independentlyVerified=false.`,
-  ];
-  if (referenced.length) {
-    lines.push("Referenced current-Goal events:", ...referenced.map((event) => `- ${event.id} ${event.kind} ${event.at}: ${clip(event.summary, 150)}`));
-  }
-  if (state.plan?.tasks?.length) {
-    const plan = state.plan;
-    const ready = readyTasks(plan).map((task) => task.id);
-    const done = plan.tasks.filter((task) => task.status === "done").length;
-    const inProgress = plan.tasks.filter((task) => task.status === "in_progress").map((task) => task.id);
-    const blocked = plan.tasks.filter((task) => task.status === "blocked").map((task) => task.id);
-    lines.push(`DAG r${plan.revision}/s${plan.stateVersion ?? 0}: ${done}/${plan.tasks.length} done; in-progress=${inProgress.join(",") || "-"}; blocked=${blocked.join(",") || "-"}; ready=${ready.join(",") || "-"}.`);
-    const changed = plan.planHistory?.at(-1);
-    if (changed) lines.push(`Last plan change: ${clip(changed.summary, 120)}; reason: ${clip(changed.reason || "not recorded", 120)}.`);
-  } else lines.push("No DAG exists; do not create one solely for triage.");
-  const decisions = state.decisions.filter((item) => item.goalVersion === version).slice(-2);
-  if (decisions.length) lines.push("Recent decisions:", ...decisions.map((item) => `- ${item.id}: ${clip(item.summary, 120)}; rationale=${clip(item.rationale || "?", 90)}; evidence=${clip(item.evidence || "?", 90)}`));
-  const checkpoints = state.checkpoints.filter((item) => item.goalVersion === version && item.ref).slice(-1);
-  if (checkpoints.length) lines.push(`Latest recoverable checkpoint: ${checkpoints[0].id} ${clip(checkpoints[0].summary, 100)}; ref=${clip(checkpoints[0].ref, 100)}.`);
-  if (!referenced.length) {
-    const failures = state.trace.failures.filter((item) => item.goalVersion === version).slice(-3);
-    if (failures.length) lines.push("Recent failures (observations, not diagnoses):", ...failures.map((item) => `- ${item.at} ${item.tool}: ${clip(item.error, 130)}`));
-    const writes = state.trace.writes.filter((item) => item.goalVersion === version).slice(-2);
-    if (writes.length) lines.push("Recent writes:", ...writes.map((item) => `- ${item.tool}: ${clip(item.target, 120)}`));
-  }
-  lines.push("Before acting, compare with the existing plan and evidence. Decide whether to continue, locally repair, revise the plan, or use a real recoverable checkpoint. No automatic rollback.");
-  const result = lines.join("\n");
-  return result.length > 2800 ? `${result.slice(0, 2730)}\n[Details omitted; reference event IDs for focused review.]` : result;
 }
 
 function eventSequence(id) {
@@ -1129,68 +1000,6 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
   return result;
 }
 
-function triageFingerprint(state, issue, refs) {
-  const version = state.goal.version ?? 1;
-  const materialEvents = state.events.filter((event) => event.goalVersion === version && event.kind !== "triage_review");
-  const latestMaterialSeq = materialEvents.length ? (eventSequence(materialEvents.at(-1).id) ?? 0) : 0;
-  const acceptance = state.goal.criteria.filter((item) => item.goalVersion === version).map((item) => [item.id, item.status, item.evidence]);
-  return textFingerprint(JSON.stringify({
-    goalVersion: version,
-    issue: String(issue || "").toLowerCase().replace(/\s+/g, " ").trim(),
-    refs: [...refs].sort(),
-    latestMaterialSeq,
-    planRevision: state.plan.revision ?? 0,
-    planStateVersion: state.plan.stateVersion ?? 0,
-    acceptance,
-  }));
-}
-
-export function triageIssue(stateValue, input = {}) {
-  const state = normalizeGoalRunState(stateValue);
-  if (!state.goal.current) throw new Error("No Goal exists; issue review is unavailable.");
-  if (input.issue !== undefined && typeof input.issue !== "string") throw new Error("issue must be a string. No state changed.");
-  const issue = typeof input.issue === "string" ? input.issue.trim() : "";
-  // A hard 240-character schema limit caused avoidable validation failures
-  // when a model included a little more context. Accept a bounded input, retain
-  // only a short preview in state/output, and fingerprint the full normalized
-  // issue so long inputs do not create ambiguous duplicate matches.
-  if (issue.length > 4000) throw new Error("issue must be at most 4000 characters; summarize the problem and reference event IDs instead of pasting a log. No state changed.");
-  const refs = [...new Set((Array.isArray(input.evidenceRefs) ? input.evidenceRefs : []).map((value) => String(value)))];
-  if (refs.length > 8) throw new Error("At most 8 evidenceRefs are allowed. No state changed.");
-  if (!issue && !refs.length) throw new Error("Provide a concise issue or at least one evidenceRefs event ID. No state changed.");
-  const version = state.goal.version ?? 1;
-  for (const ref of refs) {
-    if (eventSequence(ref) === null) throw new Error(`Invalid evidence reference "${ref}"; expected an event ID such as E42. No state changed.`);
-    const event = state.events.find((item) => item.id === ref);
-    if (!event) throw new Error(`Evidence reference "${ref}" is not in retained history. Use a current event ID from compass_state or provide a concise issue. No state changed.`);
-    if (event.goalVersion !== version) throw new Error(`Evidence reference "${ref}" belongs to Goal v${event.goalVersion}, not current Goal v${version}. No state changed.`);
-  }
-  const fingerprint = triageFingerprint(state, issue, refs);
-  const prior = state.triageRuns.find((item) => item.fingerprint === fingerprint && item.goalVersion === version);
-  if (prior) return { state, duplicate: true, item: prior, review: "", summary: clip(prior.summary, 520) };
-  const review = buildIssueReview(state, issue || refs.map((ref) => state.events.find((event) => event.id === ref)?.summary).filter(Boolean).join("; "), refs);
-  const item = {
-    id: `T${state.nextTriageNumber++}`,
-    at: timestamp(),
-    goalVersion: version,
-    fingerprint,
-    issue: clip(issue || refs.join(", "), 240),
-    issueLength: issue.length,
-    issueTruncated: issue.length > 240,
-    evidenceRefs: refs,
-    basedOnEventId: `E${Math.max(0, (state.eventSeq ?? 1) - 1)}`,
-    summary: clip(review, 700),
-  };
-  state.triageRuns = [...state.triageRuns, item].slice(-6);
-  appendEvent(state, "triage_review", { summary: `Triage ${item.id}: ${clip(item.issue, 160)}.`, ref: item.id, goalVersion: version });
-  return { state, duplicate: false, item, review, summary: item.summary, issueTruncated: item.issueTruncated };
-}
-
-export function availableCapabilities(stateValue) {
-  const state = normalizeGoalRunState(stateValue);
-  return state.goal.current ? ["planning", "routes", "acceptance", "history", "goal_details", "issue_review", "context"] : ["context"];
-}
-
 export function buildRecentEvents(stateValue, limit = 12) {
   const state = normalizeGoalRunState(stateValue);
   const count = Math.max(1, Math.min(20, Number.isInteger(limit) ? limit : 12));
@@ -1200,28 +1009,21 @@ export function buildRecentEvents(stateValue, limit = 12) {
   }));
 }
 
-export function summarizePlanStatus(stateValue) {
+/** Resolve an explicit proposal ref only; unrelated questionnaires remain byte-identical. */
+export function expandApprovalProposal(stateValue, input) {
+  const markers = (input?.questions ?? []).flatMap((question) => (question.options ?? []).map((option) => option.preview)).filter((value) => typeof value === "string" && value.startsWith("P."));
+  if (!markers.length) return null;
+  if (markers.length !== 1 || input.questions.length !== 1) throw new Error("Present one Compass proposal per questionnaire. No state changed.");
   const state = normalizeGoalRunState(stateValue);
-  const plan = state.plan;
-  if (!plan.goal || !plan.tasks.length) return "No DAG exists. Use planning capability only if this Goal has real dependencies or independent tracks.";
-  const done = plan.tasks.filter((task) => task.status === "done").length;
-  const ready = readyTasks(plan);
-  const inProgress = plan.tasks.filter((task) => task.status === "in_progress");
-  const blocked = plan.tasks.filter((task) => task.status === "blocked");
-  const acceptance = acceptanceStatus(state);
-  const outcome = goalOutcomeStatus(state);
-  const approved = approvalIsCurrent(state);
-  const lines = [`DAG revision: ${plan.revision}; stateVersion: ${plan.stateVersion ?? 0}; ${done}/${plan.tasks.length} tasks done; ${inProgress.length} in progress; ${blocked.length} blocked.`, `DAG approval: ${approved ? "current" : "missing or stale"}${approved ? "" : "; all progression is locked until a correlated structured Human approval"}.`, `Goal outcome: ${outcome.status} (evidence=${outcome.evidenceLevel}; independentlyVerified=false).`, `Goal acceptance: ${acceptance.status} (${acceptance.passed}/${acceptance.total} reported pass; ${acceptance.failed} failed; ${acceptance.blocked} blocked).`];
-  if (blocked.length && acceptance.status === "reported_satisfied") {
-    lines.push(`Outcome caveat: acceptance is Agent-reported satisfied, but task(s) remain blocked: ${blocked.map((task) => task.id).join(", ")}. Do not claim the overall Goal outcome is achieved without explaining the blocker.`);
-  }
-  for (const task of plan.tasks) {
-    lines.push(`- ${task.id} [${task.status}] ${clip(task.title, 110)}; executor=${task.executor || "parent"}${task.executor === "subagent" ? `/${task.agent || "scout"}` : ""}${task.dependsOn.length ? ` <- ${task.dependsOn.join(", ")}` : ""}${task.reason ? `; ${clip(task.reason, 140)}` : ""}`);
-  }
-  lines.push(`${approved ? "Progression-ready" : "Dependency-ready (approval locked)"}: ${ready.length ? ready.map((task) => task.id).join(", ") : "none"}.`);
-  const parallel = ready.filter((task) => task.executor === "subagent" && String(task.writeScope || "").toLowerCase() === "read-only");
-  if (parallel.length >= 2) lines.push(`Explicitly routed read-only Subagent candidates: ${parallel.map((task) => task.id).join(", ")}. Dependency readiness and write scope are code-derived; semantic independence and expected savings still require judgment.`);
-  return lines.join("\n");
+  const id = markers[0].slice(2);
+  const dag = state.plan.approvalRequest;
+  const route = state.routeSet?.selectionRequest;
+  const request = dag?.id === id ? dag : route?.id === id ? route : null;
+  if (!request || request.status !== "awaiting_questionnaire") throw new Error("Compass proposal expired. Read current plan/route state and request a fresh proposal. No state changed.");
+  if (state.goal.reviewedInputId !== state.latestHumanEntryId) throw new Error("Review the latest Human input with compass_goal before requesting approval. No state changed.");
+  const binding = request === dag ? dagApprovalBinding(state) : routeSetBinding(state.routeSet, state.goal.current);
+  if (request.binding !== binding) throw new Error("Compass proposal changed. Request a fresh proposal; no state changed.");
+  return { kind: request === dag ? "plan" : "route", requestId: request.id, questions: [structuredClone(request.questionnaire)] };
 }
 
 function routeStateVersion(state, input) {
@@ -1251,7 +1053,7 @@ function routeOptionQuestion(state, includeExploration = false) {
     `Dependencies: ${route.dependencies.join("; ") || "none specified"}`,
     `Expected cost: ${route.expectedCost}; expected latency: ${route.expectedLatency}`,
     `Risks: ${route.risks.join("; ") || "none specified"}`,
-    `Shared acceptance criteria:\n${routeSet.acceptanceCriteria.map((item) => `- ${item.id}: ${item.text}`).join("\n")}`,
+    `Shared acceptance criteria:\n${routeSet.criteria.map((item) => `- ${item.id}: ${item.text}`).join("\n")}`,
   ].join("\n");
   return {
     question: "Which route should Compass use for this Goal?",
@@ -1266,7 +1068,7 @@ function routeOptionQuestion(state, includeExploration = false) {
           `Current Goal v${state.goal.version}: ${state.goal.current}`,
           `RouteSet ${routeSet.id}; baseline=${routeSet.baselineRef}`,
           `Alternatives (proposed routes marked [included]):\n${routeSet.routes.map((route) => `- ${routeSet.exploration.routeIds.includes(route.routeId) ? "[included] " : "[not included] "}${route.routeId}: ${route.summary}; rationale=${route.rationale || "not specified"}; assumptions=${route.assumptions.join("; ") || "none"}; dependencies=${route.dependencies.join("; ") || "none"}; cost=${route.expectedCost}; latency=${route.expectedLatency}; risks=${route.risks.join("; ") || "none"}`).join("\n")}`,
-          `Shared acceptance criteria:\n${routeSet.acceptanceCriteria.map((item) => `- ${item.id}: ${item.text}`).join("\n")}`,
+          `Shared acceptance criteria:\n${routeSet.criteria.map((item) => `- ${item.id}: ${item.text}`).join("\n")}`,
           `Proposed scope: ${routeSet.exploration.scope}`,
           `Maximum competitor runs: ${routeSet.exploration.budget}`,
         ].join("\n"),
@@ -1318,14 +1120,15 @@ export function createRouteSet(stateValue, input = {}) {
     throw new Error("The initial RouteSet expectedStateVersion must be 0. No state changed.");
   }
   const baselineRef = nonEmpty(input.baselineRef, "baselineRef", 300);
-  if (!Array.isArray(input.acceptanceCriteria) || input.acceptanceCriteria.length < 1) throw new Error("acceptanceCriteria must contain the shared criteria for every route. No state changed.");
-  const acceptanceCriteria = input.acceptanceCriteria.map((item, index) => {
-    if (typeof item === "string") return { id: `C${index + 1}`, text: nonEmpty(item, `acceptanceCriteria[${index}]`, 300) };
-    if (!item || typeof item !== "object") throw new Error(`acceptanceCriteria[${index}] must be a string or object. No state changed.`);
-    return { id: nonEmpty(item.id, `acceptanceCriteria[${index}].id`, 32), text: nonEmpty(item.text, `acceptanceCriteria[${index}].text`, 300) };
+  const canonicalCriteria = state.goal.criteria.filter((item) => item.goalVersion === state.goal.version);
+  if (!Array.isArray(input.criteria) || input.criteria.length < 1) throw new Error("criteria must select current Goal criterion IDs. No state changed.");
+  const canonicalById = new Map(canonicalCriteria.map(({ id, text }) => [id, { id, text }]));
+  const criteria = input.criteria.map((id, index) => {
+    if (typeof id !== "string" || !canonicalById.has(id)) throw new Error(`criteria[${index}] must be a current Goal criterion ID. No state changed.`);
+    return canonicalById.get(id);
   });
   const criterionIds = new Set();
-  for (const criterion of acceptanceCriteria) {
+  for (const criterion of criteria) {
     if (criterionIds.has(criterion.id)) throw new Error(`Duplicate shared acceptance criterion ID "${criterion.id}". No state changed.`);
     criterionIds.add(criterion.id);
   }
@@ -1357,7 +1160,7 @@ export function createRouteSet(stateValue, input = {}) {
     id,
     goalVersion: state.goal.version,
     baselineRef,
-    acceptanceCriteria,
+    criteria,
     routes,
     selectedRouteId: null,
     winningRouteId: null,
@@ -1371,6 +1174,12 @@ export function createRouteSet(stateValue, input = {}) {
   renewRouteSelectionRequest(state);
   appendEvent(state, "route_set_created", { summary: `RouteSet ${id} created with ${routes.length} alternatives.`, ref: id });
   return { state, routeSet };
+}
+
+export function renewRouteProposal(stateValue, input = {}) {
+  const state = routeInput(stateValue, input);
+  const request = renewRouteSelectionRequest(state, Boolean(state.routeSet.exploration.scope && state.routeSet.exploration.budget));
+  return { state, request };
 }
 
 export function bindRouteSetQuestionnaire(stateValue, input, sourceEntryId, toolCallId = "") {
@@ -1396,10 +1205,13 @@ export function recordRouteSelection(stateValue, input = {}) {
   const questionnaire = input.questionnaire;
   const answer = questionnaire?.answers?.length === 1 ? questionnaire.answers[0] : null;
   const expectedQuestion = request.questionnaire.question;
+  const selectedOptions = answer?.selected ?? (answer?.kind === "option" ? [answer.answer] : []);
+  const shownOption = request.questionnaire.options.find((option) => option.label === answer?.answer);
+  if (!shownOption || input.details?.answers?.[0]?.preview !== shownOption.preview) throw new Error("The native answer does not verify the exact proposal preview. No state changed.");
   if (!answer || questionnaire.outcome !== "answered" || questionnaire.unanswered?.length
     || questionnaire.globalNote?.trim() || answer.questionIndex !== 0 || answer.question !== expectedQuestion
     || answer.kind !== "option" || answer.notes?.trim()
-    || !Array.isArray(answer.selected) || answer.selected.length !== 1 || answer.answer !== answer.selected[0]) {
+    || !Array.isArray(selectedOptions) || selectedOptions.length !== 1 || answer.answer !== selectedOptions[0]) {
     throw new Error("Route selection requires one clear, note-free, correlated structured Human answer. No state changed.");
   }
   const selected = answer.answer;
@@ -1482,8 +1294,8 @@ export function recordCompetitorResult(stateValue, input = {}) {
   if (run.goalVersion !== state.goal.version || run.baselineRef !== state.routeSet.baselineRef || run.correlationId !== input.correlationId) throw new Error("Competitor Goal version, baseline, or correlation is stale. No state changed.");
   if (["cancel_requested", "cancel_acknowledged"].includes(run.status) || run.cancellation) throw new Error(`Competitor ${run.runId} is already terminal or cancellation is in progress. No state changed.`);
   const criteria = input.criteria;
-  if (!Array.isArray(criteria) || criteria.length !== state.routeSet.acceptanceCriteria.length) throw new Error("Competitor result must report every shared acceptance criterion. No state changed.");
-  const expected = new Set(state.routeSet.acceptanceCriteria.map((item) => item.id));
+  if (!Array.isArray(criteria) || criteria.length !== state.routeSet.criteria.length) throw new Error("Competitor result must report every shared acceptance criterion. No state changed.");
+  const expected = new Set(state.routeSet.criteria.map((item) => item.id));
   const seen = new Set();
   const normalizedCriteria = criteria.map((item, index) => {
     if (!item || !expected.has(item.id) || seen.has(item.id) || !ROUTE_RESULT_STATUSES.has(item.status)) throw new Error(`Invalid or duplicate result criterion at index ${index}. No state changed.`);
@@ -1539,13 +1351,11 @@ function bindSelectedRoute(state, route) {
   }
 }
 
-export function selectRoute(stateValue, input = {}) {
+export function acceptRouteResult(stateValue, input = {}) {
   const state = routeInput(stateValue, input);
   const route = state.routeSet.routes.find((item) => item.routeId === input.routeId);
   if (!route) throw new Error(`Unknown or stale route identity "${input.routeId}". No state changed.`);
-  if (state.routeSet.selectedRouteId !== route.routeId && route.acceptanceGate !== "passed") {
-    throw new Error(`Route ${route.routeId} has no correlated Human selection or passing competitor result. Request ${state.routeSet.selectionRequest?.id ?? "none"} is ${state.routeSet.selectionRequest?.status ?? "unavailable"}; read compass_route(action=status) and pass its complete questionnaire to ask_user_question unchanged. Recreate the RouteSet with the current expectedStateVersion if Human rejected every alternative. No state changed.`);
-  }
+  if (route.acceptanceGate !== "passed") throw new Error("Accept requires a registered competitor result passing every shared criterion without unresolved caveats. A Human route choice is applied by its questionnaire, not this action. No state changed.");
   bindSelectedRoute(state, route);
   if (route.acceptanceGate === "passed") {
     state.routeSet.winningRouteId = route.routeId;
@@ -1624,12 +1434,12 @@ export function routeSetStatus(stateValue) {
 export function revisePlanState(stateValue, input) {
   const state = normalizeGoalRunState(stateValue);
   if (!state.goal.current) throw new Error("No Goal has been captured in this session.");
-  if (!Array.isArray(input.acceptanceCriteria) || !Array.isArray(input.tasks)) throw new Error("acceptanceCriteria and tasks must be arrays.");
-  const criteria = input.acceptanceCriteria.map((item, i) => nonEmpty(item, `acceptanceCriteria[${i}]`, 300)).slice(0, 12);
-  if (!criteria.length) throw new Error("acceptanceCriteria must contain at least one concrete criterion.");
+  if (!Array.isArray(input.tasks)) throw new Error("tasks must be an array.");
+  const criteria = state.goal.criteria.filter((item) => item.goalVersion === state.goal.version);
+  if (!criteria.length) throw new Error("Define Goal acceptance criteria before creating a DAG.");
   const planInput = {
     goal: state.goal.current,
-    acceptanceCriteria: criteria,
+    definitionKey: goalDefinitionKey(state.goal),
     tasks: input.tasks,
     ...(input.changeReason ? { changeReason: input.changeReason } : {}),
   };
@@ -1647,13 +1457,12 @@ export function revisePlanState(stateValue, input) {
     state.plan.approval = null;
     state.plan.approvalRequest = null;
   }
-  syncAcceptanceCriteria(state, criteria, "dag");
   if (changed) state.plan.approvalRequest = createDagApprovalRequest(state);
   if (changed) appendEvent(state, previousRevision ? "plan_revised" : "plan_created", {
     summary: `DAG r${state.plan.revision}: ${state.plan.tasks.length} tasks.`,
     text: input.changeReason || (previousRevision ? "Reason not recorded." : "Initial plan."),
   });
-  return { state, changed, summary: summarizePlanStatus(state) };
+  return { state, changed };
 }
 
 export function renewDagApprovalRequest(stateValue) {
@@ -1714,12 +1523,12 @@ export function recordTaskAssessment(stateValue, input) {
 
 export function dagApprovalStatus(stateValue) {
   const state = normalizeGoalRunState(stateValue);
-  return {
-    approved: approvalIsCurrent(state),
-    requestId: state.plan.approvalRequest?.id ?? null,
-    status: approvalIsCurrent(state) ? "approved" : state.plan.approvalRequest?.status ?? "not_requested",
-    currentBinding: dagApprovalBinding(state),
-  };
+  const approved = approvalIsCurrent(state);
+  const request = state.plan.approvalRequest;
+  // An answered request that no longer matches current input/definitions is stale,
+  // never approved: "answered" alone would misreport withdrawn authorization.
+  const status = approved ? "approved" : !request ? "not_requested" : request.status === "answered" ? "stale" : request.status;
+  return { approved, requestId: request?.id ?? null, status, currentBinding: dagApprovalBinding(state) };
 }
 
 export function reconcileUnknownExecutionTasks(stateValue, requestId, items, updateTasksFn) {

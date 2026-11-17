@@ -86,24 +86,21 @@ if (manifest?.pi?.extensions?.includes("./src/index.ts") && fs.existsSync(path.j
 let release = null;
 try { release = JSON.parse(fs.readFileSync(path.join(packageRoot, "RELEASE-MANIFEST.json"), "utf8")); } catch { /* reported below */ }
 const minimumPi = parseVersion(release?.minimumPiVersion);
-if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 8 && release?.contextSchemaVersion === CONTEXT_SCHEMA_VERSION && minimumPi) {
+if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 9 && release?.contextSchemaVersion === CONTEXT_SCHEMA_VERSION && minimumPi) {
   add("PASS", "Release identity", `Package/manifest ${release.version}; GoalRun v${release.goalRunSchemaVersion}; context v${CONTEXT_SCHEMA_VERSION}; Pi minimum ${release.minimumPiVersion}`);
 } else add("FAIL", "Release identity", "RELEASE-MANIFEST.json must match the package and current GoalRun/context schemas and declare a valid Pi minimum");
 const goalRunPath = path.join(packageRoot, "src", "goal-run.mjs");
-const requiredGoalRunExports = [
-  "GOAL_RUN_API_VERSION", "GOAL_RUN_RELEASE", "setGoal", "observeHumanInput", "stateCursor", "availableCapabilities", "acceptanceStatus", "goalOutcomeStatus",
-  "buildGoalDetails", "buildIssueReview", "buildRecentEvents", "buildStateSnapshot", "triageIssue",
-  "defineAcceptanceCriteria", "recordAcceptanceResult", "shouldSurfaceIssueReview",
-  "captureHumanDecision", "recordHumanQuestionnaireFailure", "emptyGoalRunState", "hasUsefulTrace",
-  "mergeTrace", "normalizeGoalRunState", "recordCheckpoint", "recordDecision",
-  "recordFailure", "recordWriteTarget", "recordExecutionDrift", "revisePlanState", "summarizePlanStatus",
-  "transitionTasks",
+const toolSchemaPath = path.join(packageRoot, "src", "tool-schema.mjs");
+const fixedToolNames = [
+  "compass_goal", "compass_state", "compass_context_search", "compass_context",
+  "compass_plan", "compass_acceptance", "compass_route", "runtime_guard",
 ];
 try {
   const goalRun = await import(pathToFileURL(goalRunPath).href);
-  const missing = requiredGoalRunExports.filter((name) => !(name in goalRun) || (!["GOAL_RUN_API_VERSION", "GOAL_RUN_RELEASE"].includes(name) && typeof goalRun[name] !== "function"));
-  if (goalRun.GOAL_RUN_API_VERSION !== 8 || goalRun.GOAL_RUN_RELEASE !== manifest?.version || missing.length) {
-    add("FAIL", "GoalRun module contract", `Expected API v8 / release ${manifest?.version}; module reports API ${String(goalRun.GOAL_RUN_API_VERSION)} / release ${String(goalRun.GOAL_RUN_RELEASE)}; missing exports: ${missing.join(", ") || "none"}`);
+  const { COMPASS_TOOL_NAMES } = await import(pathToFileURL(toolSchemaPath).href);
+  const registryMatches = COMPASS_TOOL_NAMES.length === fixedToolNames.length && fixedToolNames.every((name, index) => COMPASS_TOOL_NAMES[index] === name);
+  if (goalRun.GOAL_RUN_API_VERSION !== 9 || goalRun.GOAL_RUN_RELEASE !== manifest?.version || !registryMatches) {
+    add("FAIL", "GoalRun module contract", `Expected API v9 / release ${manifest?.version} / tools ${fixedToolNames.join(", ")}; module reports API ${String(goalRun.GOAL_RUN_API_VERSION)} / release ${String(goalRun.GOAL_RUN_RELEASE)} / tools ${COMPASS_TOOL_NAMES.join(", ")}`);
   } else {
     const observed = goalRun.observeHumanInput(goalRun.emptyGoalRunState(), "preflight-human").state;
     const initial = goalRun.setGoal(observed, { expectedVersion: 0, current: "Verify cursor mechanics", sourceIds: ["preflight-human"], constraints: [] }).state;
@@ -114,7 +111,7 @@ try {
     } else {
       add("PASS", "State cursor contract", "Composite Goal/event/frame cursor and compact unchanged response work");
     }
-    add("PASS", "GoalRun module contract", `API v${goalRun.GOAL_RUN_API_VERSION}, release ${goalRun.GOAL_RUN_RELEASE}; ${requiredGoalRunExports.length} required exports present`);
+    add("PASS", "GoalRun module contract", `API v${goalRun.GOAL_RUN_API_VERSION}, release ${goalRun.GOAL_RUN_RELEASE}; fixed ${fixedToolNames.length}-tool registry`);
   }
 } catch (error) {
   add("FAIL", "GoalRun module contract", `Could not load ${goalRunPath}: ${error instanceof Error ? error.message : String(error)}`);

@@ -33,10 +33,10 @@ export function dagApprovalBinding(state) {
       baselineRef: state.routeSet.baselineRef,
       selectedRouteId: state.routeSet.selectedRouteId,
       planRouteId: state?.plan?.routeId ?? null,
-      acceptanceCriteria: state.routeSet.acceptanceCriteria,
+      criteria: state.routeSet.criteria,
     } : null,
-    acceptanceCriteria: [...(state?.plan?.acceptanceCriteria ?? [])],
-    goalAcceptanceCriteria: (state?.goal?.criteria ?? [])
+    definitionKey: state?.plan?.definitionKey ?? null,
+    criteria: (state?.goal?.criteria ?? [])
       .filter((item) => item.goalVersion === version)
       .map((item) => ({ id: item.id, text: item.text })),
     tasks: (state?.plan?.tasks ?? []).map(taskDefinition),
@@ -72,7 +72,6 @@ export function createDagApprovalRequest(state) {
     `Approval request ${id}. This authorizes execution only; it does not establish task success or final Goal acceptance.`,
     `Current Goal v${state.goal.version ?? 1}: ${state.goal.current}`,
     ...(state.routeSet ? [`RouteSet ${state.routeSet.id}; baseline=${state.routeSet.baselineRef}; selected route=${state.routeSet.selectedRouteId}`] : []),
-    `Plan acceptance criteria:\n${(state.plan.acceptanceCriteria ?? []).map((item, index) => `${index + 1}. ${item}`).join("\n")}`,
     `Goal acceptance criteria:\n${(state.goal.criteria ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => `- ${item.id}: ${item.text}`).join("\n") || "- none recorded"}`,
     `Tasks (DAG revision ${state.plan.revision}):\n${tasks}`,
     `Human constraints:\n${(state.goal.constraints ?? []).map((item) => `- ${item}`).join("\n") || "- none recorded"}`,
@@ -98,6 +97,15 @@ export function createDagApprovalRequest(state) {
     toolCallId: "",
     status: "awaiting_questionnaire",
   };
+}
+
+/** Native question arguments stay tiny; the supported tool_call boundary expands this ref. */
+export function approvalPrompt(request) {
+  if (!request || request.status !== "awaiting_questionnaire") return null;
+  return { questions: [{ question: "Review this Compass proposal?", header: "Compass", multiSelect: false, options: [
+    { label: "Review proposal", description: "Open the exact proposal for your decision.", preview: `P.${request.id}` },
+    { label: "Revise proposal", description: "Withhold approval and request changes." },
+  ] }] };
 }
 
 export function approvalIsCurrent(state) {
@@ -141,14 +149,15 @@ export function matchesDagApprovalQuestion(request, input) {
   });
 }
 
-export function clearDagApprovalAnswer(request, questionnaire) {
+export function clearDagApprovalAnswer(request, questionnaire, details) {
   if (!request?.id || !request.sourceEntryId || !questionnaire || questionnaire.outcome !== "answered") return false;
   if (questionnaire.answers?.length !== 1 || questionnaire.unanswered?.length) return false;
   const answer = questionnaire.answers[0];
   const expectedQuestion = request.question.trim();
   const questionMatches = answer.question === expectedQuestion.slice(0, 400).trimEnd()
     || answer.question === (expectedQuestion.length > 400 ? `${expectedQuestion.slice(0, 399).trimEnd()}…` : expectedQuestion);
-  return answer.questionIndex === 0
+  return details?.answers?.[0]?.preview === request.questionnaire.options[0].preview
+    && answer.questionIndex === 0
     && questionMatches
     && answer.kind === "option"
     && answer.answer === DAG_APPROVAL_OPTION

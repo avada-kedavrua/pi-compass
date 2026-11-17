@@ -72,7 +72,7 @@ test("ready Subagent selection requires explicit read-only executor and satisfie
 test("DAG validation rejects Subagent tasks without explicit read-only scope", () => {
   assert.throws(() => createOrRevisePlan(emptyDagState(), {
     goal: "inspect two independent areas",
-    acceptanceCriteria: ["Evidence collected"],
+    definitionKey: "digest-a",
     tasks: [task("a", { writeScope: "src/a.ts" }), task("b", { executor: "parent", writeScope: "src/b.ts" })],
   }), /executor=subagent.*writeScope="read-only"/);
 });
@@ -278,7 +278,7 @@ test("execution events and usage metadata survive GoalRun normalization", () => 
   let state = createGoalState("Goal: inspect two independent read-only areas");
   state.plan = createOrRevisePlan(state.plan, {
     goal: state.goal.current,
-    acceptanceCriteria: ["Both areas are understood"],
+    definitionKey: "digest-a",
     tasks: [task("a"), task("b")],
   });
   state.plan.execution = {
@@ -305,7 +305,7 @@ test("execution events and usage metadata survive GoalRun normalization", () => 
 
 test("GoalRun normalization preserves unknown usage/cost fields as null", () => {
   let state = createGoalState("Goal: inspect usage metadata");
-  state.plan = createOrRevisePlan(state.plan, { goal: state.goal.current, acceptanceCriteria: ["Usage metadata preserved"], tasks: [task("a"), task("b")] });
+  state.plan = createOrRevisePlan(state.plan, { goal: state.goal.current, definitionKey: "digest-a", tasks: [task("a"), task("b")] });
   state.plan.execution = {
     requestId: "wave-missing-metrics", taskIds: ["a"], planRevision: state.plan.revision, status: "completed",
     results: [{ id: "a", status: "done", model: PRIMARY_MODEL, fallbackAttempted: false, requestId: "req-a", ownerRunId: "wave-missing-metrics", runId: "run-a", usage: { input: 100, output: 20 } }],
@@ -328,13 +328,13 @@ function approvePlan(state) {
     source: "ask_user_question",
     sourceEntryId,
     sourceCallId: callId,
-    details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] },
+    details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION], preview: request.questionnaire.options[0].preview }] },
   }).state;
 }
 
 test("runtime drift records a compact warning once and the next Goal anchor explains recovery", () => {
   let state = createGoalState("Goal: implement two related changes");
-  state = revisePlanState(state, { acceptanceCriteria: ["Both changes pass"], tasks: [task("a", { executor: "code", writeScope: "src/a.ts" }), task("b", { executor: "code", writeScope: "src/b.ts" })] }).state;
+  state = revisePlanState(state, { tasks: [task("a", { executor: "code", writeScope: "src/a.ts" }), task("b", { executor: "code", writeScope: "src/b.ts" })] }).state;
   state = approvePlan(state);
   const first = recordExecutionDrift(state, { tool: "edit", target: "/tmp/project/src/a.ts", reason: "No writable task is in progress." });
   const second = recordExecutionDrift(first.state, { tool: "edit", target: "/tmp/project/src/a.ts", reason: "No writable task is in progress." });
@@ -415,7 +415,7 @@ test("Subagent selection requires an explicit separate-context cost-benefit rati
   assert.deepEqual(selectReadySubagentTasks(plan).map((item) => item.id), ["b"]);
   assert.throws(() => createOrRevisePlan(emptyDagState(), {
     goal: "inspect independent areas",
-    acceptanceCriteria: ["Evidence collected"],
+    definitionKey: "digest-a",
     tasks: [
       { id: "a", title: "Inspect A", acceptance: "Evidence A", executor: "subagent", writeScope: "read-only" },
       { id: "b", title: "Inspect B", acceptance: "Evidence B", executor: "subagent", writeScope: "read-only", dispatchReason: "Independent review needs separate context." },

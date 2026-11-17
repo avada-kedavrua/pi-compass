@@ -1,6 +1,24 @@
 # v0.10 local measurements
 
-These are bounded local measurements, not provider, token-cache, or semantic-quality evidence. They were produced on the development host with Node 22.22.1, Pi 1.5.2, and 1,000 synthetic user messages:
+All numbers below are bounded local measurements, not provider, token-cache or semantic-quality evidence.
+
+## Eight-tool surface and suite cost
+
+R2 replaced the loader/capability layout with eight fixed tools. Measured on this host with `npm test`, `npm run test:core`, `npm run test:non-extension`, and `node --import ./scripts/register-pi-host-typebox.mjs scripts/measure-tool-contract.mjs`:
+
+| Measure | Result |
+|---|---:|
+| Full suite | 230/230 in 3.58 s |
+| Core suite | 77/77 in 0.10 s |
+| Non-extension suite | 106/106 in 0.25 s |
+| Registered Compass tools | 8 (native tools remain host-owned) |
+| Serialized tool schemas | 37,189 bytes |
+| Largest Code Mode signature | 3,972 chars (`compass_context`) |
+| Code Mode signature total | 15,442 chars |
+
+Schema bytes are parameter JSON only: they exclude the native tool envelope, rendered descriptions and provider tokenization. Signature sizes come from the installed Code Mode declaration renderer, so they bound its 16,000-character input limit; they are not provider cache or cost measurements. The suite count excludes obsolete capability/triage/loader tests instead of keeping them as skipped coverage.
+
+The context numbers below were produced on the development host with Node 22.22.1, Pi 1.5.2 and 1,000 synthetic user messages:
 
 ```text
 node scripts/measure-context.mjs

@@ -39,8 +39,6 @@ function createSummary(file) {
     compassNestedErrors: 0,
     codemodeCalls: 0,
     unchangedStateReads: 0,
-    noOpCapabilityOpens: 0,
-    fullGoalReads: 0,
     goalStateRecords: 0,
     goalStateBytes: 0,
     context: { callsByAction: {}, queued: 0, messagesByAction: {}, rejectedBoundaries: 0 },
@@ -213,8 +211,6 @@ export async function analyzeSession(file) {
       }
       if (unchanged) summary.unchangedStateReads += 1;
     }
-    if (name === "compass_open" && /already loaded|already active|no-op|no new capability/i.test(text)) summary.noOpCapabilityOpens += 1;
-    if (name === "compass_goal_read") summary.fullGoalReads += 1;
 
     for (const call of nestedCallsFor(record, message)) {
       const callId = String(call?.id ?? "");
@@ -252,7 +248,7 @@ function sortedCounts(counts) {
 
 export function formatReport(summaries) {
   const totals = summaries.reduce((out, item) => {
-    for (const key of ["records", "compactions", "assistantRequests", "assistantRequestErrors", "requestErrorDurationMs", "topLevelToolCalls", "topLevelErrors", "nestedToolCalls", "nestedErrors", "totalToolCallsIncludingLoggedNested", "totalToolErrorsIncludingLoggedNested", "compassTopLevelCalls", "compassNestedCalls", "compassCallsIncludingLoggedNested", "compassTopLevelErrors", "compassNestedErrors", "compassErrorsIncludingLoggedNested", "codemodeCalls", "unchangedStateReads", "noOpCapabilityOpens", "fullGoalReads", "goalStateRecords", "malformedLines"]) out[key] = (out[key] ?? 0) + (item[key] ?? 0);
+    for (const key of ["records", "compactions", "assistantRequests", "assistantRequestErrors", "requestErrorDurationMs", "topLevelToolCalls", "topLevelErrors", "nestedToolCalls", "nestedErrors", "totalToolCallsIncludingLoggedNested", "totalToolErrorsIncludingLoggedNested", "compassTopLevelCalls", "compassNestedCalls", "compassCallsIncludingLoggedNested", "compassTopLevelErrors", "compassNestedErrors", "compassErrorsIncludingLoggedNested", "codemodeCalls", "unchangedStateReads", "goalStateRecords", "malformedLines"]) out[key] = (out[key] ?? 0) + (item[key] ?? 0);
     for (const key of Object.keys(out.usage)) out.usage[key] += item.usage[key] ?? 0;
     out.maxRequestErrorDurationMs = Math.max(out.maxRequestErrorDurationMs ?? 0, item.maxRequestErrorDurationMs ?? 0);
     for (const [key, count] of Object.entries(item.assistantRequestErrorsByProviderModel ?? {})) addCount(out.assistantRequestErrorsByProviderModel, key, count);
@@ -295,7 +291,7 @@ export function formatReport(summaries) {
     `- Reasoning (reported separately; may be included in output): ${totals.usage.reasoning.toLocaleString("en-US")}`,
     `- Provider-reported total tokens: ${totals.usage.totalTokens.toLocaleString("en-US")}`,
     `- Provider-reported cost sum: ${totals.usage.cost.toFixed(6)} (zero/unreported cost is not evidence of zero economic cost)`,
-    `- Compass unchanged state reads: ${totals.unchangedStateReads}; no-op capability opens: ${totals.noOpCapabilityOpens}; full Goal reads: ${totals.fullGoalReads}`,
+    `- Compass unchanged state reads: ${totals.unchangedStateReads}`,
     `- Model request errors: ${totals.assistantRequestErrors}; cumulative request duration reported for those errors: ${Math.round(totals.requestErrorDurationMs / 1000)}s; longest single error request: ${Math.round(totals.maxRequestErrorDurationMs / 1000)}s. These are provider/runtime observations, not automatically Compass defects.`,
     `- Request errors by provider/model: ${sortedCounts(totals.assistantRequestErrorsByProviderModel).map(([name, count]) => `${name}=${count}`).join("; ") || "none"}`,
     `- Longest request-error samples: ${summaries.flatMap((item) => item.requestErrorExamples.map((sample) => ({ ...sample, session: item.file }))).sort((a, b) => b.durationMs - a.durationMs).slice(0, 5).map((sample) => `${sample.session}: ${sample.providerModel}, ${Math.round(sample.durationMs / 1000)}s, phase=${sample.phase ?? "unknown"}, bytes=${sample.requestBytes ?? "unknown"}, ${sample.error}`).join(" | ") || "none"}`,

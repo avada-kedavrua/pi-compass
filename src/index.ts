@@ -1,123 +1,36 @@
-import { Type } from "typebox";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
-import { executionDriftReason } from "./write-scope.mjs";
-import { questionnaireFailureResultPatch } from "./questionnaire-integration.mjs";
-import { latestHumanSource, resolveGoalSources, humanSourceRef, agentGoalDetails } from "./goal-sources.mjs";
-import { agentResult } from "./compass-result.mjs";
-import { contextSearchSchema, contextToolSchema } from "./context-tool-schema.mjs";
-import { agentSearch, agentContextOperation } from "./context-agent.mjs";
-import { registerRuntimeGuards } from "./runtime-guard.mjs";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
-import {
-  DELEGATION_EVENTS,
-  FALLBACK_MODEL,
-  PRIMARY_MODEL,
-  REVIEW_MODEL,
-  DEFAULT_THINKING,
-  DEFAULT_TIMEOUT_MS,
-  MAX_WAVE_TASKS,
-  START_ACK_TIMEOUT_MS,
-  assessWavePolicy,
-  hasCompleteUsageMetrics,
-  buildSubagentDelegationRequest,
-  selectReadySubagentTasks,
-  parseSubagentDelegationResponse,
-  normalizeProviderDiagnostics,
-  providerFallbackReason,
-} from "./execution-orchestrator.mjs";
-import {
-  readyTasks,
-  updateTasks,
-} from "./dag-core.mjs";
-import {
-  setGoal,
-  observeHumanInput,
-  stateCursor,
-  parseStateCursor,
-  availableCapabilities,
-  acceptanceStatus,
-  goalOutcomeStatus,
-  buildGoalDetails,
-  buildRecentEvents,
-  buildStateSnapshot,
-  GOAL_RUN_API_VERSION,
-  GOAL_RUN_RELEASE,
-  defineAcceptanceCriteria,
-  recordAcceptanceResult,
-  shouldSurfaceIssueReview,
-  bindDagApprovalQuestionnaire,
-  bindRouteSetQuestionnaire,
-  captureHumanDecision,
-  dagApprovalStatus,
-  recordTaskAssessment,
-  renewDagApprovalRequest,
-  emptyGoalRunState,
-  mergeTrace,
-  normalizeGoalRunState,
-  recordCheckpoint,
-  recordDecision,
-  recordFailure,
-  recordHumanQuestionnaireFailure,
-  recordExecutionDrift,
-  recordExecutionEvent,
-  recordWriteTarget,
-  createRouteSet,
-  recordRouteSelection,
-  proposeRouteExploration,
-  registerCompetitorRun,
-  recordCompetitorResult,
-  selectRoute,
-  updateCompetitorCancellation,
-  routeSetStatus,
-  revisePlanState,
-  transitionTasks,
-  reconcileUnknownExecutionTasks,
-  triageIssue,
-} from "./goal-run.mjs";
-import {
-  CONTEXT_MESSAGE_TYPE,
-  CONTEXT_STATE_TYPE,
-  emptyContextState,
-  normalizeContextState,
-  pinnedContextOverlay,
-  planContextBoundary,
-  planRetentionBoundary,
-  planObservationBoundary,
-  planWatchBoundary,
-  prepareContextOperation,
-  validateContextOperation,
-  releaseWatchMessages,
-  restoreContextState,
-} from "./context-core.mjs";
+import { randomUUID } from "node:crypto";
+import { executionDriftReason } from "./write-scope.mjs";
+import { questionnaireFailureResultPatch, normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
+import { latestHumanSource, resolveGoalSources } from "./goal-sources.mjs";
+import { agentResult } from "./compass-result.mjs";
+import { agentState } from "./agent-state.mjs";
+import { toolSchemas, COMPASS_TOOL_NAMES } from "./tool-schema.mjs";
+import { approvalPrompt } from "./dag-approval.mjs";
+import { agentSearch, agentContextOperation } from "./context-agent.mjs";
+import { RESERVED_CUSTOM_TYPES } from "./context-values.mjs";
+import { registerRuntimeGuards } from "./runtime-guard.mjs";
+import { DELEGATION_EVENTS, FALLBACK_MODEL, PRIMARY_MODEL, REVIEW_MODEL, DEFAULT_THINKING, DEFAULT_TIMEOUT_MS, MAX_WAVE_TASKS, START_ACK_TIMEOUT_MS, assessWavePolicy, hasCompleteUsageMetrics, buildSubagentDelegationRequest, selectReadySubagentTasks, parseSubagentDelegationResponse, normalizeProviderDiagnostics, providerFallbackReason } from "./execution-orchestrator.mjs";
+import { readyTasks, updateTasks } from "./dag-core.mjs";
+import { setGoal, observeHumanInput, stateCursor, GOAL_RUN_API_VERSION, GOAL_RUN_RELEASE, recordAcceptanceResult, bindDagApprovalQuestionnaire, bindRouteSetQuestionnaire, captureHumanDecision, dagApprovalStatus, recordTaskAssessment, renewDagApprovalRequest, emptyGoalRunState, mergeTrace, normalizeGoalRunState, recordCheckpoint, recordDecision, recordFailure, recordHumanQuestionnaireFailure, recordExecutionDrift, recordExecutionEvent, recordWriteTarget, createRouteSet, recordRouteSelection, proposeRouteExploration, registerCompetitorRun, recordCompetitorResult, acceptRouteResult, updateCompetitorCancellation, renewRouteProposal, revisePlanState, transitionTasks, reconcileUnknownExecutionTasks, expandApprovalProposal } from "./goal-run.mjs";
+import { CONTEXT_MESSAGE_TYPE, CONTEXT_STATE_TYPE, emptyContextState, normalizeContextState, pinnedContextOverlay, planContextBoundary, planRetentionBoundary, planObservationBoundary, planWatchBoundary, prepareContextOperation, validateContextOperation, releaseWatchMessages, restoreContextState } from "./context-core.mjs";
 
 const STATE_ENTRY_TYPE = "pi-compass-v2.goalrun";
-const ANCHOR_MESSAGE_TYPE = "pi-compass-v2.goalrun-anchor";
-const TOOL_PREFIX = "compass_";
-const CORE_TOOL_NAMES = ["compass_goal", "compass_state", "compass_context_search", "compass_context"];
-const PACKAGE_VERSION = (() => {
-  try { return JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version ?? null; }
-  catch { return null; }
-})();
 const MAX_TRACE_ENTRIES = 24;
+const PACKAGE_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
+export default function (pi: any) {
 let state: any = emptyGoalRunState();
 let contextState: any = emptyContextState();
 let needsRestore = true;
-let loaderSignature = "";
-let loaderName = "";
-let lastLoadoutSignature = "";
 let mutationQueue: Promise<any> = Promise.resolve();
-let loadoutRefreshPending = true;
-let activePi: any = null;
+let activePi: any = pi;
 let branchGeneration = 0;
 let lastCommittedState: any = emptyGoalRunState();
-const stableToolsByPi = new WeakMap<object, Set<string>>();
-const dynamicToolSignaturesByPi = new WeakMap<object, Map<string, string>>();
 const delegationRuntimes = new WeakMap<object, any>();
 const autoSchedulers = new WeakMap<object, { promise: Promise<unknown> | null }>();
-
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -126,39 +39,11 @@ function clip(value: unknown, max = 300): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 function now() { return new Date().toISOString(); }
-function isCompassName(name: string) { return name.startsWith(TOOL_PREFIX); }
 
 function namesFrom(value: any): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((tool: any) => typeof tool === "string" ? tool : String(tool?.name ?? "")).filter(Boolean);
 }
-function activeNames(pi: any): string[] {
-  try {
-    if (typeof pi.getActiveTools === "function") return namesFrom(pi.getActiveTools());
-    if (typeof pi.getAllTools === "function") return namesFrom(pi.getAllTools());
-  } catch { /* best effort */ }
-  return [];
-}
-function nativeToolSetSignature(pi: any): string {
-  let registered: string[] | null = null;
-  try { if (typeof pi.getAllTools === "function") registered = namesFrom(pi.getAllTools()).filter((name) => !isCompassName(name)).sort(); }
-  catch { registered = null; }
-  return createHash("sha256")
-    .update(JSON.stringify({ registered, active: activeNames(pi).filter((name) => !isCompassName(name)).sort() }))
-    .digest("hex");
-}
-
-function setCompassLoadout(pi: any, compassNames: string[]) {
-  if (typeof pi.setActiveTools !== "function" || typeof pi.getActiveTools !== "function") {
-    throw new Error("This Pi runtime must expose getActiveTools() and setActiveTools().");
-  }
-  // Native extensions own their activation policy. Compass changes only its own tools.
-  const native = activeNames(pi).filter((name) => !isCompassName(name));
-  const desired = [...new Set([...native, ...compassNames.filter(Boolean)])];
-  const current = activeNames(pi);
-  if (current.length !== desired.length || current.some((name, index) => name !== desired[index])) pi.setActiveTools(desired);
-}
-
 function getContext(rest: any[]): any {
   return rest.find((item) => item && typeof item === "object" && (item.sessionManager || typeof item.cwd === "string" || item.hasUI !== undefined)) ?? {};
 }
@@ -229,7 +114,6 @@ function persistState(pi: any, value = state) {
     needsRestore = true;
     branchGeneration += 1;
     autoSchedulers.delete(pi);
-    loadoutRefreshPending = true;
     throw new Error("GoalRun persistence failed; candidate not activated. Reconcile the native branch before retrying.", { cause: error });
   }
   value.stateRevision = next.stateRevision;
@@ -238,19 +122,6 @@ function persistState(pi: any, value = state) {
 }
 function persistTrace(pi: any, item: any) {
   try { pi.appendEntry?.(`${STATE_ENTRY_TYPE}.trace`, clone(item)); } catch { /* trace is best-effort */ }
-}
-function approvalReceipt() {
-  const { approved, requestId, status } = dagApprovalStatus(state);
-  return { approved, requestId, status };
-}
-function stateResult(data: Record<string, unknown>) {
-  const receipt = { ...data, cursor: stateCursor(state, contextState.revision) };
-  const { unchanged, ...payload } = receipt;
-  return agentResult({ resultStatus: unchanged === true ? "unchanged" : "applied", ...payload }, { cursor: receipt.cursor, stateRevision: state.stateRevision });
-}
-function planResult(data: Record<string, unknown>) {
-  const request = state.plan.approvalRequest;
-  return stateResult({ ...data, ...(data.unchanged !== true && !dagApprovalStatus(state).approved && request ? { approvalRequest: { id: request.id, questionnaire: request.questionnaire }, next: "Pass approvalRequest.questionnaire unchanged to ask_user_question({questions:[questionnaire]})." } : {}) });
 }
 function sameIds(left: any[], right: any[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
@@ -539,7 +410,6 @@ async function applyDelegationOutcome(pi: any, generation: number, waveId: strin
       ref: execution.results[index].runId || "",
     });
     persistState(pi);
-    loadoutRefreshPending = true;
   });
 }
 async function runReadySubagentWaves(pi: any, generation: number, ctx: any) {
@@ -570,7 +440,6 @@ async function runReadySubagentWaves(pi: any, generation: number, ctx: any) {
             state.plan.execution = { requestId, runId: null, taskIds: ids, planRevision: state.plan.revision, stateVersion: state.plan.stateVersion ?? 0, status: "failed", startedAt: now(), completedAt: now(), error: reason, results: [] };
             state = recordExecutionEvent(state, { status: "failed", summary: "Subagent dispatch rationale missing.", text: reason, ref: requestId });
             persistState(pi);
-            loadoutRefreshPending = true;
           });
         }
       }
@@ -601,7 +470,6 @@ async function runReadySubagentWaves(pi: any, generation: number, ctx: any) {
         };
         state = recordExecutionEvent(state, { status: "failed", summary: "Subagent auto-dispatch skipped.", text: availability.reason, ref: requestId });
         persistState(pi);
-        loadoutRefreshPending = true;
       });
       return;
     }
@@ -641,7 +509,6 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
         ref: waveId,
       });
       persistState(pi);
-      loadoutRefreshPending = true;
       return true;
     });
     if (!prepared || !inCurrentBranch(pi, generation)) return;
@@ -661,7 +528,6 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
           ref: waveId,
         });
         persistState(pi);
-        loadoutRefreshPending = true;
       });
       return;
     }
@@ -834,7 +700,6 @@ ${currentReady.map((task: any) => `${task.id}/${task.agent || "scout"}`).join(",
         ref: waveId,
       });
       persistState(pi);
-      loadoutRefreshPending = true;
     });
     if (executionUnresolved(state.plan.execution)) return;
     // Keep running deterministic waves while ready Subagent tasks exist. Parent
@@ -856,7 +721,6 @@ async function recordAutoDispatchFailure(pi: any, generation: number, error: any
         : item);
       state = recordExecutionEvent(state, { status: "unknown", summary: "Subagent orchestration failed closed.", text: execution.error, ref: execution.requestId });
       persistState(pi);
-      loadoutRefreshPending = true;
       return;
     }
     const ids = selectReadySubagentTasks(state.plan, MAX_WAVE_TASKS).map((task: any) => task.id);
@@ -870,7 +734,6 @@ async function recordAutoDispatchFailure(pi: any, generation: number, error: any
     };
     state = recordExecutionEvent(state, { status: "failed", summary: "Subagent orchestration failed before confirmed dispatch.", text: state.plan.execution.error, ref: requestId });
     persistState(pi);
-    loadoutRefreshPending = true;
   });
 }
 async function runReadySubagentWavesSafely(pi: any, generation: number, ctx: any) {
@@ -958,7 +821,7 @@ function automaticExecutionSummary(previousHistoryIds: Set<string>): string | nu
     return `Compass dispatched read-only Subagent task(s) ${(execution.taskIds ?? []).join(", ")} (status=${execution.status}; awaiting ${active.join(", ") || "terminal results"}). The runtime will consume correlated structured results and advance dependency-ready Subagent waves automatically. Continue independent parent/Code Mode work in parallel; do not manually start or redispatch these Subagent tasks.`;
   }
   if (execution?.status === "unknown") {
-    return `Compass Subagent execution is UNKNOWN for tasks ${(execution.taskIds ?? []).join(", ")}; do not redispatch. Inspect run IDs with native Subagent status, then use compass_execution(action=status|resolve) only after all children are terminal.`;
+    return `Compass Subagent execution is UNKNOWN for tasks ${(execution.taskIds ?? []).join(", ")}; do not redispatch. Inspect run IDs with native Subagent status, then use compass_state(view=execution), then compass_plan(action=resolve) only after all children are terminal.`;
   }
   if (execution?.status === "failed" && execution.error) {
     return `Compass could not auto-dispatch Subagent tasks ${(execution.taskIds ?? []).join(", ")}. No child was confirmed; tasks remain pending. ${clip(execution.error, 240)} Revise executor to parent/code or enable the user's native Subagent tool before retrying.`;
@@ -970,14 +833,8 @@ async function handleCompassToolResult(pi: any, event: any, ctx: any) {
   return serialized(async () => {
     if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
     const toolName = String(event?.toolName ?? "");
-    if (event?.isError || !/^compass_(?:goal|plan_create|plan_revise|task|execution)$/.test(toolName)) return;
-    if (toolName === "compass_execution" && event?.input?.action !== "resolve") return;
+    if (event?.isError || !["compass_goal", "compass_plan"].includes(toolName)) return;
 
-    if (["compass_plan_create", "compass_plan_revise"].includes(toolName) && state.plan?.approvalRequest && !dagApprovalStatus(state).approved) {
-      const request = state.plan.approvalRequest;
-      const details = { ...(event?.details && typeof event.details === "object" ? clone(event.details) : {}), dagApproval: dagApprovalStatus(state), dagApprovalRequest: { id: request.id, questionnaire: request.questionnaire } };
-      return { content: event.content, details };
-    }
     const beforeSnapshot = executionSnapshotForToolResult();
     const previousHistoryIds = new Set((state.plan?.executionHistory ?? []).map((batch: any) => batch.requestId));
     const readyBefore = selectReadySubagentTasks(state.plan, MAX_WAVE_TASKS).map((task: any) => task.id);
@@ -1018,18 +875,6 @@ async function handleCompassToolResult(pi: any, event: any, ctx: any) {
   });
 }
 
-function activeCapabilities(): string[] {
-  return [...new Set(Array.isArray(state.activeCapabilities) ? state.activeCapabilities : [])];
-}
-function setActiveCapabilities(values: string[]) {
-  state.activeCapabilities = [...new Set(values.filter((value) => value && value !== "root"))];
-}
-function assertCapability(expected: string) {
-  const active = activeCapabilities();
-  if (!active.includes(expected)) {
-    throw new Error(`Compass capability not loaded: "${expected}". Loaded: ${active.join(", ") || "none"}. No change was made.`);
-  }
-}
 function markUnresolvedExecutionUnknown(reason: string): boolean {
   const execution = state.plan?.execution;
   if (!execution || !["dispatching", "running"].includes(execution.status)) return false;
@@ -1061,142 +906,12 @@ function noMutation<T>(fn: () => T): T {
     throw new Error(`${message} No state changed.`);
   }
 }
-function registerOnce(pi: any, name: string, definition: any): string {
-  let stableTools = stableToolsByPi.get(pi);
-  if (!stableTools) {
-    stableTools = new Set<string>();
-    stableToolsByPi.set(pi, stableTools);
-  }
-  if (!stableTools.has(name)) {
-    pi.registerTool({ ...definition, name });
-    stableTools.add(name);
-  }
-  return name;
-}
-// Pi replaces an extension tool when registerTool is called with the same name.
-// Keep names stable; update only the schema/implementation that actually changed.
-function registerDynamic(pi: any, name: string, definition: any): string {
-  let signatures = dynamicToolSignaturesByPi.get(pi);
-  if (!signatures) {
-    signatures = new Map<string, string>();
-    dynamicToolSignaturesByPi.set(pi, signatures);
-  }
-  const signature = JSON.stringify({
-    label: definition.label,
-    description: definition.description,
-    promptSnippet: definition.promptSnippet,
-    promptGuidelines: definition.promptGuidelines,
-    parameters: definition.parameters,
-  });
-  if (signatures.get(name) !== signature) {
-    pi.registerTool({ ...definition, name });
-    signatures.set(name, signature);
-  }
-  return name;
-}
-function toolInventory(pi: any) {
-  let all: string[] | null = null;
-  try { if (typeof pi.getAllTools === "function") all = namesFrom(pi.getAllTools()); } catch { all = null; }
-  const active = activeNames(pi);
-  const stateFor = (pattern: RegExp, hiddenReason = "") => {
-    const registered = all === null ? null : all.some((name) => pattern.test(name));
-    const visible = active.some((name) => pattern.test(name));
-    return {
-      registered,
-      active: visible,
-      ...(registered === false ? { reason: "not registered in this Pi session" } : !visible && hiddenReason ? { reason: hiddenReason } : {}),
-    };
-  };
-  return {
-    codemode: stateFor(/codemode|code.?mode/i, "registered but not currently active"),
-    subagents: stateFor(/^(?:subagent|subagents)$/i, "activation is owned by Pi/pi-subagents and the user"),
-    subagentLoader: stateFor(/^subagents_enable$/i),
-    await: {
-      watch: stateFor(/^watch$/),
-      status: stateFor(/^watches$/),
-      cancel: stateFor(/^unwatch$/),
-    },
-    askUserQuestions: stateFor(/ask.*user.*question|ask_user_question|ask.*question/i, "registered but not currently active"),
-  };
-}
-
 function observeCurrentHumanInput(ctx: any): boolean {
   const id = latestHumanSource(ctx?.sessionManager?.getBranch?.());
   if (!id) return false;
   const observed = observeHumanInput(state, id);
   if (observed.changed) state = observed.state;
   return observed.changed;
-}
-
-function registerGoalTool(pi: any) {
-  return registerOnce(pi, "compass_goal", {
-    label: "Set Semantic Goal",
-    description: "Explicitly create, replace, or reaffirm the Goal after interpreting Human intent. Runtime never infers a Goal from text. Submit the complete current constraint list; original Human messages remain in Pi. Select the Human sources that actually define this Goal; reviewing the latest input is recorded separately. Replacement resets Goal-specific work and fails while native runs are unresolved.",
-    promptSnippet: "You interpret Human intent; explicitly record a Goal when retained Goal state helps. Never treat your interpretation as Human approval.",
-    promptGuidelines: ["After new Human input, reaffirm or update the semantic Goal and full constraints before resuming approved DAG progression. Unchanged intent does not require a new Human approval; changed material definitions do."],
-    parameters: Type.Object({
-      expectedVersion: Type.Integer({ minimum: 0, description: "Observed Goal version; 0 before the first explicit Goal." }),
-      current: Type.String({ minLength: 1, maxLength: 4000, description: "Your semantic statement of the current Human-authorized objective, not the entire prompt." }),
-      constraints: Type.Array(Type.String({ minLength: 1, maxLength: 600 }), { maxItems: 24, uniqueItems: true, description: "Complete material Human constraints. Use [] only when none apply; do not infer approval or drop prior constraints silently." }),
-      sources: Type.Array(Type.String({ minLength: 1, maxLength: 256 }), { minItems: 1, maxItems: 16, uniqueItems: true, description: "Human source refs from compass_state or search that define the objective/constraints. Copy unchanged; a follow-up question does not replace the original task source." }),
-      acceptanceCriteria: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { maxItems: 12, uniqueItems: true, description: "Optional explicit semantic criteria. Omit to preserve existing criteria for the same Goal; a replacement starts with no criteria unless supplied." })),
-    }, { additionalProperties: false }),
-    async execute(_id: string, params: any, ...rest: any[]) {
-      return serialized(async () => {
-        const ctx = getContext(rest);
-        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-        const branch = ctx?.sessionManager?.getBranch?.();
-        const latest = latestHumanSource(branch);
-        const candidate = latest ? observeHumanInput(state, latest).state : state;
-        const sourceIds = resolveGoalSources(branch, params.sources);
-        const priorWork = { criteria: state.goal.criteria.length, tasks: state.plan.tasks.length, routeSet: Boolean(state.routeSet) };
-        const result = noMutation(() => setGoal(candidate, { ...params, sourceIds }));
-        if (result.changed) {
-          state = result.state;
-          afterMutation(pi, contextCwd(ctx));
-        }
-        return stateResult({
-          unchanged: !result.changed, goalVersion: state.goal.version, ...(result.replaced ? { reset: priorWork } : {}),
-        });
-      });
-    },
-  });
-}
-
-function registerStateSnapshotTool(pi: any) {
-  return registerOnce(pi, "compass_state", {
-    label: "Compact Goal State",
-    description: "Read the current semantic Goal, committed frame, outcome and actionable state. Use a previous cursor for bounded event deltas; exact unchanged cursors return a tiny envelope. Full Goal evidence is on demand through compass_goal_read; native tool availability is diagnosed by /compass-preflight.",
-    promptSnippet: "Read missing Goal/frame state on demand; reuse receipts and cursors, never poll.",
-    parameters: Type.Object({
-      cursor: Type.Optional(Type.String({ pattern: "^R[0-9]+-E[0-9]+-C[0-9]+$", maxLength: 64, description: "Goal/event/context cursor returned by Compass; pass it unchanged, e.g. R213-E166-C2." })),
-      maxEvents: Type.Optional(Type.Integer({ minimum: 1, maximum: 8 })),
-    }, { additionalProperties: false }),
-    async execute(_id: string, params: any, ...rest: any[]) {
-      return serialized(async () => {
-        if (params?.maxEvents !== undefined && (!Number.isInteger(params.maxEvents) || params.maxEvents < 1 || params.maxEvents > 8)) throw new Error("maxEvents must be an integer from 1 to 8. No state changed.");
-        if (params?.cursor !== undefined && !parseStateCursor(params.cursor)) throw new Error("Invalid cursor. Pass a cursor returned by Compass unchanged. No state changed.");
-        const ctx = getContext(rest);
-        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-        restoreContext(ctx);
-        if (observeCurrentHumanInput(ctx)) persistState(pi);
-        const frame = contextState.frames.at(-1);
-        const snapshot = buildStateSnapshot(state, params?.cursor ?? null, {
-          contextRevision: contextState.revision,
-          contextFrame: frame ? { active: true, depth: contextState.frames.length, id: frame.id } : { active: false, depth: 0, id: null },
-        });
-        if (Number.isInteger(params?.maxEvents) && snapshot.delta?.events?.length > params.maxEvents) {
-          snapshot.delta.omitted = (snapshot.delta.omitted ?? 0) + snapshot.delta.events.length - params.maxEvents;
-          snapshot.delta.events = snapshot.delta.events.slice(-params.maxEvents);
-        }
-        if (snapshot.input?.id) {
-          const { id, ...review } = snapshot.input;
-          snapshot.input = { ref: humanSourceRef(ctx.sessionManager.getBranch(), id), ...review };
-        }
-        return agentResult(snapshot, { cursor: snapshot.cursor, unchanged: snapshot.unchanged === true, stateRevision: state.stateRevision });
-      });
-    },
-  });
 }
 
 function contextBoundaryPreview(ctx: any) {
@@ -1225,35 +940,145 @@ function restoreContext(ctx: any) {
     throw error;
   }
 }
-function registerContextSearchTool(pi: any) {
-  return registerOnce(pi, "compass_context_search", {
-    label: "Find Context",
-    description: "Find missing Human instructions, observations or working memory. Returns opaque source refs and short excerpts. Use view=handles for selected refs, details for qualifications. Search is lexical, not semantic. It never changes context.",
-    parameters: contextSearchSchema(),
-    async execute(_id: string, params: any, ...rest: any[]) {
-      return serialized(async () => {
-        const ctx = getContext(rest);
-        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-        restoreContext(ctx);
-        return agentResult(agentSearch(ctx.sessionManager.getBranch(), { context: contextBoundaryPreview(ctx) }, contextState, params));
-      });
-    },
+function messageText(message: any): string {
+  const content = message?.content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part: any) => part?.type === "text" && typeof part.text === "string" ? part.text : "").filter(Boolean).join("\n").trim();
+}
+function resultText(result: any): string {
+  if (typeof result === "string") return result;
+  if (typeof result?.output === "string") return result.output;
+  if (typeof result?.text === "string") return result.text;
+  return messageText({ content: result?.content });
+}
+function explicitWriteTargets(event: any): string[] {
+  const tool = String(event?.toolName ?? "");
+  if (!/^(edit|write|apply_patch|amend)$/i.test(tool)) return [];
+  const input = event?.input ?? event?.args ?? {};
+  const candidates = [input?.path, input?.file_path, input?.filePath, input?.target, input?.file]
+    .filter((value: any) => typeof value === "string" && value.trim())
+    .map((value: string) => value.trim());
+  if (/^apply_patch$/i.test(tool)) {
+    const patchText = [input?.patch, input?.diff, input?.content, input?.patchText]
+      .filter((value: any) => typeof value === "string")
+      .join("\n");
+    const patchPaths = [];
+    const patterns = [
+      /^\*\*\*\s+(?:Update|Add|Delete) File:\s*(.+?)\s*$/gm,
+      /^\+\+\+\s+b\/(.+?)\s*$/gm,
+      /^---\s+a\/(.+?)\s*$/gm,
+    ];
+    for (const pattern of patterns) {
+      for (const match of patchText.matchAll(pattern)) {
+        const value = String(match[1] ?? "").trim();
+        if (value && value !== "/dev/null") patchPaths.push(value);
+      }
+    }
+    candidates.push(...patchPaths);
+  }
+  return [...new Set(candidates)].slice(0, 24);
+}
+function canonicalWriteTarget(targetValue: string, cwd?: string): string {
+  const target = String(targetValue ?? "").trim().replace(/\\/g, "/");
+  if (!target) return "";
+  // Keep drive-qualified paths stable even if Pi runs on a POSIX host.
+  if (/^[a-z]:\//i.test(target)) return target.toLowerCase().replace(/\/+/g, "/");
+  return path.resolve(cwd || state.projectRoot || process.cwd(), target);
+}
+
+function errorSummary(event: any): string {
+  const result = event?.result;
+  const content = Array.isArray(result?.content) ? result.content.map((part: any) => part?.type === "text" ? part.text : "").filter(Boolean).join("\n") : "";
+  return clip(event?.error || content || result?.error || "Tool execution failed without a text error.", 260);
+}
+
+function contextCwd(ctx: any) { return typeof ctx?.cwd === "string" && ctx.cwd.trim() ? ctx.cwd : process.cwd(); }
+function afterMutation(pi: any, cwd: string) { state.projectRoot = cwd; persistState(pi); }
+function stateResult(data: any = {}, unchanged = false) {
+  return agentResult({ ...(unchanged ? { unchanged: true } : {}), ...data, cursor: stateCursor(state, contextState.revision) }, { stateRevision: state.stateRevision });
+}
+function planResult(data: any = {}, unchanged = false) {
+  const approval = dagApprovalStatus(state);
+  const prompt = !approval.approved ? approvalPrompt(state.plan.approvalRequest) : null;
+  return stateResult({ ...data, approval: approval.approved ? "approved" : approval.status, ...(prompt ? { prompt } : {}), ...(approval.approved ? { ready: readyTasks(state.plan).map((task: any) => task.id) } : {}) }, unchanged);
+}
+function refreshAfterHumanInput(pi: any, ctx: any) { state.projectRoot = contextCwd(ctx); persistState(pi); }
+function restoreForTool(ctx: any) {
+  if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
+  restoreContext(ctx);
+}
+function handleQuestionResult(pi: any, event: any, ctx: any) {
+  return serialized(async () => {
+    if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
+    const callId = String(event.toolCallId ?? "");
+    const sourceId = persistedAssistantEntryId(ctx, callId);
+    const details = event.details;
+    const dagRequest = state.plan.approvalRequest;
+    const routeRequest = state.routeSet?.selectionRequest;
+    const owned = [dagRequest, routeRequest].some((request) => request?.sourceEntryId === sourceId && request?.toolCallId === callId);
+    const failure = questionnaireFailureResultPatch(event);
+    if (event.isError || failure) {
+      const recorded = recordHumanQuestionnaireFailure(state, { source: "ask_user_question", sourceEntryId: sourceId, sourceCallId: callId, errorCode: details?.error ?? "unknown", reason: messageText({ content: failure?.content ?? event.content }) });
+      if (recorded.captured) { state = recorded.state; persistState(pi); }
+      return failure;
+    }
+    if (!sourceId) return;
+    const captured = captureHumanDecision(state, { source: "ask_user_question", sourceEntryId: sourceId, sourceCallId: callId, text: messageText(event), details });
+    if (!captured.captured) return;
+    state = captured.state;
+    if (routeRequest?.sourceEntryId === sourceId && routeRequest?.toolCallId === callId && captured.item?.questionnaire) {
+      try {
+        state = recordRouteSelection(state, { expectedStateVersion: state.routeSet.stateVersion, selectionRequestId: routeRequest.id, sourceEntryId: sourceId, sourceCallId: callId, questionnaire: captured.item.questionnaire, details }).state;
+      } catch {
+        state.routeSet.selectionRequest.status = captured.item.questionnaire.outcome === "declined" ? "declined" : "modified";
+      }
+    }
+    persistState(pi);
+    if (dagApprovalStatus(state).approved) scheduleReadySubagentWaves(pi, ctx);
+    const complete = normalizeQuestionnaireRecord(details, { preserveFullText: true });
+    const decision = complete ? { outcome: complete.outcome, answers: complete.answers.map(({ question, answer, selected, notes }) => ({ question, answer, ...(selected ? { selected } : {}), ...(notes ? { notes } : {}) })), ...(complete.globalNote ? { note: complete.globalNote } : {}), ...(complete.unanswered?.length ? { unanswered: complete.unanswered } : {}) } : null;
+    if (owned) return { content: agentResult({ decision, ...(dagApprovalStatus(state).approved ? { plan: "approved" } : {}), ...(state.routeSet?.selectedRouteId ? { route: state.routeSet.selectedRouteId } : {}) }).content };
   });
 }
-function registerContextTool(pi: any, extended = activeCapabilities().includes("context")) {
-  return registerDynamic(pi, "compass_context", {
-    label: "Working Context",
-    exposure: "model-only",
-    description: "Remember compact conclusions with their source refs, or pin original source content when it must remain visible. Reuse refs unchanged; no revision, binding or scope bookkeeping. Use one direct context mutation per batch; frame/edit operations must be standalone, while pin/unpin/remember may accompany other tools. queued is not committed: wait for the native applied/rejected receipt. Open the context capability once for optional frames, edits and artifacts.",
-    parameters: contextToolSchema(extended),
-    async execute(toolCallId: string, args: any, ...rest: any[]) {
-      return serialized(async () => {
-        const input = args?.operation;
-        if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Supply {operation:{action,...}}. No context changed.");
-        const ctx = getContext(rest);
-        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-        restoreContext(ctx);
-        if (!["pin", "unpin", "remember"].includes(input.action) && !activeCapabilities().includes("context")) throw new Error("Open compass_open({capabilities:[\"context\"]}) once for frame/edit operations. No context changed.");
+
+function registerTools(pi: any) {
+  const definitions: Record<string, any> = {
+    compass_goal: {
+      label: "Goal", description: "Own semantic Goal, complete Human constraints and acceptance definitions. set explicitly creates/reaffirms/replaces; sources identify the actual original instructions, not just the latest follow-up. decide records a material decision; checkpoint records a real recoverable reference. No Human approval is inferred.",
+      execute: async (params: any, ctx: any) => {
+        if (params.action === "set") {
+          const branch = ctx.sessionManager.getBranch();
+          const latest = latestHumanSource(branch);
+          const candidate = latest ? observeHumanInput(state, latest).state : state;
+          const result = noMutation(() => setGoal(candidate, { expectedVersion: candidate.goal.version, current: params.current, constraints: params.constraints, sourceIds: resolveGoalSources(branch, params.sources), ...(Object.hasOwn(params, "criteria") ? { criteria: params.criteria } : {}) }));
+          if (result.changed) { state = result.state; afterMutation(pi, contextCwd(ctx)); }
+          return stateResult({ ...(result.replaced ? { replaced: true } : {}), ...(Object.hasOwn(params, "criteria") ? { criteria: state.goal.criteria.map(({ id, text }: any) => ({ id, text })) } : {}), ...(state.plan.tasks.length && !dagApprovalStatus(state).approved ? { approval: "required" } : {}) }, !result.changed);
+        }
+        if (params.action === "decide") {
+          const result = noMutation(() => recordDecision(state, { ...params, supersedesDecisionIds: params.supersedes, affectedTaskIds: params.taskIds }));
+          state = result.state; afterMutation(pi, contextCwd(ctx));
+          return stateResult({ decision: result.item?.id ?? state.decisions.at(-1)?.id });
+        }
+        if (params.action === "checkpoint") {
+          const result = noMutation(() => recordCheckpoint(state, { summary: params.note ?? "Recoverable checkpoint", ref: params.ref }));
+          state = result.state; afterMutation(pi, contextCwd(ctx));
+          return stateResult({ checkpoint: result.item?.id ?? state.checkpoints.at(-1)?.id });
+        }
+        throw new Error("Unknown Goal action. No state changed.");
+      },
+    },
+    compass_state: {
+      label: "State", description: "Read only the missing Goal, plan, acceptance, route, execution or bounded history view. Default summary is compact; reuse returned cursors instead of polling. Full requested evidence/caveats are preserved. No tool activation or semantic mutation.", readOnly: true,
+      execute: async (params: any, ctx: any) => { observeCurrentHumanInput(ctx); return agentResult(agentState(state, ctx.sessionManager.getBranch(), contextState, params)); },
+    },
+    compass_context_search: {
+      label: "Find Context", description: "Recover missing Human instructions, observed data or working memory. Query uses literal keywords; exact refs recover across available scopes. Short snippets default; handles omits text; details adds qualifications. No mutation.", readOnly: true,
+      execute: async (params: any, ctx: any) => agentResult(agentSearch(ctx.sessionManager.getBranch(), { context: contextBoundaryPreview(ctx) }, contextState, params)),
+    },
+    compass_context: {
+      label: "Context", exposure: "model-only", description: "Retain compact qualified memory or full originals; manage same-session attention frames and work values. Reuse opaque refs. One pin/unpin/remember may accompany sibling tools; other operations must be standalone. queued is provisional; use the native applied/rejected receipt, never poll. A frame is not filesystem rollback. Export retained values explicitly to preserve their lifetime in the parent.",
+      execute: async (input: any, ctx: any, toolCallId: string) => {
         const branch = ctx.sessionManager.getBranch();
         const boundary = { context: contextBoundaryPreview(ctx) };
         const normalized = agentContextOperation(branch, boundary, contextState, input);
@@ -1264,441 +1089,90 @@ function registerContextTool(pi: any, extended = activeCapabilities().includes("
           if (operation.artifact) throw new Error(String(error instanceof Error ? error.message : error) + "; verified artifact remains at " + operation.artifact.path + "; filesystem effects were not rolled back.");
           throw error;
         }
-        return {
-          content: [...agentResult({ resultStatus: "queued", ...(operation.artifact?.path ? { artifactPath: operation.artifact.path } : {}) }).content, ...(prepared.content?.slice(1) ?? [])],
-          details: { contextOperation: operation, contextRevision: contextState.revision },
-        };
-      });
-    },
-  });
-}
-function contextCwd(ctx: any) {
-  return typeof ctx?.cwd === "string" && ctx.cwd.trim() ? ctx.cwd : process.cwd();
-}
-function capabilitiesFor() {
-  return availableCapabilities(state);
-}
-
-function ensureLoader(pi: any): string {
-  const loaded = new Set(activeCapabilities());
-  const caps = capabilitiesFor().filter((name) => !loaded.has(name));
-  const signature = caps.join("|");
-  if (!caps.length) {
-    loaderSignature = "";
-    loaderName = "";
-    return "";
-  }
-  if (loaderName && signature === loaderSignature) return loaderName;
-  loaderSignature = signature;
-  const name = "compass_open";
-  pi.registerTool({
-    name,
-    label: "Compass Open",
-    description: `Load one or more missing Compass capability groups in one call. Currently openable: ${caps.join(", ")}. Loaded groups are omitted from this schema; do not reopen them.`,
-    promptSnippet: "Open missing capability groups once, in one batch. Do not reopen groups already loaded just to refresh tool visibility.",
-    promptGuidelines: [
-      "This schema contains only currently applicable, not-yet-loaded groups. It changes with Goal structure and recorded evidence; do not search for hidden groups or retry stale names.",
-      "Load missing capability groups in one batch when their operations or details will help the next step; loaded groups are additive.",
-      "Loaded groups no longer appear in this schema. If any requested group is unavailable, the atomic request loads none.",
-      "Compass mutation results carry current state; use compass_state only for missing information. Runtime validates dependencies; the Agent chooses the route. Planning visibility does not create a DAG.",
-    ],
-    parameters: Type.Object({
-      capabilities: Type.Array(Type.String({ enum: caps, description: "Capability group currently applicable to this Goal state." }), {
-        minItems: 1, maxItems: caps.length, uniqueItems: true,
-        description: "Missing capability groups needed for the next step; loaded groups are not options.",
-      }),
-    }, { additionalProperties: false }),
-    async execute(_toolCallId: string, params: any, ...rest: any[]) {
-      return serialized(async () => {
-        const requested = Array.isArray(params?.capabilities) ? params.capabilities : [];
-        if (!requested.length || new Set(requested).size !== requested.length) {
-          throw new Error("capabilities must contain one or more unique capability names. No state changed.");
-        }
-        const invalidAtLoad = requested.filter((capability: string) => !caps.includes(capability));
-        if (invalidAtLoad.length) throw new Error(`Unavailable capability: ${invalidAtLoad.join(", ")}. Available: ${caps.join(", ")}. No state changed.`);
-        const ctx = getContext(rest);
-        if (needsRestore) {
-          state = adoptBranchState(ctx);
-          needsRestore = false;
-          state.projectRoot = contextCwd(ctx);
-          ensureLoader(pi);
-        }
-        const currentCaps = capabilitiesFor();
-        const invalidNow = requested.filter((capability: string) => !currentCaps.includes(capability) || activeCapabilities().includes(capability));
-        if (invalidNow.length) throw new Error(`Capability no longer applicable: ${invalidNow.join(", ")}. Current openable set: ${currentCaps.filter((capability: string) => !activeCapabilities().includes(capability)).join(", ")}. No state changed.`);
-        const added = requested;
-        setActiveCapabilities([...activeCapabilities(), ...added]);
-        state.projectRoot = contextCwd(ctx);
-        // Do not change tool registry inside this model response. The next context
-        // boundary exposes the union of loaded capabilities and current schemas.
-        loadoutRefreshPending = true;
-        persistState(pi);
-        return stateResult({ added });
-      });
-    },
-  });
-  loaderName = name;
-  return name;
-}
-function capabilitySchemaSignature(capability: string): string {
-  // Operation schemas stay stable across ordinary state changes. Runtime
-  // validates IDs/statuses at execution, avoiding stale-schema "tool not found".
-  if (capability === "planning") return "planning-operations-v1";
-  if (capability === "acceptance") return "acceptance-v1";
-  if (capability === "history") return `history-v1|dag:${state.plan.tasks.length > 0}`;
-  if (capability === "routes") return "routes-v1";
-  return "fixed";
-}
-function loadoutSignature(capabilities: string[]) {
-  return [...new Set(capabilities)].sort().map((capability) => `${capability}|${capabilitySchemaSignature(capability)}`).join("||");
-}
-function registerActiveCapabilityGroups(pi: any): string[] {
-  const active = activeCapabilities();
-  if (state.goal.criteria?.some((item: any) => item.goalVersion === state.goal.version) && !active.includes("acceptance")) {
-    setActiveCapabilities([...active, "acceptance"]);
-  }
-  return [...new Set(activeCapabilities().flatMap((capability) => registerCapabilityGroup(pi, capability)))];
-}
-
-function taskDefinitionSchema() {
-  return Type.Object({
-    id: Type.String({ minLength: 1, maxLength: 40, pattern: "^[a-zA-Z][a-zA-Z0-9_-]{0,39}$", description: "Stable ID: starts with a letter; letters, digits, underscore, hyphen only." }),
-    title: Type.String({ minLength: 1, maxLength: 200, description: "Short task title." }),
-    dependsOn: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 40, pattern: "^[a-zA-Z][a-zA-Z0-9_-]{0,39}$" }), { maxItems: 24, uniqueItems: true, description: "Real prerequisite task IDs; omit or use [] for none." })),
-    acceptance: Type.String({ minLength: 1, maxLength: 400, description: "Observable completion condition for this subgoal." }),
-    output: Type.Optional(Type.String({ maxLength: 400, description: "Expected artifact/evidence, if useful." })),
-    executor: Type.Optional(Type.String({ enum: ["parent", "code", "subagent"], description: "Execution route: parent for semantic/coupled work; code for deterministic batching in Code Mode; subagent for bounded semantic read-only investigation. Defaults to parent." })),
-    agent: Type.Optional(Type.String({ enum: ["scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"], description: "pi-subagents role, used only when executor=subagent. Defaults to scout." })),
-    writeScope: Type.Optional(Type.String({ maxLength: 200, description: "Owned path/file/directory/glob scope for writable tasks, or exact value read-only for read-only investigations. A subagent task must be read-only." })),
-    dispatchReason: Type.Optional(Type.String({ minLength: 12, maxLength: 400, description: "Required when executor=subagent: why a separate semantic context is worth the extra model call instead of using parent reasoning or deterministic Code Mode. Prefer independent exploration, coverage, or review; do not delegate trivial deterministic work." })),
-    frameScope: Type.Optional(Type.String({ maxLength: 64, description: "Optional active Compass frame scope for this work; it correlates native execution without creating another task registry." })),
-  }, { additionalProperties: false });
-}
-function planCreateSchema() {
-  return Type.Object({
-    acceptanceCriteria: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 12, description: "Final observable acceptance conditions; do not invent unknown product semantics." }),
-    tasks: Type.Array(taskDefinitionSchema(), { minItems: 2, maxItems: 24, description: "Only use a DAG for genuine dependencies or independent tracks. Include the whole graph and choose executor per task. A Subagent task must be read-only and explain why the extra semantic call is worth it in dispatchReason; otherwise use parent or code." }),
-  }, { additionalProperties: false });
-}
-function planReviseSchema() {
-  return Type.Object({
-    expectedStateVersion: Type.Integer({ minimum: 0, maximum: 1_000_000_000, description: "State version observed in the latest plan status. Runtime checks it; stale revisions are rejected without mutation." }),
-    changeReason: Type.String({ minLength: 1, maxLength: 600, description: "Why new evidence materially changes dependencies or the route." }),
-    acceptanceCriteria: Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { minItems: 1, maxItems: 12 }),
-    tasks: Type.Array(taskDefinitionSchema(), { minItems: 2, maxItems: 24, description: "Full revised DAG. Unchanged task IDs and definitions preserve state; changed definitions and affected descendants may reset. Subagent tasks must be read-only and justify the extra semantic call in dispatchReason." }),
-  }, { additionalProperties: false });
-}
-
-function routeSchema() {
-  return Type.Object({
-    action: Type.String({ enum: ["create", "status", "select", "propose_exploration", "register_competitor", "result", "cancel_request", "cancel_ack", "cancel_terminal", "cancel_unknown"] }),
-    expectedStateVersion: Type.Optional(Type.Integer({ minimum: 0, maximum: 1_000_000_000, description: "Required for every mutation of an existing RouteSet. Initial create may omit or pass 0; use stateVersion from the last receipt/status." })),
-    baselineRef: Type.Optional(Type.String({ minLength: 1, maxLength: 300, description: "Required for create and register_competitor: a concrete shared code/checkpoint reference. Not authorization or an automatic filesystem snapshot." })),
-    acceptanceCriteria: Type.Optional(Type.Array(Type.Union([Type.String({ minLength: 1, maxLength: 300 }), Type.Object({ id: Type.String({ minLength: 1, maxLength: 32 }), text: Type.String({ minLength: 1, maxLength: 300 }) }, { additionalProperties: false })]), { maxItems: 12 })),
-    routes: Type.Optional(Type.Array(Type.Object({
-      routeId: Type.String({ minLength: 1, maxLength: 40, pattern: "^[A-Za-z][A-Za-z0-9_-]{0,39}$" }),
-      summary: Type.String({ minLength: 1, maxLength: 500 }),
-      rationale: Type.Optional(Type.String({ maxLength: 500 })),
-      assumptions: Type.Optional(Type.Array(Type.String({ maxLength: 300 }), { maxItems: 8 })),
-      dependencies: Type.Optional(Type.Array(Type.String({ maxLength: 300 }), { maxItems: 8 })),
-      expectedCost: Type.Optional(Type.String({ maxLength: 120 })),
-      expectedLatency: Type.Optional(Type.String({ maxLength: 120 })),
-      risks: Type.Optional(Type.Array(Type.String({ maxLength: 300 }), { maxItems: 8 })),
-    }, { additionalProperties: false }), { minItems: 2, maxItems: 3 })),
-    routeId: Type.Optional(Type.String({ minLength: 1, maxLength: 40 })),
-    runId: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Native competitor identity. Required with routeId+correlationId for register_competitor, result and cancel_*; result is NOT a route-level verdict." })),
-    correlationId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-    scope: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "Exact proposed exploration scope, shown to Human before authorization." })),
-    budget: Type.Optional(Type.Integer({ minimum: 2, maximum: 24, description: "Proposed maximum competitor runs; not authorization until the exact questionnaire is answered." })),
-    routeIds: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 40 }), { minItems: 2, maxItems: 3, uniqueItems: true })),
-    criteria: Type.Optional(Type.Array(Type.Object({ id: Type.String({ minLength: 1, maxLength: 32 }), status: Type.String({ enum: ["pass", "fail", "inconclusive"] }), evidence: Type.String({ minLength: 1, maxLength: 1600 }) }, { additionalProperties: false }), { maxItems: 12 })),
-    caveats: Type.Optional(Type.Array(Type.String({ maxLength: 400 }), { maxItems: 8 })),
-    unresolvedCaveats: Type.Optional(Type.Array(Type.String({ maxLength: 400 }), { maxItems: 8 })),
-    evidenceRefs: Type.Optional(Type.Array(Type.String({ maxLength: 160 }), { maxItems: 8 })),
-    summary: Type.Optional(Type.String({ maxLength: 800 })),
-    status: Type.Optional(Type.String({ enum: ["failed"] })),
-    requestId: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-    terminalStatus: Type.Optional(Type.String({ maxLength: 32 })),
-  }, { additionalProperties: false });
-}
-
-function registerCapabilityGroup(pi: any, capability: string): string[] {
-  const names: string[] = [];
-  if (capability === "context") return [registerContextTool(pi, true)];
-  const activeCheck = (expected: string) => assertCapability(expected);
-
-  if (capability === "routes") {
-    names.push(registerDynamic(pi, "compass_route", {
-      label: "RouteSet",
-      description: "Manage one compact RouteSet authority for alternative strategies. Alternatives are not DAG siblings; exploration requires explicit Human authorization and competitor cancellation requires an accepted shared-criteria result.",
-      promptSnippet: "create requires baselineRef, shared acceptanceCriteria and 2–3 routes. Use the returned exact Human questionnaire; select never self-approves. result is only for a registered native competitor (runId, routeId, correlationId, criteria); all existing-RouteSet mutations require expectedStateVersion.",
-      parameters: routeSchema(),
-      async execute(_id: string, params: any, ...rest: any[]) {
-        return serialized(async () => {
-          const ctx = getContext(rest);
-          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-          activeCheck("routes");
-          const action = params.action;
-          let result: any;
-          if (action === "status") {
-            return agentResult(routeSetStatus(state));
-          }
-          if (action === "create") result = noMutation(() => createRouteSet(state, params));
-          else if (action === "select") result = noMutation(() => selectRoute(state, params));
-          else if (action === "propose_exploration") result = noMutation(() => proposeRouteExploration(state, params));
-          else if (action === "register_competitor") result = noMutation(() => registerCompetitorRun(state, params));
-          else if (action === "result") result = noMutation(() => recordCompetitorResult(state, params));
-          else if (action.startsWith("cancel_")) result = noMutation(() => updateCompetitorCancellation(state, { ...params, action: action.slice("cancel_".length) }));
-          else throw new Error(`Unknown RouteSet action ${action}. No state changed.`);
-          state = result.state;
-          afterMutation(pi, contextCwd(ctx));
-          const routeSet = state.routeSet;
-          const question = action === "create" || action === "propose_exploration";
-          const run = result.run;
-          return stateResult({ routeSet: {
-            id: routeSet.id, stateVersion: routeSet.stateVersion,
-            selectedRouteId: routeSet.selectedRouteId, winningRouteId: routeSet.winningRouteId,
-            ...(result.exploration ? { exploration: result.exploration } : {}),
-            ...(result.route ? { acceptanceGate: result.route.acceptanceGate, caveats: result.route.caveats, evidenceRefs: result.route.evidenceRefs } : {}),
-            ...(run ? { run: { runId: run.runId, routeId: run.routeId, correlationId: run.correlationId, status: run.status,
-              ...(run.result ? { acceptanceGate: run.result.acceptanceGate,
-                unresolvedCriteria: run.result.criteria.filter((criterion: { status: string }) => criterion.status !== "pass").map((criterion: { id: string; status: string }) => ({ id: criterion.id, status: criterion.status })),
-                caveats: run.result.caveats, unresolvedCaveats: run.result.unresolvedCaveats,
-              } : {}),
-              ...(run.cancellation ? { cancellation: { phase: run.cancellation.phase, requestId: run.cancellation.requestId, terminalStatus: run.cancellation.terminalStatus } } : {}),
-            } } : {}),
-            ...(question ? { selectionRequest: { id: routeSet.selectionRequest.id, status: routeSet.selectionRequest.status, questionnaire: routeSet.selectionRequest.questionnaire } } : {}),
-          }, ...(question ? { next: "Pass routeSet.selectionRequest.questionnaire unchanged to ask_user_question({questions:[questionnaire]})." } : {}) });
-        });
+        return { content: [...agentResult({ queued: true, ...(operation.artifact?.path ? { artifact: operation.artifact.path } : {}) }).content, ...(prepared.content?.slice(1) ?? [])], details: { contextOperation: operation } };
       },
-    }));
-    return names;
-  }
-
-  if (capability === "planning") {
-    if (!state.plan.goal || !state.plan.tasks.length) {
-      names.push(registerOnce(pi, "compass_plan_create", {
-        label: "Create Goal DAG",
-        description: "Create an optional draft DAG for a complex Goal. Execution stays blocked until the Human answers Compass's correlated structured approval questionnaire for the exact Goal, criteria, tasks, dependencies, executors, and Human constraints.",
-        promptSnippet: "Create a small DAG only when the Goal has real dependencies or independent tracks.",
-        parameters: planCreateSchema(),
-        async execute(_id: string, params: any, ...rest: any[]) {
-          return serialized(async () => {
-            const ctx = getContext(rest);
-            if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-            activeCheck("planning");
-            if (state.plan.goal && state.plan.tasks.length) throw new Error("A DAG already exists. Use compass_plan_revise; no state changed.");
-            if (!state.goal.current) throw new Error("No Goal has been captured from the Human's initial prompt.");
-            const planned = noMutation(() => revisePlanState(state, { acceptanceCriteria: params.acceptanceCriteria, tasks: params.tasks }));
-            state = planned.state;
-            setActiveCapabilities([...activeCapabilities(), "acceptance"]);
-            afterMutation(pi, contextCwd(ctx));
-            const dependencyReady = readyTasks(state.plan).map((task: any) => task.id);
-            const ready = dagApprovalStatus(state).approved ? dependencyReady : [];
-            return planResult({ revision: state.plan.revision, ready, dependencyReady, approval: approvalReceipt() });
-          });
-        },
-      }));
-      return names;
-    }
-
-    names.push(registerOnce(pi, "compass_plan_approval", {
-      label: "Request DAG Approval",
-      description: "Create a fresh identity-bound structured Human approval question for the current exact Goal DAG after a prior answer was partial, modified, declined, or unavailable, or after a material constraint/decision changed. This never approves or starts work by itself.",
-      promptSnippet: "Use this only to request Human approval again; execution remains blocked until the correlated structured answer selects the exact approval option.",
-      parameters: Type.Object({}, { additionalProperties: false }),
-      async execute(_id: string, _params: any, ...rest: any[]) {
-        return serialized(async () => {
-          const ctx = getContext(rest);
-          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-          activeCheck("planning");
+    },
+    compass_plan: {
+      label: "Plan", description: "Own an optional DAG: define replaces its full task graph, request_approval renews a proposal, start/done/block/reopen update tasks, assess records semantic criterion checks, resolve reconciles a verified terminal unknown batch. Goal alone defines criteria. Definition is a draft, not authorization. Forward the small returned prompt to native ask_user_question; code supplies its full exact proposal. Read plans through compass_state.",
+      execute: async (params: any, ctx: any) => {
+        const action = params.action;
+        if (action === "define") {
+          const result = noMutation(() => revisePlanState(state, { tasks: params.tasks, ...(params.reason ? { changeReason: params.reason } : {}) }));
+          state = result.state;
+          if (result.changed) afterMutation(pi, contextCwd(ctx));
+          return planResult({}, !result.changed);
+        }
+        if (action === "request_approval") {
           const result = noMutation(() => renewDagApprovalRequest(state));
-          state = result.state;
-          afterMutation(pi, contextCwd(ctx));
-          return stateResult({
-
-            approvalRequest: { id: result.request.id, questionnaire: result.request.questionnaire },
-          });
-        });
+          state = result.state; afterMutation(pi, contextCwd(ctx));
+          return planResult();
+        }
+        if (action === "assess") {
+          const result = noMutation(() => recordTaskAssessment(state, params));
+          state = result.state; afterMutation(pi, contextCwd(ctx));
+          return planResult({ task: params.taskId, assessment: result.assessment.status });
+        }
+        if (action === "resolve") return resolveExecution(pi, params, ctx);
+        if (!["start", "done", "block", "reopen"].includes(action)) throw new Error("Unknown plan action. No state changed.");
+        const items = action === "start" ? params.taskIds.map((id: string) => ({ id })) : params.tasks;
+        if (action === "start") {
+          const delegated = items.filter(({ id }: any) => state.plan.tasks.find((task: any) => task.id === id)?.executor === "subagent");
+          if (delegated.length) throw new Error("Read-only Subagent tasks are started by approved native dispatch; do not start them manually. No state changed.");
+        }
+        const execution = state.plan.execution;
+        if (executionUnresolved(execution) && items.some(({ id }: any) => execution.taskIds.includes(id))) throw new Error("Task belongs to an unresolved native batch; read execution state and reconcile it first. No state changed.");
+        const result = noMutation(() => transitionTasks(state, action, items, updateTasks));
+        state = result.state; afterMutation(pi, contextCwd(ctx));
+        return planResult({ affected: result.affected });
       },
-    }));
-
-    names.push(registerOnce(pi, "compass_plan_status", {
-      label: "DAG Status",
-      description: "Read current DAG progress and the code-derived ready task set. Returns structured revision/stateVersion/tasks/ready/blocked fields; use stateVersion directly rather than parsing the prose summary.",
-      promptSnippet: "Inspect DAG progress when the next action depends on task status.",
-      parameters: Type.Object({}, { additionalProperties: false }),
-      async execute(_id: string, _params: any, ...rest: any[]) {
-        const ctx = getContext(rest);
-        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-        activeCheck("planning");
-        const plan = state.plan;
-        const acceptance = acceptanceStatus(state);
-        const outcome = goalOutcomeStatus(state);
-        const dependencyReady = readyTasks(plan).map((task: any) => task.id);
-        const approved = dagApprovalStatus(state).approved;
-        const ready = approved ? dependencyReady : [];
-        const blocked = plan.tasks.filter((task: any) => task.status === "blocked").map((task: any) => task.id);
-        return agentResult({
-          revision: plan.revision ?? 0,
-          stateVersion: plan.stateVersion ?? 0,
-          total: plan.tasks.length,
-          done: plan.tasks.filter((task: any) => task.status === "done").length,
-          inProgress: plan.tasks.filter((task: any) => task.status === "in_progress").map((task: any) => task.id),
-          ready,
-          dependencyReady,
-          approval: approvalReceipt(),
-          blocked,
-          tasks: plan.tasks.map((task: any) => ({ id: task.id, title: clip(task.title, 100), status: task.status, dependsOn: task.dependsOn, executor: task.executor || "parent", ...(task.executor === "subagent" ? { agent: task.agent || "scout" } : {}), writeScope: task.writeScope || null, frameScope: task.frameScope || null, reason: task.reason ? clip(task.reason, 140) : null })),
-          acceptance: { status: acceptance.status, total: acceptance.total, reportedPass: acceptance.passed, failed: acceptance.failed, blocked: acceptance.blocked, unverified: acceptance.unverified },
-          goalOutcome: outcome,
-          execution: plan.execution ? { requestId: plan.execution.requestId, status: plan.execution.status, results: plan.execution.results.map((item: any) => ({ id: item.id, status: item.status, runId: item.runId, ...(item.error ? { error: item.error } : {}) })) } : null,
-        });
+    },
+    compass_acceptance: {
+      label: "Acceptance Evidence", description: "Record evidence outcomes for existing Goal criteria; never define criteria or infer independent verification. Report actual observations as reported_pass/failed/blocked/inconclusive. A task marked done is not a verified Goal. Use compass_goal for definitions and compass_state for reads.",
+      execute: async (params: any, ctx: any) => {
+        let candidate = state; let changed = false; const recorded = [];
+        if (new Set(params.results.map((item: any) => item.criterion)).size !== params.results.length) throw new Error("Report each criterion once per batch. No state changed.");
+        for (const item of params.results) {
+          const result = noMutation(() => recordAcceptanceResult(candidate, { criterionId: item.criterion, status: item.status, evidence: item.evidence, source: "agent_reported" }));
+          candidate = result.state; changed ||= result.changed; recorded.push({ criterion: item.criterion, status: result.criterion.status });
+        }
+        if (changed) { state = candidate; afterMutation(pi, contextCwd(ctx)); }
+        return stateResult({ recorded }, !changed);
       },
-    }));
-    names.push(registerOnce(pi, "compass_plan_revise", {
-      label: "Revise Goal DAG",
-      description: "Revise the full DAG only when new evidence materially changes the route. Submit expectedStateVersion from the latest status; unchanged tasks preserve state. Ready tasks explicitly routed to read-only Subagents are auto-dispatched after this tool completes.",
-      promptSnippet: "Revise only after material new evidence; stale state versions are rejected without mutation.",
-      parameters: planReviseSchema(),
-      async execute(_id: string, params: any, ...rest: any[]) {
-        return serialized(async () => {
-          const ctx = getContext(rest);
-          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-          activeCheck("planning");
-          if (!state.plan.goal || !state.plan.tasks.length) throw new Error("No DAG exists. Create one only if real dependencies or independent tracks justify it.");
-          if (params.expectedStateVersion !== (state.plan.stateVersion ?? 0)) throw new Error(`Stale plan state version ${params.expectedStateVersion}; current version is ${state.plan.stateVersion ?? 0} (DAG revision ${state.plan.revision}). Read current status and revise from the latest state; no changes were made.`);
-          const eventSeqBefore = state.eventSeq ?? 1;
-          const beforeStatuses = new Map(state.plan.tasks.map((task: any) => [task.id, { status: task.status, reason: task.reason || "" }]));
-          const { expectedStateVersion: _expectedStateVersion, ...revisionInput } = params;
-          const result = noMutation(() => revisePlanState(state, revisionInput));
-          state = result.state;
-          const changed = result.changed || (state.eventSeq ?? 1) !== eventSeqBefore;
-          const invalidatedDetails = state.plan.tasks.filter((task: any) => {
-            const beforeStatus = beforeStatuses.get(task.id)?.status;
-            return ["done", "in_progress", "blocked"].includes(beforeStatus) && task.status === "pending";
-          }).map((task: any) => ({
-            id: task.id,
-            from: beforeStatuses.get(task.id)?.status,
-            to: task.status,
-            reason: task.reason || "Task definition or dependency changed during plan revision.",
-          }));
-          const reset = invalidatedDetails.map((item: any) => item.id);
-          const dependencyReady = readyTasks(state.plan).map((task: any) => task.id);
-          const readyNow = dagApprovalStatus(state).approved ? dependencyReady : [];
-          const blockedNow = state.plan.tasks.filter((task: any) => task.status === "blocked").map((task: any) => task.id);
-          if (changed) afterMutation(pi, contextCwd(ctx));
-          return planResult({ unchanged: !changed, revision: state.plan.revision, stateVersion: state.plan.stateVersion, ready: readyNow, dependencyReady, approval: approvalReceipt(), invalidated: reset, invalidatedDetails, blocked: blockedNow });
-        });
+    },
+    compass_route: {
+      label: "Route", description: "Own alternative strategies, explicit Human route/exploration authorization, correlated competitor results and acceptance-gated cancellation. Alternatives are not DAG tasks. define supplies 2–3 routes and a shared baseline, using current Goal criterion IDs. Forward returned prompt to native ask_user_question. A Human selection applies automatically; there is no extra select step. Read through compass_state.",
+      execute: async (params: any, ctx: any) => {
+        const action = params.action;
+        const current = { ...params, expectedStateVersion: state.routeSet?.stateVersion ?? 0 };
+        let result: any;
+        if (action === "define") result = noMutation(() => createRouteSet(state, { ...current, criteria: params.criteria ?? state.goal.criteria.filter((item: any) => item.goalVersion === state.goal.version).map((item: any) => item.id) }));
+        else if (action === "request_selection") result = noMutation(() => renewRouteProposal(state, current));
+        else if (action === "explore") result = noMutation(() => proposeRouteExploration(state, current));
+        else if (action === "register") result = noMutation(() => registerCompetitorRun(state, current));
+        else if (action === "result") result = noMutation(() => recordCompetitorResult(state, current));
+        else if (action === "accept") result = noMutation(() => acceptRouteResult(state, current));
+        else if (action.startsWith("cancel_")) result = noMutation(() => updateCompetitorCancellation(state, { ...current, action: action.slice(7) }));
+        else throw new Error("Unknown route action. No state changed.");
+        state = result.state; afterMutation(pi, contextCwd(ctx));
+        const prompt = approvalPrompt(state.routeSet.selectionRequest);
+        return stateResult({ ...(prompt ? { prompt } : {}), ...(result.run ? { run: { runId: result.run.runId, status: result.run.status, ...(result.run.result ? { result: result.run.result } : {}), ...(result.run.cancellation ? { cancellation: result.run.cancellation } : {}) } } : {}), ...(result.route ? { routeId: result.route.routeId, acceptanceGate: result.route.acceptanceGate, ...(result.route.caveats?.length ? { caveats: result.route.caveats } : {}) } : {}) });
       },
-    }));
-
-    const taskId = () => Type.String({ minLength: 1, maxLength: 40, pattern: "^[a-zA-Z][a-zA-Z0-9_-]{0,39}$", description: "Task ID from the current DAG. Runtime validates current status and dependencies." });
-    names.push(registerOnce(pi, "compass_task", {
-      label: "Update DAG Tasks",
-      description: "Task lifecycle and explicit semantic checks. Every progression action requires current correlated Human approval. Completion, assessment, independent review, and final Goal acceptance remain distinct; dependencies unlock only after an explicit passing assessment with no unresolved caveats.",
-      promptSnippet: "After completing a task, explicitly assess it against its approved acceptance criterion with evidence, caveats, and pass/fail/inconclusive. Only a pass unlocks dependent tasks.",
-      parameters: Type.Object({
-        action: Type.String({ enum: ["start", "done", "block", "reopen", "assess"] }),
-        taskIds: Type.Optional(Type.Array(taskId(), { minItems: 1, maxItems: 24, uniqueItems: true, description: "Required only for action=start." })),
-        assessment: Type.Optional(Type.Object({
-          taskId: taskId(),
-          status: Type.String({ enum: ["pass", "fail", "inconclusive"] }),
-          evidence: Type.String({ minLength: 1, maxLength: 1600 }),
-          caveats: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 400 }), { maxItems: 8 })),
-          unresolvedCaveats: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 400 }), { maxItems: 8 })),
-        }, { additionalProperties: false })),
-        tasks: Type.Optional(Type.Array(Type.Object({
-          id: taskId(),
-          evidence: Type.Optional(Type.String({ minLength: 1, maxLength: 1600, description: "Required only for action=done; concrete command result, test output, artifact path, or observed behavior." })),
-          reason: Type.Optional(Type.String({ minLength: 1, maxLength: 600, description: "Required only for action=block or reopen." })),
-        }, { additionalProperties: false }), { minItems: 1, maxItems: 24, uniqueItems: true, description: "Required for done/block/reopen; use only the fields allowed for the selected action." })),
-      }, { additionalProperties: false }),
-      async execute(_id: string, params: any, ...rest: any[]) {
-        return serialized(async () => {
-          const ctx = getContext(rest);
-          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-          activeCheck("planning");
-          const action = String(params?.action ?? "");
-          const hasTaskIds = Object.prototype.hasOwnProperty.call(params ?? {}, "taskIds");
-          const taskIds = Array.isArray(params?.taskIds) ? params.taskIds : [];
-          const tasks = Array.isArray(params?.tasks) ? params.tasks : [];
-          if (action === "start") {
-            if (!taskIds.length || Object.prototype.hasOwnProperty.call(params ?? {}, "tasks") || !Array.isArray(params?.taskIds)) throw new Error('action="start" requires taskIds and forbids tasks. No state changed.');
-          } else if (action === "assess") {
-            if (!params.assessment || hasTaskIds || Object.prototype.hasOwnProperty.call(params ?? {}, "tasks")) throw new Error('action="assess" requires assessment and forbids taskIds/tasks. No state changed.');
-            const result = noMutation(() => recordTaskAssessment(state, params.assessment));
-            state = result.state;
-            afterMutation(pi, contextCwd(ctx));
-            const readyNow = readyTasks(state.plan).map((task: any) => task.id);
-            return stateResult({ taskId: params.assessment.taskId, assessment: result.assessment, ready: readyNow });
-          } else if (["done", "block", "reopen"].includes(action)) {
-            if (!tasks.length || hasTaskIds || !Array.isArray(params?.tasks)) throw new Error(`action="${action}" requires tasks and forbids taskIds. No state changed.`);
-            for (const [index, item] of tasks.entries()) {
-              const hasEvidence = Object.prototype.hasOwnProperty.call(item ?? {}, "evidence");
-              const hasReason = Object.prototype.hasOwnProperty.call(item ?? {}, "reason");
-              if (action === "done" && (typeof item?.evidence !== "string" || !item.evidence.trim() || hasReason)) throw new Error(`tasks[${index}] for action=done requires non-empty evidence and forbids reason. No state changed.`);
-              if ((action === "block" || action === "reopen") && (typeof item?.reason !== "string" || !item.reason.trim() || hasEvidence)) throw new Error(`tasks[${index}] for action=${action} requires non-empty reason and forbids evidence. No state changed.`);
-            }
-          } else throw new Error('action must be one of "start", "done", "block", or "reopen". No state changed.');
-          if (action === "start") {
-            const delegated = taskIds.filter((id: string) => state.plan.tasks.find((task: any) => task.id === id)?.executor === "subagent");
-            if (delegated.length) throw new Error(`Subagent-routed task(s) ${delegated.join(", ")} are started by Compass after DAG mutations; do not start them manually. No state changed.`);
-          }
-          const execution = state.plan.execution;
-          if (execution && ["dispatching", "running", "unknown"].includes(execution.status)) {
-            const requestedIds = action === "start" ? taskIds : tasks.map((item: any) => item.id);
-            const overlap = requestedIds.filter((id: string) => execution.taskIds.includes(id));
-            if (overlap.length) throw new Error(`Task(s) ${overlap.join(", ")} belong to unresolved Subagent batch ${execution.requestId}; reconcile the batch before changing their status. No state changed.`);
-          }
-          const items = action === "start" ? taskIds.map((id: string) => ({ id })) : tasks;
-          const result = noMutation(() => transitionTasks(state, action, items, updateTasks));
-          state = result.state;
-          const readyNow = readyTasks(state.plan).map((task: any) => task.id);
-          const remaining = state.plan.tasks.filter((task: any) => task.status !== "done").length;
-          afterMutation(pi, contextCwd(ctx));
-          if (action === "start") return stateResult({ affected: result.affected, ready: readyNow });
-          if (action === "done") {
-            const direct = result.completedWithoutStart ?? [];
-            return stateResult({ affected: result.affected, completedWithoutStart: direct, ready: readyNow, remaining });
-          }
-          if (action === "block") return stateResult({ affected: result.affected, ready: readyNow });
-          const roots = tasks.map((item: any) => item.id);
-          const downstream = result.affected.filter((id: string) => !roots.includes(id));
-          return stateResult({ affected: result.affected, roots, downstream, ready: readyNow });
-        });
+    },
+  };
+  for (const [name, definition] of Object.entries(definitions)) {
+    const { readOnly, execute: run, ...declaration } = definition;
+    pi.registerTool({ name, ...declaration, parameters: toolSchemas[name], annotations: { readOnlyHint: readOnly === true, destructiveHint: false, openWorldHint: false },
+      async execute(id: string, args: any, ...rest: any[]) {
+        return serialized(async () => { const ctx = getContext(rest); restoreForTool(ctx); return run(args, ctx, id); });
       },
-    }));
-    if (state.plan.execution && ["dispatching", "running", "unknown", "failed"].includes(state.plan.execution.status)) {
-      names.push(registerOnce(pi, "compass_execution", {
-        label: "Subagent Execution Recovery",
-        description: "Read the current auto-dispatch batch or reconcile an unknown batch after checking native Subagent status. Resolve is available only for status=unknown, requires the exact requestId, explicit confirmation that no child run remains active, and a result for every task. Never use resolve as a substitute for checking run status.",
-        promptSnippet: "If a Subagent batch is unknown, inspect its recorded run IDs with native Subagent status first. Resolve only after proving no child remains active; otherwise do not retry or revise the DAG.",
-        parameters: Type.Object({
-          action: Type.String({ enum: ["status", "resolve"] }),
-          requestId: Type.Optional(Type.String({ minLength: 1, maxLength: 128, description: "Exact request ID from the current unresolved batch." })),
-          confirmedNoActiveRuns: Type.Optional(Type.Boolean({ description: "Must be true only after checking native Subagent status and confirming none of the recorded child runs remains active." })),
-          confirmationEvidence: Type.Optional(Type.String({ minLength: 12, maxLength: 600, description: "Observed status output or other concrete evidence that no recorded child remains active." })),
-          results: Type.Optional(Type.Array(Type.Object({
-            id: taskId(),
-            status: Type.String({ enum: ["done", "blocked"] }),
-            evidence: Type.Optional(Type.String({ minLength: 1, maxLength: 1600 })),
-            reason: Type.Optional(Type.String({ minLength: 1, maxLength: 600 })),
-          }, { additionalProperties: false }), { minItems: 1, maxItems: 6, uniqueItems: true })),
-        }, { additionalProperties: false }),
-        async execute(_id: string, params: any, ...rest: any[]) {
-          return serialized(async () => {
-            const ctx = getContext(rest);
-            if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-            activeCheck("planning");
-            const execution = state.plan.execution;
-            if (params.action === "status") {
-              if (Object.keys(params).some((key) => key !== "action")) throw new Error('action="status" accepts no additional fields. No state changed.');
-              return agentResult({ execution: execution ? clone(execution) : null });
-            }
+    });
+  }
+}
+function resolveExecution(pi: any, params: any, ctx: any) {
+const execution = state.plan.execution;
             if (params.action !== "resolve") throw new Error('action must be "status" or "resolve". No state changed.');
             if (!execution || execution.status !== "unknown") throw new Error("Only an unknown Subagent batch can be manually reconciled. No state changed.");
-            if (params.requestId !== execution.requestId) throw new Error("requestId does not match the current unknown batch. Read compass_execution(action=status); no state changed.");
+            if (params.requestId !== execution.requestId) throw new Error("requestId does not match the current unknown batch. Read compass_state(view=execution); no state changed.");
             if (params.confirmedNoActiveRuns !== true || typeof params.confirmationEvidence !== "string" || params.confirmationEvidence.trim().length < 12) {
               throw new Error("Resolve requires confirmedNoActiveRuns=true and concrete confirmationEvidence from checking native Subagent status. No state changed.");
             }
@@ -1781,402 +1255,38 @@ function registerCapabilityGroup(pi: any, capability: string): string[] {
               taskIds: latest.taskIds,
               ready: readyTasks(state.plan).map((task: any) => task.id),
             });
-          });
-        },
-      }));
-    }
-    return names;
+
+}
+
+registerTools(pi);
+pi.on("session_start", async (_event: any, ctx: any) => {
+  branchGeneration += 1; autoSchedulers.delete(pi);
+  await serialized(() => { state = adoptBranchState(ctx); needsRestore = false; state.projectRoot = contextCwd(ctx); restoreContext(ctx); });
+});
+pi.on("session_tree", async (_event: any, ctx: any) => {
+  branchGeneration += 1; autoSchedulers.delete(pi);
+  return serialized(() => { state = adoptBranchState(ctx); needsRestore = false; state.projectRoot = contextCwd(ctx); restoreContext(ctx); });
+});
+pi.on("session_shutdown", async (_event: any, ctx: any) => {
+  branchGeneration += 1; autoSchedulers.delete(pi);
+  await serialized(() => { if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; } if (markUnresolvedExecutionUnknown("Pi session shut down; verify recorded native child runs before reconciliation.")) persistState(pi); });
+  const runtime = delegationRuntimes.get(pi);
+  if (runtime) {
+    for (const pending of runtime.pending.values()) { clearTimeout(pending.ackTimer); clearTimeout(pending.responseTimer); pending.resolve({ __compassUnknown: true, reason: "Runtime shut down; native child outcome requires reconciliation." }); }
+    runtime.pending.clear();
+    for (const probe of runtime.probeWaiters.values()) probe.resolve(null);
+    runtime.probeWaiters.clear();
+    for (const dispose of runtime.disposers) dispose();
+    delegationRuntimes.delete(pi);
   }
-
-  if (capability === "acceptance") {
-    names.push(registerOnce(pi, "compass_acceptance_status", {
-      label: "Acceptance Status",
-      description: "Read current Goal acceptance criteria and evidence states. A reported pass is not independent verification; no criteria is an explicit state, not an error.",
-      promptSnippet: "Read acceptance status when a milestone or Goal may be complete; define criteria only when they are meaningful.",
-      parameters: Type.Object({}, { additionalProperties: false }),
-      async execute(_id: string, _params: any, ...rest: any[]) {
-        const ctx = getContext(rest);
-        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-        activeCheck("acceptance");
-        const current = (state.goal.criteria ?? []).filter((item: any) => item.goalVersion === state.goal.version);
-        return agentResult({ goalVersion: state.goal.version, ...acceptanceStatus(state), independentlyVerified: false, criteria: current.map((item: any) => ({ id: item.id, text: item.text, status: item.status, ...(item.evidence ? { evidence: item.evidence } : {}) })) });
-      },
-    }));
-    names.push(registerOnce(pi, "compass_acceptance_define", {
-      label: "Define Acceptance Criteria",
-      description: "Define or refine observable acceptance criteria for the current Goal. If a DAG exists, update criteria through plan revision to keep dependencies and acceptance consistent.",
-      promptSnippet: "Define a small set of observable Goal-level acceptance criteria when needed.",
-      parameters: Type.Object({ criteria: Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { minItems: 1, maxItems: 12, uniqueItems: true }) }, { additionalProperties: false }),
-      async execute(_id: string, params: any, ...rest: any[]) {
-        return serialized(async () => {
-          const ctx = getContext(rest);
-          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-          activeCheck("acceptance");
-          const result = noMutation(() => defineAcceptanceCriteria(state, params.criteria));
-          state = result.state;
-          if (result.changed) afterMutation(pi, contextCwd(ctx));
-          return stateResult({ unchanged: !result.changed, criteria: result.criteria.map((item: any) => ({ id: item.id, status: item.status })) });
-        });
-      },
-    }));
-    names.push(registerOnce(pi, "compass_acceptance_record", {
-      label: "Record Acceptance Evidence",
-      description: "Record an Agent-reported result for one current Goal criterion. Criterion IDs are checked at execution so defining/revising criteria does not make this tool disappear.",
-      promptSnippet: "Record concise evidence after an actual test/command/observation; reported_pass is not independent verification.",
-      parameters: Type.Object({
-        criterionId: Type.String({ minLength: 1, maxLength: 24, description: "Current criterion ID, e.g. AC1. Runtime rejects unknown or stale IDs without mutation." }),
-        status: Type.String({ enum: ["reported_pass", "failed", "blocked", "inconclusive"] }),
-        evidence: Type.String({ minLength: 1, maxLength: 2000, description: "Concrete result or reason. Do not write only 'done'. Up to 2000 characters are accepted; prefer a concise outcome plus artifact/log reference." }),
-      }, { additionalProperties: false }),
-      async execute(_id: string, params: any, ...rest: any[]) {
-        return serialized(async () => {
-          const ctx = getContext(rest);
-          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-          activeCheck("acceptance");
-          const result = noMutation(() => recordAcceptanceResult(state, { ...params, source: "agent_reported" }));
-          state = result.state;
-          if (result.changed) afterMutation(pi, contextCwd(ctx));
-          return stateResult({ unchanged: !result.changed, criterionId: params.criterionId, status: params.status, summary: acceptanceStatus(state) });
-        });
-      },
-    }));
-    return names;
-  }
-
-  if (capability === "issue_review") {
-    names.push(registerDynamic(pi, "compass_triage", {
-      label: "Issue Review",
-      description: "Read-only route review. Prefer short issue text plus current event IDs from compass_state; do not copy whole logs. Exact duplicate reviews with no new state return a compact reuse result.",
-      promptSnippet: "Use a concise issue and reference existing event IDs instead of repeating long errors or history.",
-      parameters: Type.Object({
-        issue: Type.Optional(Type.String({ minLength: 1, maxLength: 4000, description: "Prefer a short issue label (<=240 chars) and event IDs. Inputs up to 4000 chars are accepted to avoid schema-rejection retries; only a 240-char preview is retained/displayed." })),
-        evidenceRefs: Type.Optional(Type.Array(Type.String({ pattern: "^E[0-9]+$", maxLength: 16 }), { minItems: 1, maxItems: 8, uniqueItems: true, description: "Current-Goal event IDs returned by compass_state, e.g. E42. Runtime rejects missing or old-Goal references." })),
-      }, { additionalProperties: false }),
-      async execute(_id: string, params: any, ...rest: any[]) {
-        return serialized(async () => {
-          const ctx = getContext(rest);
-          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-          assertCapability("issue_review");
-          const result = noMutation(() => triageIssue(state, params));
-          if (result.duplicate) {
-            return stateResult({ unchanged: true, triageId: result.item.id, summary: result.summary, ...(result.item.issueTruncated ? { issueTruncated: true } : {}) });
-          }
-          state = result.state;
-          afterMutation(pi, contextCwd(ctx));
-          return stateResult({ triageId: result.item.id, review: result.review, evidenceRefs: result.item.evidenceRefs, basedOnEventId: result.item.basedOnEventId, ...(result.issueTruncated ? { issueTruncated: true } : {}) });
-        });
-      },
-    }));
-    return names;
-  }
-
-  if (capability === "history") {
-    const decisionProperties: Record<string, any> = {
-      summary: Type.String({ minLength: 1, maxLength: 320 }),
-      rationale: Type.Optional(Type.String({ maxLength: 500 })),
-      evidence: Type.Optional(Type.String({ maxLength: 1200, description: "Evidence/reference; stored bounded to 900 characters. Prefer concise source locations and observed outcomes." })),
-      supersedesDecisionIds: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 32, pattern: "^D[0-9]+$" }), { maxItems: 8, uniqueItems: true, description: "Current-Goal decision IDs whose route/assumption is invalidated by this new evidence. Omit for a new independent decision." })),
-    };
-    if (state.plan.tasks.length) {
-      decisionProperties.affectedTaskIds = Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 40 }), { maxItems: 24, uniqueItems: true, description: "Optional related IDs from the current DAG." }));
-    }
-    const decisionSchema = Type.Object(decisionProperties, { additionalProperties: false });
-    names.push(registerDynamic(pi, "compass_decision", {
-      label: "Record Decision",
-      description: "Record a material decision that may matter when debugging or replanning. Works with or without a DAG; explicitly supersede prior current-Goal decisions when new evidence invalidates their route.",
-      promptSnippet: "Record material decisions, not every small choice. When new evidence invalidates an earlier decision, pass its current-Goal ID in supersedesDecisionIds so the old route is marked inactive rather than leaving contradictory decisions side by side.",
-      parameters: decisionSchema,
-      async execute(_id: string, params: any, ...rest: any[]) {
-        return serialized(async () => {
-          const ctx = getContext(rest);
-          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-          activeCheck("history");
-          const result = noMutation(() => recordDecision(state, params));
-          state = result.state;
-          afterMutation(pi, contextCwd(ctx));
-          const superseded = result.supersededDecisionIds ?? [];
-          const impacted = result.impactedTaskIds ?? [];
-          return stateResult({ id: result.item.id, supersededDecisionIds: superseded, potentiallyAffectedTaskIds: impacted });
-        });
-      },
-    }));
-    names.push(registerDynamic(pi, "compass_checkpoint", {
-      label: "Record Checkpoint",
-      description: "Record a meaningful checkpoint reference. A note is not a snapshot or rollback; ref must identify a genuinely recoverable state such as a Git commit.",
-      promptSnippet: "Record a recoverable checkpoint only when it can help a future rollback or comparison.",
-      parameters: Type.Object({
-        summary: Type.String({ minLength: 1, maxLength: 320 }),
-        ref: Type.Optional(Type.String({ maxLength: 500, description: "A real, recoverable reference; omit if none exists." })),
-        evidence: Type.Optional(Type.String({ maxLength: 500 })),
-      }, { additionalProperties: false }),
-      async execute(_id: string, params: any, ...rest: any[]) {
-        return serialized(async () => {
-          const ctx = getContext(rest);
-          if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-          activeCheck("history");
-          const result = noMutation(() => recordCheckpoint(state, params));
-          state = result.state;
-          afterMutation(pi, contextCwd(ctx));
-          return stateResult({ id: result.item.id, ref: result.item.ref || null });
-        });
-      },
-    }));
-    names.push(registerOnce(pi, "compass_history_recent", {
-      label: "Recent Compass Events",
-      description: "Read a bounded, compact event history for debugging/replanning. It includes only recorded Goal changes, Human messages, decisions, checkpoints, writes, failures, and acceptance updates—not every raw tool result.",
-      promptSnippet: "Read recent structured events when the current route may depend on earlier decisions or failures.",
-      parameters: Type.Object({ limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 20 })) }, { additionalProperties: false }),
-      async execute(_id: string, params: any, ...rest: any[]) {
-        const ctx = getContext(rest);
-        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-        activeCheck("history");
-        const events = buildRecentEvents(state, params.limit ?? 12);
-        return agentResult({ events });
-      },
-    }));
-    return names;
-  }
-
-  if (capability === "goal_details") {
-    names.push(registerOnce(pi, "compass_goal_read", {
-      label: "Read Goal Details",
-      description: "On-demand current Goal, original when different, reusable Human source refs, full constraints, criteria and questionnaire evidence. Raw Human messages stay in Pi; an Agent-authored Goal is not Human approval.",
-      promptSnippet: "Read Goal details only when the compact compass_state is insufficient; reuse the result unless Goal version/source changes or compaction removes required details.",
-      parameters: Type.Object({}, { additionalProperties: false }),
-      async execute(_id: string, _params: any, ...rest: any[]) {
-        const ctx = getContext(rest);
-        if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-        assertCapability("goal_details");
-        return agentResult(agentGoalDetails(ctx.sessionManager.getBranch(), buildGoalDetails(state)));
-      },
-    }));
-    return names;
-  }
-
-  throw new Error(`Unknown Compass capability: ${capability}`);
-}
-
-function afterMutation(pi: any, cwd?: string) {
-  const root = cwd || state.projectRoot || process.cwd();
-  state.projectRoot = root;
-  persistState(pi);
-  // Registry changes wait until the next model-request boundary.
-  loadoutRefreshPending = true;
-}
-
-function ensureCurrentLoadout(pi: any, ctx: any) {
-  const root = contextCwd(ctx);
-  const previousRoot = state.projectRoot;
-  const projectRootChanged = previousRoot !== root;
-  state.projectRoot = root;
-  const currentNativeToolSignature = nativeToolSetSignature(pi);
-  const nativeToolSetChanged = state.nativeToolSignature !== currentNativeToolSignature;
-  if (nativeToolSetChanged) state.nativeToolSignature = currentNativeToolSignature;
-  const allowed = capabilitiesFor();
-  const beforeActive = activeCapabilities();
-  const active = beforeActive.filter((capability) => allowed.includes(capability));
-  if (state.goal.criteria?.some((item: any) => item.goalVersion === state.goal.version) && allowed.includes("acceptance") && !active.includes("acceptance")) active.push("acceptance");
-  setActiveCapabilities(active);
-  const currentLoader = ensureLoader(pi);
-  const tools = registerActiveCapabilityGroups(pi);
-  const activeChanged = beforeActive.join("|") !== activeCapabilities().join("|");
-  const desiredCompassNames = [...new Set([...CORE_TOOL_NAMES, currentLoader, ...tools].filter(Boolean))];
-  const desiredSignature = loadoutSignature(activeCapabilities());
-  const visibleNames = activeNames(pi);
-  const visibleCompassNames = visibleNames.filter((name) => isCompassName(name));
-  const desiredSet = new Set(desiredCompassNames);
-  const loadoutMismatch = desiredCompassNames.some((name) => !visibleNames.includes(name))
-    || visibleCompassNames.some((name) => !desiredSet.has(name));
-  if (desiredSignature !== lastLoadoutSignature || loadoutMismatch || (Boolean(currentLoader) && !visibleNames.includes(currentLoader)) || loadoutRefreshPending) {
-    setCompassLoadout(pi, desiredCompassNames);
-    lastLoadoutSignature = loadoutSignature(activeCapabilities());
-    loadoutRefreshPending = false;
-  }
-  if (activeChanged || nativeToolSetChanged || projectRootChanged) persistState(pi);
-}
-
-function messageText(message: any): string {
-  const content = message?.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.map((part: any) => part?.type === "text" && typeof part.text === "string" ? part.text : "").filter(Boolean).join("\n").trim();
-}
-function resultText(result: any): string {
-  if (typeof result === "string") return result;
-  if (typeof result?.output === "string") return result.output;
-  if (typeof result?.text === "string") return result.text;
-  return messageText({ content: result?.content });
-}
-function refreshAfterHumanInput(pi: any, ctx: any) {
-  state.projectRoot = contextCwd(ctx);
-  loadoutRefreshPending = true;
-  const revisionBeforeLoadout = state.stateRevision ?? 0;
-  ensureCurrentLoadout(pi, ctx);
-  // Persist the Human update exactly once. ensureCurrentLoadout may already have
-  // persisted a capability/root transition; avoid an extra revision for the same event.
-  if ((state.stateRevision ?? 0) === revisionBeforeLoadout) persistState(pi);
-}
-
-function explicitWriteTargets(event: any): string[] {
-  const tool = String(event?.toolName ?? "");
-  if (!/^(edit|write|apply_patch|amend)$/i.test(tool)) return [];
-  const input = event?.input ?? event?.args ?? {};
-  const candidates = [input?.path, input?.file_path, input?.filePath, input?.target, input?.file]
-    .filter((value: any) => typeof value === "string" && value.trim())
-    .map((value: string) => value.trim());
-  if (/^apply_patch$/i.test(tool)) {
-    const patchText = [input?.patch, input?.diff, input?.content, input?.patchText]
-      .filter((value: any) => typeof value === "string")
-      .join("\n");
-    const patchPaths = [];
-    const patterns = [
-      /^\*\*\*\s+(?:Update|Add|Delete) File:\s*(.+?)\s*$/gm,
-      /^\+\+\+\s+b\/(.+?)\s*$/gm,
-      /^---\s+a\/(.+?)\s*$/gm,
-    ];
-    for (const pattern of patterns) {
-      for (const match of patchText.matchAll(pattern)) {
-        const value = String(match[1] ?? "").trim();
-        if (value && value !== "/dev/null") patchPaths.push(value);
-      }
-    }
-    candidates.push(...patchPaths);
-  }
-  return [...new Set(candidates)].slice(0, 24);
-}
-function canonicalWriteTarget(targetValue: string, cwd?: string): string {
-  const target = String(targetValue ?? "").trim().replace(/\\/g, "/");
-  if (!target) return "";
-  // Keep drive-qualified paths stable even if Pi runs on a POSIX host.
-  if (/^[a-z]:\//i.test(target)) return target.toLowerCase().replace(/\/+/g, "/");
-  return path.resolve(cwd || state.projectRoot || process.cwd(), target);
-}
-
-function maybeEscalateIssueReview(_pi: any) {
-  if (!shouldSurfaceIssueReview(state) || activeCapabilities().includes("issue_review")) return false;
-  const available = capabilitiesFor();
-  if (!available.includes("issue_review")) return false;
-  setActiveCapabilities([...activeCapabilities(), "issue_review"]);
-  loadoutRefreshPending = true;
-  return true;
-}
-
-function supportsSameNameSchemaReplacement(pi: any): boolean {
-  if (typeof pi.registerTool !== "function" || typeof pi.getAllTools !== "function") return false;
-  const probeName = "compass_internal_schema_probe";
-  const activeBefore = typeof pi.getActiveTools === "function" ? namesFrom(pi.getActiveTools()) : null;
-  try {
-    pi.registerTool({
-      name: probeName,
-      exposure: "hidden",
-      label: "Internal schema replacement probe",
-      description: "Internal preflight probe; never exposed to the model.",
-      parameters: Type.Object({ firstProbeField: Type.String() }, { additionalProperties: false }),
-      execute: async () => agentResult("hidden preflight probe"),
-    });
-    pi.registerTool({
-      name: probeName,
-      exposure: "hidden",
-      label: "Internal schema replacement probe",
-      description: "Internal preflight probe; never exposed to the model.",
-      parameters: Type.Object({ replacementProbeField: Type.String() }, { additionalProperties: false }),
-      execute: async () => agentResult("hidden preflight probe"),
-    });
-    const tool = (pi.getAllTools() ?? []).find((item: any) => item?.name === probeName);
-    const schema = tool?.parameters ?? tool?.inputSchema;
-    return Boolean(schema?.properties?.replacementProbeField && !schema?.properties?.firstProbeField);
-  } catch {
-    return false;
-  } finally {
-    if (activeBefore) {
-      try { pi.setActiveTools?.(activeBefore); } catch { /* preserve active loadout best-effort */ }
-    }
-  }
-}
-
-function errorSummary(event: any): string {
-  const result = event?.result;
-  const content = Array.isArray(result?.content) ? result.content.map((part: any) => part?.type === "text" ? part.text : "").filter(Boolean).join("\n") : "";
-  return clip(event?.error || content || result?.error || "Tool execution failed without a text error.", 260);
-}
-
-export default function (pi: any) {
-  activePi = pi;
-  branchGeneration += 1;
-  lastCommittedState = emptyGoalRunState();
-  state = emptyGoalRunState();
-  contextState = emptyContextState();
-  needsRestore = true;
-  loaderName = "";
-  loaderSignature = "";
-  lastLoadoutSignature = "";
-  mutationQueue = Promise.resolve();
-  loadoutRefreshPending = true;
-  stableToolsByPi.delete(pi);
-  dynamicToolSignaturesByPi.delete(pi);
-  ensureDelegationRuntime(pi);
-
-  // These small core tools work even before a semantic Goal has been set.
-  registerGoalTool(pi);
-  registerStateSnapshotTool(pi);
-  registerContextSearchTool(pi);
-  registerContextTool(pi);
-  // Before a Goal exists no capability is applicable, so the capability loader stays hidden.
-  ensureLoader(pi);
-  try { setCompassLoadout(pi, [...CORE_TOOL_NAMES, loaderName].filter(Boolean)); } catch { /* preflight reports unsupported runtime */ }
-
-  pi.on("session_start", async (_event: any, ctx: any) => {
-    branchGeneration += 1;
-    autoSchedulers.delete(pi);
-    await serialized(async () => {
-      needsRestore = true;
-      state = adoptBranchState(ctx);
-      needsRestore = false;
-      state.projectRoot = contextCwd(ctx);
-      restoreContext(ctx);
-      const currentLoader = ensureLoader(pi);
-      const allowed = capabilitiesFor();
-      setActiveCapabilities(activeCapabilities().filter((capability) => allowed.includes(capability)));
-      const tools = registerActiveCapabilityGroups(pi);
-      setCompassLoadout(pi, [...CORE_TOOL_NAMES, currentLoader, ...tools].filter(Boolean));
-      lastLoadoutSignature = loadoutSignature(activeCapabilities());
-      loadoutRefreshPending = false;
-      persistState(pi);
-    });
-  });
-
-  // Branch navigation is a native lifecycle boundary. Re-read the committed
-  // branch-local context here; pi-await owns live observer disposal and reports
-  // any lost arm through its native custom message, so Compass does not poll.
-  pi.on("session_tree", async (_event: any, ctx: any) => {
-    branchGeneration += 1;
-    autoSchedulers.delete(pi);
-    return serialized(async () => {
-      if (!ctx?.sessionManager?.getBranch) return;
-      needsRestore = true;
-      state = adoptBranchState(ctx);
-      restoreContext(ctx);
-      needsRestore = false;
-      ensureCurrentLoadout(pi, ctx);
-    });
-  });
-
-  pi.on("session_shutdown", async (_event: any, ctx: any) => {
-    branchGeneration += 1;
-    autoSchedulers.delete(pi);
-    return serialized(async () => {
-      if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-      if (markUnresolvedExecutionUnknown("Pi session shut down while a Subagent batch was unresolved. Check native run IDs before retrying; Compass will not duplicate it.")) persistState(pi);
-    });
-  });
-
+  activePi = null;
+});
   // Observe native identity only. Meaning, scope and constraints belong to the
   // Agent's explicit compass_goal submission, never to prompt classifiers.
   pi.on("before_agent_start", async (_event: any, ctx: any) => {
     await serialized(async () => {
       if (needsRestore) { state = adoptBranchState(ctx); restoreContext(ctx); needsRestore = false; }
       if (observeCurrentHumanInput(ctx)) refreshAfterHumanInput(pi, ctx);
-      else ensureCurrentLoadout(pi, ctx);
     });
     // Recovery can dispatch only an already approved Goal interpretation of the
     // latest native Human input. A fresh message pauses, rather than guesses.
@@ -2215,7 +1325,6 @@ export default function (pi: any) {
         }
       }
       restoreContext(ctx);
-      ensureCurrentLoadout(pi, ctx);
       // Do not rebuild request history or append a volatile full-state state message.
     } catch (error) {
       needsRestore = true;
@@ -2227,9 +1336,9 @@ export default function (pi: any) {
   pi.on("context_with_system", async (event: any, ctx: any) => {
     await mutationQueue;
     if (!Array.isArray(event?.messages)) return;
-    // Older Compass state messages are internal persistence, not instructions.
+    // Retired Compass-internal messages are persistence, never instructions.
     // Preserve Pi's original system/tool patches instead of folding them into the head.
-    const messages = event.messages.filter((message: any) => !(message?.role === "custom" && ["pi-compass-v2.goalrun-state", ANCHOR_MESSAGE_TYPE, "pi-compass-v2.conventions"].includes(message?.customType)));
+    const messages = event.messages.filter((message: any) => !(message?.role === "custom" && RESERVED_CUSTOM_TYPES.includes(message?.customType)));
     try {
       if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
       const branch = ctx?.sessionManager?.getBranch?.();
@@ -2305,21 +1414,26 @@ export default function (pi: any) {
     }
   }));
 
-  // Capture explicit writes, failed tools, and structured answers returned by ask-user-questions.
-  // All updates are serialized so a trace event cannot overwrite a concurrent Goal update.
-  pi.on("tool_call", async (event: any, ctx: any) => serialized(async () => {
-    if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
-    if (/ask.*user.*question|ask_user_question/i.test(String(event?.toolName ?? ""))) {
-      const callId = String(event?.toolCallId ?? event?.callId ?? "");
-      const sourceEntryId = persistedAssistantEntryId(getContext([ctx]), callId);
-      const bound = bindDagApprovalQuestionnaire(state, event?.input, sourceEntryId, callId);
-      state = bound.state;
-      const routeBound = state.routeSet
-        ? bindRouteSetQuestionnaire(state, { expectedStateVersion: state.routeSet.stateVersion, questionnaire: event?.input }, sourceEntryId, callId)
-        : { bound: false };
-      if (routeBound.bound) state = routeBound.state;
-      if (bound.bound || routeBound.bound) persistState(pi);
+
+pi.on("tool_call", async (event: any, ctx: any) => serialized(async () => {
+  if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
+  if (event.toolName === "ask_user_question") {
+    let expanded: any;
+    try { expanded = expandApprovalProposal(state, event.input); }
+    catch (error) {
+      // An expired or malformed proposal is a corrective Agent error, not a host crash.
+      return { block: true, reason: (error instanceof Error ? error.message : String(error)) + " Request a fresh proposal; no approval changed." };
     }
+    if (expanded) {
+      if (ctx?.mode !== "interactive" || ctx?.hasUI !== true || typeof ctx?.ui?.custom !== "function") return { block: true, reason: "Compass approval requires interactive Pi with full-preview TUI. RPC/unknown/no-UI cannot establish complete presentation; no approval or state changed." };
+      event.input.questions = expanded.questions;
+      const callId = String(event.toolCallId ?? "");
+      const sourceId = persistedAssistantEntryId(ctx, callId);
+      const result = expanded.kind === "plan" ? bindDagApprovalQuestionnaire(state, event.input, sourceId, callId) : bindRouteSetQuestionnaire(state, { expectedStateVersion: state.routeSet.stateVersion, questionnaire: event.input }, sourceId, callId);
+      if (!result.bound) return { block: true, reason: "Native proposal identity could not be bound. Request a fresh proposal; no approval changed." };
+      state = result.state; persistState(pi);
+    }
+  }
     const rawTargets = explicitWriteTargets(event);
     if (!rawTargets.length) return;
     const cwd = state.projectRoot || process.cwd();
@@ -2346,11 +1460,7 @@ export default function (pi: any) {
     // retained as advisory evidence.
     if (writeAdded || driftChanged) persistState(pi);
   }));
-  pi.on("tool_result", async (event: any, ctx: any) => {
-    const questionnaireFailure = questionnaireFailureResultPatch(event);
-    if (questionnaireFailure) return questionnaireFailure;
-    return handleCompassToolResult(pi, event, ctx);
-  });
+  pi.on("tool_result", async (event: any, ctx: any) => event.toolName === "ask_user_question" ? handleQuestionResult(pi, event, ctx) : handleCompassToolResult(pi, event, ctx));
 
   pi.on("tool_execution_end", async (event: any, ctx: any) => serialized(async () => {
     if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
@@ -2369,108 +1479,28 @@ export default function (pi: any) {
       }
       return;
     }
-    if (/ask.*user.*question|ask_user_question/i.test(toolName)) {
-      const result = event?.result ?? event?.output ?? event?.message;
-      const text = resultText(result);
-      const details = result?.details && typeof result.details === "object" && !Array.isArray(result.details) ? result.details : null;
-      const sourceCallId = String(event?.toolCallId ?? event?.callId ?? "");
-      const sourceEntryId = persistedAssistantEntryId(getContext([ctx]), sourceCallId);
-      if ((details?.error || failed) && sourceEntryId) {
-        const recorded = recordHumanQuestionnaireFailure(state, {
-          source: toolName,
-          sourceEntryId,
-          sourceCallId,
-          errorCode: details?.error ?? "unknown",
-          reason: text || "The structured questionnaire tool failed before returning a Human answer.",
-        });
-        if (recorded.captured) {
-          state = recorded.state;
-          persistState(pi);
-        }
-        return;
-      }
-      if (!failed && ((text && !/\b(no answer yet|waiting for user|awaiting user response|pending user input)\b/i.test(text)) || details)) {
-        const sourceEntryId = persistedAssistantEntryId(getContext([ctx]), String(event?.toolCallId ?? event?.callId ?? ""));
-        if (!sourceEntryId) return;
-        const captured = captureHumanDecision(state, { source: toolName, sourceEntryId, sourceCallId, text, details });
-        if (captured.captured) {
-          state = captured.state;
-          const routeRequest = state.routeSet?.selectionRequest;
-          if (routeRequest?.sourceEntryId === sourceEntryId && routeRequest?.toolCallId === sourceCallId && captured.item?.questionnaire) {
-            try {
-              const selected = recordRouteSelection(state, {
-                expectedStateVersion: state.routeSet.stateVersion,
-                selectionRequestId: routeRequest.id,
-                sourceEntryId,
-                sourceCallId,
-                questionnaire: captured.item.questionnaire,
-              });
-              state = selected.state;
-            } catch {
-              // Partial/declined/modified route answers remain Human decisions;
-              // the RouteSet stays unselected until a fresh exact answer arrives.
-            }
-          }
-          persistState(pi);
-          if (dagApprovalStatus(state).approved) scheduleReadySubagentWaves(pi, ctx ?? {});
-        }
-      }
-      if (!failed) return;
-    }
     if (!failed) {
       return;
     }
     state = recordFailure(state, { tool: toolName, error: errorSummary(event), at: now() });
     const item = state.trace.failures.at(-1);
     persistTrace(pi, { kind: "failure", item });
-    maybeEscalateIssueReview(pi);
-    loadoutRefreshPending = true;
     persistState(pi);
   }));
 
-  const runtimeGuards = registerRuntimeGuards(pi, { profileDir: getAgentDir });
 
-  pi.registerCommand("compass-preflight", {
-    description: "Check Compass progressive disclosure and required tools in the active Pi session",
-    handler: async (_args: string, ctx: any) => {
-      const names = activeNames(pi);
-      const allNames = typeof pi.getAllTools === "function" ? namesFrom(pi.getAllTools()) : names;
-      const dynamic = typeof pi.setActiveTools === "function" && typeof pi.getActiveTools === "function";
-      const schemaReplacement = supportsSameNameSchemaReplacement(pi);
-      const inventory = toolInventory(pi);
-      const subagentInstalled = inventory.subagents.registered || inventory.subagentLoader.registered;
-      const subagentVisible = inventory.subagents.active;
-      let guardFailure = "";
-      try { await runtimeGuards.control({ action: "get" }, ctx); }
-      catch (error) { guardFailure = error instanceof Error ? error.message : String(error); }
-      const checks = [
-        { label: "GoalRun module export contract", ok: GOAL_RUN_API_VERSION === 8 && GOAL_RUN_RELEASE === PACKAGE_VERSION && typeof shouldSurfaceIssueReview === "function" && typeof buildStateSnapshot === "function" && typeof triageIssue === "function" },
-        { label: "Pi active-tool read/write", ok: dynamic },
-        { label: "Stable-name schema replacement", ok: schemaReplacement },
-        { label: "Compass loader", ok: allNames.some((name) => name === "compass_open") || availableCapabilities(state).every((name) => activeCapabilities().includes(name)) },
-        { label: "Compact state tool registered", ok: allNames.some((name) => name === "compass_state") },
-        { label: "Runtime guard controller registered", ok: allNames.includes("runtime_guard") },
-        { label: "Runtime guard host/scope read", ok: !guardFailure },
-        { label: "codemode", ok: names.some((name) => /code.?mode/i.test(name)) },
-        { label: "pi-subagents registered", ok: subagentInstalled },
-        { label: "Structured delegation event bus surface", ok: Boolean(pi.events && typeof pi.events.on === "function" && typeof pi.events.emit === "function" && delegationRuntimes.get(pi)?.installed) },
-        { label: "ask-user-questions", ok: names.some((name) => /(ask.*user.*question|ask.*question|question.*user|user.*question)/i.test(name)) },
-      ];
-      const lines = [`Compass v${GOAL_RUN_RELEASE} preflight`];
-      for (const check of checks) lines.push(`${check.ok ? "PASS" : "WARN"} ${check.label}${check.ok ? "" : " — not visible or unsupported"}`);
-      if (guardFailure) lines.push(`BLOCKER: runtime guard state is unavailable; tool calls will be blocked. ${guardFailure}`);
-      lines.push(`Loaded Compass capabilities: ${activeCapabilities().join(", ") || "none"}`);
-      if (!schemaReplacement) lines.push("BLOCKER: same-name schema replacement did not verify. Do not use this build; dynamic schemas require this Pi runtime behavior.");
-      lines.push(`Active Compass tools: ${names.filter(isCompassName).join(", ") || "none"}`);
-      lines.push("Runtime guards are explicit Agent registrations, checked at native tool_call inputs including nested calls; later plugin mutations and independent children are outside this boundary.");
-      lines.push(`Subagent tools: ${!subagentInstalled ? "not installed/registered" : subagentVisible ? "visible; activation owned by Pi/pi-subagents and the user" : "registered but inactive in Pi/user toolset; Compass will not force-enable it"}`);
-      lines.push(`Subagent loader: ${inventory.subagentLoader.active ? "visible" : "inactive/not registered"}. Loader visibility does not mean the executor schema is active.`);
-      const awaiting = inventory.await;
-      lines.push(`pi-await: watch=${awaiting.watch.active}; watches=${awaiting.status.active}; unwatch=${awaiting.cancel.active}. External conditions use native watch wakes; Subagents use their native completion mechanism.`);
-      lines.push("Structured-delegation surface check confirms only that Compass can emit/listen on the in-process event bus; a real Subagent request/response smoke test is still required to prove installed pi-subagents compatibility and model availability.");
-      lines.push("The Agent explicitly sets semantic Goals and opens optional capability groups. Native Subagent activation remains Pi-owned. Automatic dispatch requires an exactly Human-approved read-only DAG and an Agent interpretation of the latest native Human input; no natural-language classifier grants permission.");
-      ctx.ui?.notify?.(lines.join("\n"), checks.every((check) => check.ok) ? "info" : "warning");
-    },
-  });
-
+const runtimeGuards = registerRuntimeGuards(pi, { profileDir: getAgentDir });
+pi.registerCommand("compass-preflight", { description: "Check Compass fixed tool registry and native host/scope health", handler: async (_args: string, ctx: any) => {
+  const all = namesFrom(pi.getAllTools?.() ?? []);
+  let guardError = "";
+  try { await runtimeGuards.control({ action: "get" }, ctx); } catch (error) { guardError = String(error instanceof Error ? error.message : error); }
+  const checks = [
+    { name: "Release", ok: PACKAGE_VERSION === GOAL_RUN_RELEASE, detail: GOAL_RUN_RELEASE },
+    { name: "GoalRun", ok: GOAL_RUN_API_VERSION === 9, detail: String(GOAL_RUN_API_VERSION) },
+    { name: "Fixed tool registry", ok: COMPASS_TOOL_NAMES.every((name) => all.includes(name)) && !all.some((name) => name.startsWith("compass_") && !COMPASS_TOOL_NAMES.includes(name)), detail: COMPASS_TOOL_NAMES.join(", ") },
+    { name: "Runtime guard host/scope read", ok: !guardError, detail: guardError || "ready; observed-input boundary only" },
+  ];
+  const body = checks.map((check) => (check.ok ? "PASS" : "BLOCKER") + " " + check.name + ": " + check.detail).join("\n");
+  ctx.ui?.notify?.(body, checks.every((check) => check.ok) ? "info" : "error");
+} });
 }

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as goalRun from "../src/goal-run.mjs";
+import * as toolSchema from "../src/tool-schema.mjs";
 import { agentResult } from "../src/compass-result.mjs";
 
 test("Agent JSON contains only the selected payload, never merged internal receipts", () => {
@@ -14,20 +15,23 @@ test("Agent JSON contains only the selected payload, never merged internal recei
   assert.equal(result.details.contextOperation.private, true);
 });
 
-test("GoalRun v8 module exports the complete runtime contract", () => {
-  assert.equal(goalRun.GOAL_RUN_API_VERSION, 8);
+test("GoalRun reports the current API and release identity", () => {
+  assert.equal(goalRun.GOAL_RUN_API_VERSION, 9);
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   assert.equal(goalRun.GOAL_RUN_RELEASE, manifest.version);
-  const required = [
-    "setGoal", "observeHumanInput", "stateCursor", "availableCapabilities", "acceptanceStatus", "goalOutcomeStatus",
-    "buildGoalDetails", "buildIssueReview", "buildRecentEvents", "buildStateSnapshot", "triageIssue", "defineAcceptanceCriteria",
-    "recordAcceptanceResult", "shouldSurfaceIssueReview",
-    "captureHumanDecision", "recordHumanQuestionnaireFailure", "emptyGoalRunState",
-    "hasUsefulTrace", "mergeTrace", "normalizeGoalRunState",
-    "recordCheckpoint", "recordDecision", "recordFailure", "recordWriteTarget", "recordExecutionDrift",
-    "revisePlanState", "summarizePlanStatus", "transitionTasks",
-    "createRouteSet", "bindRouteSetQuestionnaire", "recordRouteSelection", "proposeRouteExploration", "registerCompetitorRun", "recordCompetitorResult", "selectRoute", "updateCompetitorCancellation", "routeSetStatus",
-  ];
-  for (const name of required) assert.equal(typeof goalRun[name], "function", `${name} must be exported`);
+});
+
+test("Compass exposes exactly the eight fixed tools with closed object schemas", () => {
+  const { toolSchemas, COMPASS_TOOL_NAMES } = toolSchema;
+  assert.deepEqual(COMPASS_TOOL_NAMES, [
+    "compass_goal", "compass_state", "compass_context_search", "compass_context",
+    "compass_plan", "compass_acceptance", "compass_route", "runtime_guard",
+  ]);
+  for (const [name, schema] of Object.entries(toolSchemas)) {
+    assert.equal(schema.type, "object", `${name} must be a root object for provider compatibility`);
+    assert.equal(schema.additionalProperties, false, `${name} rejects unlisted fields`);
+  }
+  assert.deepEqual(toolSchemas.compass_goal.properties.action.enum, ["set", "decide", "checkpoint"]);
+  assert.deepEqual(toolSchemas.compass_state.properties.view.enum, ["summary", "goal", "plan", "acceptance", "history", "route", "execution"]);
 });

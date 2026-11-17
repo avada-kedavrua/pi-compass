@@ -29,8 +29,8 @@ try {
   await runner.emit({ type: "before_agent_start", prompt: "Fix the settings permission mismatch." });
   const readState = async () => JSON.parse((await tools.get("compass_state").definition.execute("state", {}, undefined, undefined, context)).content[0].text);
   const observed = await readState();
-  const goal = await tools.get("compass_goal").definition.execute("goal", { expectedVersion: 0, current: "Fix settings permissions", constraints: ["Do not change unrelated pages"], sources: [observed.input.ref] }, undefined, undefined, context);
-  assert.equal(JSON.parse(goal.content[0].text).goalVersion, 1);
+  const goal = await tools.get("compass_goal").definition.execute("goal", { action: "set", current: "Fix settings permissions", constraints: ["Do not change unrelated pages"], sources: [observed.input.ref] }, undefined, undefined, context);
+  assert.equal(JSON.parse(goal.content[0].text).cursor.startsWith("R"), true);
   assert.equal(JSON.parse(goal.content[0].text).sourceIds, undefined);
   manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "observed-read", name: "read", arguments: { path: "settings.ts" } }], timestamp: Date.now() });
   manager.appendMessage({ role: "toolResult", toolCallId: "observed-read", toolName: "read", isError: false, content: [{ type: "text", text: "PERMISSION_EVIDENCE " + "large original body ".repeat(3000) }], timestamp: Date.now() });
@@ -50,13 +50,13 @@ try {
   let sequence = 0;
   async function mutate(operation) {
     const id = "mutation-" + ++sequence;
-    const input = { operation };
+    const input = operation;
     const message = { role: "assistant", content: [{ type: "toolCall", id, name: "compass_context", arguments: input }], timestamp: Date.now() };
     const messageEntryId = manager.appendMessage(message);
     assert.equal(await runner.emitToolCall({ type: "tool_call", toolName: "compass_context", toolCallId: id, input }), undefined);
     const queued = await tools.get("compass_context").definition.execute(id, input, undefined, undefined, context);
     assert.equal(queued.isError, undefined, JSON.stringify(queued));
-    assert.deepEqual(JSON.parse(queued.content[0].text), { resultStatus: "queued" });
+    assert.deepEqual(JSON.parse(queued.content[0].text), { queued: true });
     const result = { role: "toolResult", toolCallId: id, toolName: "compass_context", ...queued, timestamp: Date.now() };
     const resultId = manager.appendMessage(result);
     const committed = await runner.emitBoundary({ type: "turn_end", turnIndex: 0, outcome: "completed", message, toolResults: [result], messageEntryId, toolResultEntryIds: [resultId], entries: [] }, (drafts) => {
@@ -73,7 +73,6 @@ try {
   }
   const saved = await mutate({ action: "remember", text: "Code shows a permission mismatch. Runtime behavior is not yet verified.", sources: [observed.input.ref, source], caveats: ["Not runtime-verified."] });
   assert.equal(saved.sources.length, 1);
-  await tools.get("compass_open").definition.execute("optional-context", { capabilities: ["context"] }, undefined, undefined, context);
   await runner.emitContext(manager.buildSessionProjection().messages);
   const entered = await mutate({ action: "call", task: "Refine a private memory copy", capture: [{ ref: saved.sources[0], mode: "copy" }] });
   const edited = await mutate({ action: "replace", source: entered.sources[0], text: "Private revised claim; runtime still pending.", caveats: [] });

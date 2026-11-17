@@ -1,6 +1,6 @@
-import { agentAuthored, bindingKey, contentVersion, currentValue, logicalSource, rawMessage, snapshotHead, sourceQualifications, valueContent } from "./context-values.mjs";
+import { RESERVED_CUSTOM_TYPES, agentAuthored, bindingKey, contentVersion, currentValue, logicalSource, rawMessage, snapshotHead, sourceQualifications, valueContent } from "./context-values.mjs";
 
-const RESERVED = new Set(["pi-compass-v2.goalrun-state", "pi-compass-v2.goalrun-anchor", "pi-compass-v2.conventions"]);
+const RESERVED = new Set(RESERVED_CUSTOM_TYPES);
 const MAX_SCAN = 1024;
 function fail(message) { throw new Error(`${message} No context changed.`); }
 function readable(entry) {

@@ -9,7 +9,6 @@ const ALLOWED_AGENTS = new Set(["scout", "researcher", "reviewer", "evidence-aud
 export function emptyDagState() {
   return {
     goal: null,
-    acceptanceCriteria: [],
     tasks: [],
     revision: 0,
     stateVersion: 0,
@@ -48,7 +47,6 @@ function withStateDefaults(state) {
   return {
     ...emptyDagState(),
     ...source,
-    acceptanceCriteria: Array.isArray(source.acceptanceCriteria) ? source.acceptanceCriteria : [],
     tasks: Array.isArray(source.tasks) ? source.tasks : [],
     stateVersion: Number.isInteger(source.stateVersion) ? source.stateVersion : 0,
     planHistory: Array.isArray(source.planHistory) ? source.planHistory : [],
@@ -149,14 +147,14 @@ function taskSignature(task) {
   });
 }
 
-function planDelta(previous, goal, acceptanceCriteria, tasks) {
+function planDelta(previous, goal, definitionKey, tasks) {
   const oldById = new Map((previous?.tasks ?? []).map((task) => [task.id, task]));
   const nextById = new Map(tasks.map((task) => [task.id, task]));
   const added = tasks.filter((task) => !oldById.has(task.id)).map((task) => task.id);
   const removed = [...oldById.keys()].filter((id) => !nextById.has(id));
   const changed = tasks.filter((task) => oldById.has(task.id) && taskSignature(oldById.get(task.id)) !== taskSignature(task)).map((task) => task.id);
   const goalChanged = Boolean(previous?.goal) && previous.goal !== goal;
-  const acceptanceChanged = Boolean(previous?.goal) && JSON.stringify(previous?.acceptanceCriteria ?? []) !== JSON.stringify(acceptanceCriteria);
+  const acceptanceChanged = Boolean(previous?.goal) && previous?.definitionKey !== definitionKey;
   return {
     goalChanged,
     acceptanceChanged,
@@ -180,10 +178,7 @@ function planDeltaSummary(delta) {
 export function createOrRevisePlan(currentState, input) {
   const previous = withStateDefaults(currentState);
   const goal = text(input.goal, "goal");
-  if (!Array.isArray(input.acceptanceCriteria) || input.acceptanceCriteria.length === 0) {
-    throw new Error("acceptanceCriteria must contain at least one concrete acceptance criterion.");
-  }
-  const acceptanceCriteria = input.acceptanceCriteria.map((item, index) => text(item, `acceptanceCriteria[${index}]`));
+  const definitionKey = text(input.definitionKey, "definitionKey");
   if (!Array.isArray(input.tasks) || input.tasks.length < 2) {
     throw new Error("Use a DAG only when it is useful: provide at least two tasks with meaningful dependencies or independent work.");
   }
@@ -195,7 +190,7 @@ export function createOrRevisePlan(currentState, input) {
     ids.add(task.id);
   }
   assertAcyclic(tasks);
-  const delta = planDelta(previous, goal, acceptanceCriteria, tasks);
+  const delta = planDelta(previous, goal, definitionKey, tasks);
 
   // Task evidence belongs to this Goal; a replacement Goal starts fresh.
   const sameGoal = previous.goal === goal;
@@ -253,7 +248,7 @@ export function createOrRevisePlan(currentState, input) {
   return {
     ...previous,
     goal,
-    acceptanceCriteria,
+    definitionKey,
     tasks: preservedTasks,
     revision,
     stateVersion: previous.stateVersion + (delta.material ? 1 : 0),
@@ -266,7 +261,7 @@ export function createOrRevisePlan(currentState, input) {
 export function taskAssessmentBinding(plan, task) {
   return createHash("sha256").update(JSON.stringify({
     goal: plan?.goal ?? null,
-    acceptanceCriteria: plan?.acceptanceCriteria ?? [],
+    definitionKey: plan?.definitionKey ?? "",
     task: taskSignature(task),
   })).digest("hex");
 }

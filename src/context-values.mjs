@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 
+// Retired Compass-internal transcript messages from earlier releases: never
+// model input, never an editable context source.
+export const RESERVED_CUSTOM_TYPES = Object.freeze(["pi-compass-v2.goalrun-state", "pi-compass-v2.goalrun-anchor", "pi-compass-v2.conventions"]);
+
 export const VALUE_MESSAGE_TYPE = "pi-compass-v2.value";
 export const VALUE_KINDS = new Set(["working", "memory", "human", "skill"]);
 
