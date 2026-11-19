@@ -1,20 +1,20 @@
 ---
 name: pi-compass
-description: Use Compass for retained Goal/evidence state, same-session attention frames, source recovery, optional Human-approved DAGs, and route comparison. Load when these reduce the work needed for a real task, not to exercise every capability.
+description: Use Compass for retained Goal/evidence state, same-session attention frames, source recovery, and optional Human-approved DAGs. Load when these reduce the work needed for a real task, not to exercise every capability.
 ---
 
 # Compass: Agent operating guide
 
 Work normally. Compass changes retained state and future context, not Pi's raw history or the filesystem. Use the smallest useful call; no obligatory Goal, frame, DAG, review or ceremony.
 
-Compass registers eight fixed tools: `compass_goal`, `compass_state`, `compass_context_search`, `compass_context`, `compass_plan`, `compass_acceptance`, `compass_route`, `runtime_guard`. Nothing is loaded or opened. If they are absent, the extension is not active: the Human can start Pi with the local package (`pi -e /absolute/path/to/pi-compass`) or enable the project package and `/reload`; `/compass-preflight` reports the registry. Do not edit global settings or assume children inherit Compass.
+Compass registers seven fixed tools: `compass_goal`, `compass_state`, `compass_context_search`, `compass_context`, `compass_plan`, `compass_acceptance`, `runtime_guard`. Nothing is loaded or opened. If they are absent, the extension is not active: the Human can start Pi with the local package (`pi -e /absolute/path/to/pi-compass`) or enable the project package and `/reload`; `/compass-preflight` reports the registry. Do not edit global settings or assume children inherit Compass.
 
 ## Goal and evidence
 
 - `compass_goal({action:"set",current,constraints,sources,criteria?})` records your semantic interpretation. Select the original Human refs that actually define the objective; state and search return usable refs. Follow-up review never rewrites provenance.
-- `compass_goal` is the only place criteria are defined. Plan, acceptance and route consume the returned `AC*` IDs. Submit the complete list when it changes; omit it to preserve, `[]` to clear.
+- `compass_goal` is the only place criteria are defined. Plan and acceptance consume the returned `AC*` IDs. Use `update` to edit selected constraint/criterion IDs from `view:"goal"`; use `set` with a different objective only to replace the Goal.
 - After material Human input, reaffirm the Goal before resuming approved work. Unchanged semantics keep the exact approval; a different objective replaces the Goal and resets its work. Use `decide` for material decisions and `checkpoint` for a real recoverable ref.
-- Read with `compass_state`: default summary, then `view:goal|plan|acceptance|history|route|execution` only for what is missing. Reuse returned cursors unchanged; an exact repeat answers `unchanged`. `historyGap` means the delta is bounded, not complete.
+- Read with `compass_state`: default summary, then `view:goal|plan|acceptance|history|execution` only for what is missing. Reuse returned cursors unchanged; an exact repeat answers `unchanged`. `historyGap` means the delta is bounded, not complete.
 
 ## Acceptance
 
@@ -24,20 +24,18 @@ Compass registers eight fixed tools: `compass_goal`, `compass_state`, `compass_c
 
 - A DAG is optional. Choose `executor` explicitly: coupled reasoning stays with `parent`, deterministic batching with `code`, bounded read-only investigation with `subagent`. Every `subagent` task needs `writeScope:"read-only"` and a `dispatchReason` explaining why another context is worth the call.
 - Definition is a draft. `request_approval` (or a material `define` change) returns a small `prompt`; pass it unchanged to the native question tool. Code supplies the complete proposal; you never copy long payloads. Interactive Pi is required — RPC/no-UI fails closed.
+- For an approved `parent` node, use standalone `compass_context({action:"call",taskId})`, then `return` with `{outcome,exportSources}`. Submit once and use the committed result; `fromTasks` imports assessed artifacts and caveats. Use `inputRefs` to reuse an exact prior export. Use `compass_plan patch` for a partial DAG edit.
 - After exact approval, Compass dispatches ready read-only Subagent tasks itself. Do not start them manually or redispatch them. Consume results, then `assess` a completed prerequisite with real evidence before dependents unlock.
+- If evidence invalidates the plan, report `throw` with the reason, evidence and known side effects. For native children, check execution state and `cancel` only exact attempts you judge invalidated; a request is not a terminal result. Do not assume rollback.
 - `unknown` batches require native Subagent status evidence and `compass_plan({action:"resolve",...})`; never retry them. A task marked done is not Goal acceptance.
-
-## Route alternatives
-
-- `compass_route({action:"define",baselineRef,routes:[2–3],criteria?})` records alternatives; criteria default to current Goal IDs. Alternatives are not DAG tasks and are never fanned out.
-- Use the returned selection `prompt` for the Human choice. `explore` needs an exactly authorized scope/budget proposal. `register`/`result` need the exact native run identity and complete shared-criterion evidence; `accept` requires a competitor passing every shared criterion without unresolved caveats.
 
 ## Context
 
 - Search only for missing information: `compass_context_search({query})` for literal keywords, or `{refs}` for exact recovery. Default snippets are short; `view:"handles"` omits text, `view:"details"` adds qualifications.
 - Copy refs unchanged; never construct or decode them. Prefer `remember({text,sources,caveats?})` for compact qualified conclusions; `pin({sources})` keeps complete originals visible and costs more.
 - All actions are flat: `compass_context({action:"call",...})`. One `pin`/`unpin`/`remember` may accompany sibling tools; everything else must be standalone. `queued` is provisional — the native applied/rejected receipt is authoritative, so never poll.
-- `call` opens same-session attention with explicit `capture` (`ref` shares, `copy` is private). `return` exports only what you name: retained exports keep their lifetime, unexported work releases. A frame is not filesystem rollback.
+- `call` opens same-session attention with explicit `capture` (`ref` is read-only, `copy` is private and editable). Finish by returning from the frame; do not report the overall result from inside it. `return` exports only what you name: retained exports keep their lifetime, unexported work releases. A frame is not filesystem rollback.
+- `compass_state(view:"retained")` lists retained sources. Edit or drop local Agent-authored memory directly. Complete native `SKILL.md` reads auto-pin in scope; child `unpin` masks inherited pins without changing the parent.
 - Use the updated ref from an applied `replace`/`spill`/`move` receipt. Spill verifies a new project artifact before removing context. A frame cannot return with live owned watches: unwatch or `transfer` first.
 
 ## Runtime guards

@@ -86,21 +86,21 @@ if (manifest?.pi?.extensions?.includes("./src/index.ts") && fs.existsSync(path.j
 let release = null;
 try { release = JSON.parse(fs.readFileSync(path.join(packageRoot, "RELEASE-MANIFEST.json"), "utf8")); } catch { /* reported below */ }
 const minimumPi = parseVersion(release?.minimumPiVersion);
-if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 9 && release?.contextSchemaVersion === CONTEXT_SCHEMA_VERSION && minimumPi) {
+if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 10 && release?.contextSchemaVersion === CONTEXT_SCHEMA_VERSION && minimumPi) {
   add("PASS", "Release identity", `Package/manifest ${release.version}; GoalRun v${release.goalRunSchemaVersion}; context v${CONTEXT_SCHEMA_VERSION}; Pi minimum ${release.minimumPiVersion}`);
 } else add("FAIL", "Release identity", "RELEASE-MANIFEST.json must match the package and current GoalRun/context schemas and declare a valid Pi minimum");
 const goalRunPath = path.join(packageRoot, "src", "goal-run.mjs");
 const toolSchemaPath = path.join(packageRoot, "src", "tool-schema.mjs");
 const fixedToolNames = [
   "compass_goal", "compass_state", "compass_context_search", "compass_context",
-  "compass_plan", "compass_acceptance", "compass_route", "runtime_guard",
+  "compass_plan", "compass_acceptance", "runtime_guard",
 ];
 try {
   const goalRun = await import(pathToFileURL(goalRunPath).href);
   const { COMPASS_TOOL_NAMES } = await import(pathToFileURL(toolSchemaPath).href);
   const registryMatches = COMPASS_TOOL_NAMES.length === fixedToolNames.length && fixedToolNames.every((name, index) => COMPASS_TOOL_NAMES[index] === name);
-  if (goalRun.GOAL_RUN_API_VERSION !== 9 || goalRun.GOAL_RUN_RELEASE !== manifest?.version || !registryMatches) {
-    add("FAIL", "GoalRun module contract", `Expected API v9 / release ${manifest?.version} / tools ${fixedToolNames.join(", ")}; module reports API ${String(goalRun.GOAL_RUN_API_VERSION)} / release ${String(goalRun.GOAL_RUN_RELEASE)} / tools ${COMPASS_TOOL_NAMES.join(", ")}`);
+  if (goalRun.GOAL_RUN_API_VERSION !== 10 || goalRun.GOAL_RUN_RELEASE !== manifest?.version || !registryMatches) {
+    add("FAIL", "GoalRun module contract", `Expected API v10 / release ${manifest?.version} / tools ${fixedToolNames.join(", ")}; module reports API ${String(goalRun.GOAL_RUN_API_VERSION)} / release ${String(goalRun.GOAL_RUN_RELEASE)} / tools ${COMPASS_TOOL_NAMES.join(", ")}`);
   } else {
     const observed = goalRun.observeHumanInput(goalRun.emptyGoalRunState(), "preflight-human").state;
     const initial = goalRun.setGoal(observed, { expectedVersion: 0, current: "Verify cursor mechanics", sourceIds: ["preflight-human"], constraints: [] }).state;

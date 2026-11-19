@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import extensionFactory from "../src/index.ts";
-import { DAG_APPROVAL_OPTION, approvalPrompt } from "../src/dag-approval.mjs";
+import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
 import { dagApprovalStatus, normalizeGoalRunState } from "../src/goal-run.mjs";
 import { humanSourceRef, latestHumanSource } from "../src/goal-sources.mjs";
 
-// Native extension surface: fixed eight tools, code-owned preconditions,
+// Native extension surface: fixed seven tools, code-owned preconditions,
 // interactive-only proposal expansion and structured-delegation consumption.
 // These are installed-host adapters, not live AgentSession/provider acceptance.
 
@@ -148,10 +148,10 @@ async function approve(pi, context = ctx(pi)) {
   return canonical;
 }
 
-test("registers exactly the eight fixed tools and never rewrites native activation", async () => {
+test("registers exactly the seven fixed tools and never rewrites native activation", async () => {
   const pi = fakePi();
   await boot(pi);
-  assert.deepEqual([...pi.tools.keys()].sort(), ["compass_acceptance", "compass_context", "compass_context_search", "compass_goal", "compass_plan", "compass_route", "compass_state", "runtime_guard"]);
+  assert.deepEqual([...pi.tools.keys()].sort(), ["compass_acceptance", "compass_context", "compass_context_search", "compass_goal", "compass_plan", "compass_state", "runtime_guard"]);
   assert.deepEqual(pi.activeNames(), ["read", "bash", "edit", "write", "amend", "codemode", "subagent", "ask_user_question"]);
   assert.equal(pi.commands?.has("compass-preflight"), true);
 });
@@ -214,6 +214,29 @@ test("a DAG is a draft, requires Goal criteria, and rejects unsafe or unexplaine
   assert.equal(plan.ready, undefined, "nothing is ready before Human approval");
   assert.ok(plan.prompt, "the native prompt carries only an opaque proposal ref");
   assert.equal(JSON.stringify(plan.prompt).includes("Tasks (DAG revision"), false, "the exact proposal is not duplicated into the model transcript");
+});
+
+test("incremental Goal and DAG edits preserve unrelated evidence and require fresh approval", async () => {
+  const pi = fakePi();
+  await plannedGoal(pi);
+  await approve(pi);
+  await waitFor(() => stateOf(pi).plan.tasks.every((task) => task.status === "done"), "both original nodes complete");
+  await call(pi, "compass_acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "API observation retained" }] });
+  const { goal: original } = await view(pi, { view: "goal" });
+  const updated = receipt(await call(pi, "compass_goal", { action: "update", constraintEdits: [{ text: "Follow AGENTS.md#toolresult-design" }], criterionEdits: [{ id: "AC2", text: "UI route includes error handling" }] }));
+  assert.equal(updated.approval, "required");
+  assert.equal((await view(pi, { view: "goal" })).goal.current, original.current);
+  assert.equal((await view(pi, { view: "acceptance" })).criteria[0].status, "reported_pass");
+  assert.deepEqual(updated.criteria.map((item) => item.id), ["AC1", "AC3"]);
+  await assert.rejects(() => call(pi, "compass_goal", { action: "update", criterionEdits: [{ id: "AC2" }] }), /stale.*criterion/i);
+  const edited = receipt(await call(pi, "compass_plan", { action: "patch", upsertTasks: [{ id: "ui", acceptance: "Successful and failing UI paths documented" }] }));
+  assert.deepEqual(edited.diff, { added: [], changed: ["ui"], removed: [] });
+  assert.match(edited.warnings[0], /No dependencies/);
+  assert.deepEqual(stateOf(pi).plan.tasks.map((task) => task.status), ["done", "pending"]);
+  assert.equal(pi.delegation.length, 2, "a definition edit is not launch authorization");
+  await approve(pi);
+  await waitFor(() => stateOf(pi).plan.tasks[1].status === "done", "the revised node alone completes");
+  assert.deepEqual(pi.delegation.map((request) => request.nodeId), ["api", "ui", "ui"]);
 });
 
 test("an expired proposal is a corrective block, not a host error", async () => {
@@ -280,10 +303,10 @@ test("an uncertain dispatch keeps its correlation and absorbs the late terminal 
   const pi = fakePi({ faultDispatch: true });
   await plannedGoal(pi);
   await approve(pi);
-  await waitFor(() => stateOf(pi).plan.execution?.status === "unknown", "both faulted dispatches are recorded");
+  await waitFor(() => stateOf(pi).plan.executions[0]?.status === "unknown", "both faulted dispatches are recorded");
   const state = stateOf(pi);
-  assert.deepEqual(state.plan.execution.results.map((item) => item.status), ["unknown", "unknown"], "a faulted dispatch is unknown, never done");
-  assert.equal(state.plan.execution.status, "unknown", "an uncertain batch is not presented as completed");
+  assert.deepEqual(state.plan.executions[0].results.map((item) => item.status), ["unknown", "unknown"], "a faulted dispatch is unknown, never done");
+  assert.equal(state.plan.executions[0].status, "unknown", "an uncertain batch is not presented as completed");
   assert.equal(state.plan.tasks.every((task) => task.status === "in_progress"), true);
   assert.equal(pi.delegation.length, 2);
 
@@ -301,10 +324,122 @@ test("an uncertain dispatch keeps its correlation and absorbs the late terminal 
     usage: { input: 5, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0.001, turns: 1, toolCalls: 1, durationMs: 10 },
   });
   await waitFor(() => stateOf(pi).plan.tasks.find((task) => task.id === accepted.nodeId)?.status === "done", "the late terminal result is reconciled");
-  const reconciled = stateOf(pi).plan.execution.results.find((item) => item.id === accepted.nodeId);
+  const reconciled = stateOf(pi).plan.executions[0].results.find((item) => item.id === accepted.nodeId);
   assert.equal(reconciled.status, "done");
   assert.equal(reconciled.runId, "run-late", "the late result stays bound to its original request");
+  assert.equal(stateOf(pi).plan.executions[0].status, "unknown", "one late result cannot settle the remaining unknown child");
+  assert.equal(stateOf(pi).plan.executionHistory.length, 0);
+
+  const remaining = pi.delegation[1];
+  const terminal = {
+    requestId: remaining.requestId, ownerRunId: remaining.ownerRunId, nodeId: remaining.nodeId,
+    status: "cancelled", error: "Native cancellation confirmed", model: remaining.model,
+  };
+  pi.events.emit("prompt-template:subagent:response", terminal);
+  pi.events.emit("prompt-template:subagent:response", terminal);
+  await waitFor(() => stateOf(pi).plan.executions[0].status === "completed", "the last late terminal result settles the batch");
+  const settled = stateOf(pi);
+  assert.equal(settled.plan.executionHistory.length, 1, "settlement is recorded only once");
+  assert.equal(settled.plan.tasks.find((task) => task.id === remaining.nodeId).status, "blocked");
   assert.equal(pi.delegation.length, 2, "an unknown outcome never triggers a second dispatch");
+});
+
+test("a terminal result is recorded while an unrelated sibling is still running", async () => {
+  const sibling = Promise.withResolvers();
+  const done = { status: "completed", result: { kind: "structured", value: {
+    status: "done", summary: "Verified the route", evidence: ["src/api.ts:1"], reason: "",
+  } } };
+  const pi = fakePi({ respondDelegation: (request) => request.nodeId === "api" ? done : sibling.promise });
+  await plannedGoal(pi);
+  await approve(pi);
+  try {
+    await waitFor(() => stateOf(pi).plan.tasks[0].status === "done", "the first result without releasing the sibling", 500);
+    assert.equal(stateOf(pi).plan.tasks[1].status, "in_progress");
+    assert.equal(stateOf(pi).plan.executionHistory.length, 0);
+  } finally {
+    sibling.resolve(done);
+    await waitFor(() => stateOf(pi).plan.executions[0].status === "completed", "the sibling settles");
+  }
+});
+
+test("an assessed successor starts while an unrelated native child is still running", async () => {
+  const sibling = Promise.withResolvers();
+  const done = { status: "completed", result: { kind: "structured", value: {
+    status: "done", summary: "Inspected a route", evidence: ["src/api.ts:1"], reason: "",
+  } } };
+  const pi = fakePi({ respondDelegation: (request) => request.nodeId === "ui" ? sibling.promise : done });
+  await plannedGoal(pi, [...tasks, { ...tasks[0], id: "follow", dependsOn: ["api"] }]);
+  await approve(pi);
+  try {
+    await waitFor(() => stateOf(pi).plan.tasks[0].status === "done", "the prerequisite result becomes available");
+    assert.deepEqual(pi.delegation.map((request) => request.nodeId), ["api", "ui"]);
+    await call(pi, "compass_plan", { action: "assess", taskId: "api", status: "pass", evidence: "Checked src/api.ts:1 against the approved route." });
+    await waitFor(() => stateOf(pi).plan.tasks[2].status === "done", "the successor finishes without releasing the sibling", 500);
+    assert.equal(stateOf(pi).plan.tasks[1].status, "in_progress");
+  } finally {
+    sibling.resolve(done);
+    await waitFor(() => stateOf(pi).plan.tasks[1].status === "done", "the sibling terminates");
+  }
+  assert.deepEqual(pi.delegation.map((request) => request.nodeId), ["api", "ui", "follow"]);
+  assert.equal(stateOf(pi).plan.executionHistory.length, 2);
+});
+
+test("a delegated throw freezes progression and cancellation targets one exact sibling attempt", async () => {
+  const sibling = Promise.withResolvers();
+  const stopped = { status: "completed", result: { kind: "structured", value: {
+    status: "throw", summary: "Wrong checkout", evidence: ["src/api.ts imports the retired router"],
+    reason: "The approved plan targets the retired router.", sideEffects: "No writes observed.",
+  } } };
+  const pi = fakePi({ respondDelegation: (request) => request.nodeId === "api" ? stopped : sibling.promise });
+  const cancels = [];
+  pi.events.on("prompt-template:subagent:cancel", (request) => cancels.push(request));
+  const next = { id: "next", title: "Write notes", acceptance: "Notes point to the correct router", executor: "parent" };
+  await plannedGoal(pi, [...tasks, next]);
+  await approve(pi);
+  try {
+    await waitFor(() => stateOf(pi).plan.tasks[0].status === "blocked", "the stop report is consumed");
+    const plan = await view(pi, { view: "plan" });
+    assert.deepEqual(plan.ready, []);
+    assert.equal(plan.stopped.taskId, "api");
+    assert.equal(plan.stopped.sideEffects, "No writes observed.");
+    assert.equal((await view(pi)).plan.stoppedBy, "api");
+    assert.equal(cancels.length, 0, "a throw does not cancel siblings by itself");
+    const active = pi.delegation.find((request) => request.nodeId === "ui");
+    const request = { action: "cancel", taskId: "ui", requestId: active.requestId };
+    await assert.rejects(() => call(pi, "compass_plan", { ...request, requestId: "stale" }), /exact.*attempt/i);
+    receipt(await call(pi, "compass_plan", request));
+    receipt(await call(pi, "compass_plan", request));
+    assert.deepEqual(cancels, [{ requestId: active.requestId, ownerRunId: active.ownerRunId, nodeId: "ui" }]);
+    assert.equal(stateOf(pi).plan.tasks[1].status, "in_progress", "asking to cancel is not terminal evidence");
+    assert.equal(stateOf(pi).plan.executions[0].results[1].cancelRequested, true);
+    await assert.rejects(() => call(pi, "compass_plan", { action: "start", taskIds: ["next"] }), /DAG was stopped/);
+  } finally {
+    sibling.resolve({ status: "cancelled", error: "Native cancellation confirmed" });
+    await waitFor(() => stateOf(pi).plan.executions[0].status === "completed", "the native terminal response settles the sibling");
+  }
+  assert.equal(stateOf(pi).plan.tasks[2].status, "pending");
+  assert.equal(pi.delegation.length, 2);
+});
+
+test("a semantic stop suppresses fallback but still consumes a sibling failure", async () => {
+  const sibling = Promise.withResolvers();
+  const pi = fakePi({ respondDelegation: (request) => request.nodeId === "api" ? {
+    status: "completed", result: { kind: "structured", value: {
+      status: "throw", summary: "Scope mismatch", evidence: ["README.md documents a different API"],
+      reason: "The Goal needs a revised plan.",
+    } },
+  } : sibling.promise });
+  await plannedGoal(pi);
+  await approve(pi);
+  try {
+    await waitFor(() => stateOf(pi).plan.stopped?.taskId === "api", "the stop is committed before the sibling fails");
+  } finally {
+    sibling.resolve({ status: "failed", error: "Provider returned 503" });
+    await waitFor(() => stateOf(pi).plan.executions[0].status === "completed", "the sibling failure is consumed");
+  }
+  assert.equal(pi.delegation.length, 2, "the 503 cannot initiate a fallback after a stop");
+  assert.match(stateOf(pi).plan.tasks[1].reason, /503/);
+  assert.equal(stateOf(pi).plan.executionHistory[0].fallbackCount, 0);
 });
 
 test("new Human input pauses approved dispatch until the Agent reaffirms the Goal", async () => {
@@ -315,13 +450,13 @@ test("new Human input pauses approved dispatch until the Agent reaffirms the Goa
   }), 300)) });
   await plannedGoal(pi);
   await approve(pi);
-  await waitFor(() => stateOf(pi).plan.execution?.status === "running", "the approved wave starts");
+  await waitFor(() => stateOf(pi).plan.executions[0]?.status === "running", "the approved wave starts");
   await sendHuman(pi, "Actually, also keep the existing flags unchanged.");
   assert.equal(dagApprovalStatus(stateOf(pi)).approved, false, "unreviewed Human input withdraws authorization");
   const plan = await view(pi, { view: "plan" });
   assert.equal(plan.approval, "stale", "an answered-but-withdrawn approval is reported as stale");
   await assert.rejects(() => call(pi, "compass_plan", { action: "assess", taskId: "api", status: "pass", evidence: "Verified route order.", caveats: [], unresolvedCaveats: [] }), /no current correlated Human approval/);
-  await waitFor(() => stateOf(pi).plan.execution?.status === "completed", "the already-started child terminal result is still consumed");
+  await waitFor(() => stateOf(pi).plan.executions[0]?.status === "completed", "the already-started child terminal result is still consumed");
   assert.equal(stateOf(pi).plan.tasks.find((task) => task.id === "api").status, "done", "a correlated fact is preserved without reopening progression");
   assert.equal(pi.delegation.length, 2);
 });
@@ -354,9 +489,9 @@ test("a missing structured-delegation handler fails closed without launching a c
   const canonical = event.input.questions[0];
   // Without a bus the hook still binds; the questionnaire answer is correlated normally.
   await answer(pi, callId, canonical, { preview: canonical.options[0].preview });
-  await waitFor(() => stateOf(pi).plan.execution?.status === "failed", "dispatch fails visibly");
+  await waitFor(() => stateOf(pi).plan.executions[0]?.status === "failed", "dispatch fails visibly");
   const state = stateOf(pi);
-  assert.match(state.plan.execution.error, /No correlated invalid_request response|does not expose the structured-delegation contract/);
+  assert.match(state.plan.executions[0].error, /No correlated invalid_request response|does not expose the structured-delegation contract/);
   assert.equal(state.plan.tasks.every((task) => task.status === "pending"), true, "no task is presumed started");
   assert.deepEqual(pi.delegation, []);
 });
@@ -370,53 +505,27 @@ test("session shutdown marks an unresolved dispatch unknown and reconciliation r
   const pi = fakePi(slow);
   await plannedGoal(pi);
   await approve(pi);
-  await waitFor(() => stateOf(pi).plan.execution?.status === "running", "a wave is in flight");
+  await waitFor(() => stateOf(pi).plan.executions[0]?.status === "running", "a wave is in flight");
   await pi.hooks.get("session_shutdown")[0]({}, ctx(pi));
   const unknown = stateOf(pi);
-  assert.equal(unknown.plan.execution.status, "unknown", "an in-flight batch is never presumed stopped or restarted");
+  assert.equal(unknown.plan.executions[0].status, "unknown", "an in-flight batch is never presumed stopped or restarted");
   // A restarted Pi session is a new extension instance over the same native branch.
   const restarted = fakePi({ ...slow, entries: pi.entries });
   await boot(restarted);
   await assert.rejects(() => call(restarted, "compass_plan", { action: "start", taskIds: ["api"] }), /unresolved native batch|No state changed/);
   await assert.rejects(() => call(restarted, "compass_plan", {
-    action: "resolve", requestId: unknown.plan.execution.requestId, confirmedNoActiveRuns: true,
-    confirmationEvidence: "short", results: unknown.plan.execution.taskIds.map((id) => ({ id, status: "done", evidence: "checked" })),
+    action: "resolve", requestId: unknown.plan.executions[0].requestId, confirmedNoActiveRuns: true,
+    confirmationEvidence: "short", results: unknown.plan.executions[0].taskIds.map((id) => ({ id, status: "done", evidence: "checked" })),
   }), /confirmationEvidence/);
   await call(restarted, "compass_plan", {
-    action: "resolve", requestId: unknown.plan.execution.requestId, confirmedNoActiveRuns: true,
+    action: "resolve", requestId: unknown.plan.executions[0].requestId, confirmedNoActiveRuns: true,
     confirmationEvidence: "Native subagent status shows both recorded child runs terminal.",
-    results: unknown.plan.execution.taskIds.map((id) => ({ id, status: "blocked", reason: "Child run terminal without usable evidence." })),
+    results: unknown.plan.executions[0].taskIds.map((id) => ({ id, status: "blocked", reason: "Child run terminal without usable evidence." })),
   });
   const state = stateOf(restarted);
-  assert.equal(state.plan.execution.status, "completed");
+  assert.equal(state.plan.executions[0].status, "completed");
   assert.equal(state.plan.tasks.every((task) => task.status === "blocked"), true);
   assert.equal(pi.delegation.length, 2, "the unknown batch was not redispatched");
-});
-
-test("RouteSet selection is Human-owned, uses Goal criterion IDs, and never creates DAG tasks", async () => {
-  const pi = fakePi();
-  await boot(pi);
-  await setGoal(pi, "Choose an adapter strategy", { criteria: ["Shared smoke test passes"] });
-  const before = stateOf(pi);
-  await assert.rejects(() => call(pi, "compass_route", { action: "define", baselineRef: "git:base", criteria: ["AC9"], routes: [{ routeId: "A", summary: "Existing adapter" }, { routeId: "B", summary: "New adapter" }] }), /current Goal criterion ID/);
-  await assert.rejects(() => call(pi, "compass_route", { action: "define", baselineRef: "git:base", criteria: ["AC1"], routes: [{ routeId: "parallel_exploration", summary: "A" }, { routeId: "B", summary: "B" }] }), /reserved/);
-  assert.equal(stateOf(pi).plan.tasks.length, before.plan.tasks.length, "alternatives are not DAG tasks");
-  const defined = receipt(await call(pi, "compass_route", { action: "define", baselineRef: "git:base", criteria: ["AC1"], routes: [{ routeId: "A", summary: "Existing adapter" }, { routeId: "B", summary: "New adapter" }] }));
-  assert.equal(defined.prompt.questions.length, 1);
-  const routeView = await view(pi, { view: "route" });
-  assert.equal(routeView.route.selected, undefined);
-  const callId = "route-selection";
-  const prompt = routeView.route.prompt;
-  pi.entries.push({ id: `assistant-${callId}`, type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: callId, name: "ask_user_question", arguments: prompt }] } });
-  const event = { toolName: "ask_user_question", toolCallId: callId, input: structuredClone(prompt) };
-  assert.equal(await pi.hooks.get("tool_call")[0](event, ctx(pi)), undefined);
-  const canonical = event.input.questions[0];
-  assert.deepEqual(canonical.options.map((option) => option.label), ["A", "B"]);
-  const details = { answers: [{ questionIndex: 0, question: canonical.question.slice(0, 400), kind: "option", answer: "B", selected: ["B"], preview: canonical.options[1].preview }] };
-  for (const handler of pi.hooks.get("tool_result") ?? []) await handler({ toolName: "ask_user_question", toolCallId: callId, isError: false, content: [{ type: "text", text: "Human answered: B" }], details }, ctx(pi));
-  const selected = await view(pi, { view: "route" });
-  assert.equal(selected.route.selected, "B");
-  assert.equal(stateOf(pi).plan.tasks.length, 0, "route selection does not fabricate a DAG");
 });
 
 test("acceptance records only existing criteria and repeated identical evidence is a no-op", async () => {
@@ -470,9 +579,9 @@ test("native branch navigation adopts the selected branch GoalRun", async () => 
 test("an unsupported persisted GoalRun fails visibly instead of resetting state", async () => {
   const pi = fakePi();
   await boot(pi);
-  pi.entries.push({ type: "custom", customType: "pi-compass-v2.goalrun", data: { schemaVersion: 8, goal: { current: "legacy" }, plan: { tasks: [] } } });
+  pi.entries.push({ type: "custom", customType: "pi-compass-v2.goalrun", data: { schemaVersion: 9, goal: { current: "legacy" }, plan: { tasks: [] } } });
   await assert.rejects(() => pi.hooks.get("session_tree")[0]({}, ctx(pi)), /Unsupported Compass GoalRun schema/);
-  assert.equal(pi.entries.at(-1).data.schemaVersion, 8, "raw history is preserved");
+  assert.equal(pi.entries.at(-1).data.schemaVersion, 9, "raw history is preserved");
 });
 
 test("failed native persistence never reports a mutation as committed", async () => {

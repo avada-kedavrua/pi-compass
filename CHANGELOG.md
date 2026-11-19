@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0 — seven-tool candidate
+
+- Remove `compass_route`, its state view, and the underlying strategy competition state and approval bindings. An approved DAG covers one strategy. GoalRun API/schema is now 10; v9 snapshots fail visibly without migration. DAG approval and task acceptance still apply.
+
+- Add incremental Goal/DAG edits, approved parent-node frames with committed outcomes and exact artifact handoff, and scoped memory with native Skill auto-pin and exact repeated-read deduplication.
+- Record each correlated child result as it arrives; the final late terminal result closes an unknown batch exactly once without redispatch. `throw` stops new DAG work and fallback without discarding sibling results. `cancel` targets a single exact attempt, and does not settle it.
+
 ## 0.10.0 — R2 eight-tool convergence (live Pi/provider acceptance pending)
 
 - **Breaking Agent contract:** replace the loader/capability surface with eight fixed tools — `compass_goal`, `compass_state`, `compass_context_search`, `compass_context`, `compass_plan`, `compass_acceptance`, `compass_route`, `runtime_guard`. Remove `compass_open`, `compass_goal_read`, the split plan/task/execution/history/triage tools and all loadout/capability state; no aliases, migration or compatibility adapter. GoalRun API/schema is 9 and current-only.
@@ -29,7 +36,7 @@
 - Keep RouteSet alternatives separate from DAG tasks. Scope/budget proposals require exact Human authorization; shared-criteria acceptance gates route selection and exact-identity competitor cancellation. Reject out-of-order cancellation, late-result races and undocumented native terminal statuses. Native pi-await arm identities own watch liveness, repeat/lost/terminal behavior and explicit frame transfer.
 - Unify binding syntax and verify logical value identity against immutable native content/snapshot/write records, independently of provenance. Remove unused Goal/DAG continuity projections, duplicate DAG notes/state, the global write guard and dead retry/scheduler wrappers. GoalRun remains the authoritative decision/checkpoint store; GoalRun schema v8/context v4 are current-only; unsupported snapshots fail without migration or reset.
 - Remove the obsolete automatic live-acceptance command, isolated launcher and fixture/report-only tests: they created a draft then failed the native approval/assessment gates. Human acceptance now uses the ordinary Agent, exact questionnaire, task assessment and native scheduler with session-report evidence, not a synthetic tool-result trigger or another configuration/execution path.
-- Package one progressively loaded Compass Skill and verify installed discovery outside the checkout. Publish the current [requirement checklist and local verification](docs/architecture-v0.10.0.md#final-local-evidence), [measurements](docs/measurements-v0.10.0.md) and [Human acceptance handoff](handoff.md). Local installed-host checks are not live Pi/provider acceptance or provider-cache/cost evidence.
+- Package one progressively loaded Compass Skill and verify installed discovery outside the checkout. Publish the current [requirement checklist and local verification](docs/architecture-v0.10.0.md#final-local-evidence), [measurements](docs/measurements-v0.10.0.md) and [Human acceptance](README.md#human-acceptance). Local installed-host checks are not live Pi/provider acceptance or provider-cache/cost evidence.
 - Expose committed frame/root identity through the native footer and compact `compass_state.contextFrame`, without polling or duplicating frame contents. Frames and retained values work before a Goal exists; their default retention is session-scoped, not a fictitious Goal version.
 
 ## 0.9.1 (2026-10-31)

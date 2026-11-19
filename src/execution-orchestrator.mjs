@@ -2,7 +2,7 @@
 // This uses the public structured-delegation event family; it does not call the
 // model-visible `subagent` tool recursively and does not create a second runner.
 
-import { taskAssessmentIsCurrent } from "./dag-core.mjs";
+import { readyTasks } from "./dag-core.mjs";
 
 export const DELEGATION_EVENTS = Object.freeze({
   request: "prompt-template:subagent:request",
@@ -42,7 +42,8 @@ export const MIN_PARALLEL_SAVINGS_MS = 5_000;
 export const TASK_RESULT_SCHEMA = Object.freeze({
   type: "object",
   properties: {
-    status: { type: "string", enum: ["done", "blocked", "failed"] },
+    status: { type: "string", enum: ["done", "blocked", "failed", "throw"] },
+    sideEffects: { type: "string", minLength: 1, maxLength: 800 },
     summary: { type: "string", minLength: 1, maxLength: 800 },
     evidence: {
       type: "array",
@@ -69,16 +70,9 @@ const ROLE_TOOLS = Object.freeze({
 export function selectReadySubagentTasks(plan, maxTasks = MAX_WAVE_TASKS) {
   if (!plan || !Array.isArray(plan.tasks) || !plan.tasks.length) return [];
   if (!Number.isInteger(maxTasks) || maxTasks < 1) throw new Error("maxTasks must be a positive integer.");
-  const byId = new Map(plan.tasks.map((task) => [task.id, task]));
-  return plan.tasks.filter((task) => task.status === "pending"
-    && task.executor === "subagent"
+  return readyTasks(plan).filter((task) => task.executor === "subagent"
     && String(task.writeScope ?? "").trim().toLowerCase() === "read-only"
-    && typeof task.dispatchReason === "string" && task.dispatchReason.trim().length >= 12
-    && (task.dependsOn ?? []).every((dep) => {
-      const prerequisite = byId.get(dep);
-      return prerequisite?.status === "done" && prerequisite.assessment?.status === "pass"
-        && taskAssessmentIsCurrent(plan, prerequisite);
-    }))
+    && typeof task.dispatchReason === "string" && task.dispatchReason.trim().length >= 12)
     .slice(0, Math.min(MAX_WAVE_TASKS, maxTasks));
 }
 
@@ -170,7 +164,7 @@ export function buildTaskPrompt({ goal, task, constraints = [] }) {
     "You are a read-only child agent executing one explicitly assigned Compass DAG task.",
     "Do not edit, write, delete, install, commit, or run commands that mutate files or external state.",
     "Inspect only the assigned scope. Do not expand into unrelated research. Stop when the acceptance condition has enough evidence.",
-    "Return the required structured result. Set status=done only when the task acceptance condition is met and evidence contains concrete paths, line references, command output, or authoritative source URLs. Use blocked when a prerequisite, permission, or missing input prevents completion. Use failed only when the assigned work was attempted but could not be completed. Never claim independent verification of the overall Goal.",
+    "Return the required structured result. Set status=done only when the task acceptance condition is met and evidence contains concrete paths, line references, command output, or authoritative source URLs. Use blocked when a prerequisite, permission, or missing input prevents completion. Use failed only when the assigned work was attempted but could not be completed. Use throw when evidence shows the plan should stop; include reason, evidence and known side effects. Never claim independent verification of the overall Goal.",
     `Current Goal: ${boundedGoal || "Not supplied"}`,
     ...(boundedConstraints.length ? ["Hard Human constraints:", ...boundedConstraints.map((item) => `- ${item}`)] : []),
     `Task ID: ${task.id}`,
@@ -179,7 +173,7 @@ export function buildTaskPrompt({ goal, task, constraints = [] }) {
     `Acceptance condition: ${String(task.acceptance ?? "").slice(0, 800)}`,
     `Expected output: ${String(task.output ?? "Not specified").slice(0, 500)}`,
     `Dependencies: ${(Array.isArray(task.dependsOn) ? task.dependsOn : []).join(", ") || "none"}`,
-    "Structured result rules: summary is concise; evidence is an array of 1–6 concrete observations for status=done and may be empty otherwise; reason is empty for done and explains the blocker/failure otherwise.",
+    "Structured result rules: summary is concise; evidence is an array of 1–6 concrete observations for done or throw and may be empty otherwise; reason is empty only for done.",
   ].join("\n");
 }
 
@@ -332,7 +326,7 @@ export function parseSubagentDelegationResponse(value, expected = {}) {
     ? payload.evidence.filter((item) => typeof item === "string" && item.trim()).slice(0, 6).map((item) => item.trim().slice(0, 600))
     : [];
   const reason = boundedString(payload.reason, 600);
-  if (!["done", "blocked", "failed"].includes(taskStatus) || !summary) {
+  if (!["done", "blocked", "failed", "throw"].includes(taskStatus) || !summary) {
     return {
       ...common,
       status: "blocked",
@@ -342,13 +336,13 @@ export function parseSubagentDelegationResponse(value, expected = {}) {
       terminalStatus: "structured_output_failed",
     };
   }
-  if (taskStatus === "done" && evidence.length === 0) {
+  if (["done", "throw"].includes(taskStatus) && evidence.length === 0) {
     return {
       ...common,
       status: "blocked",
       summary,
       evidence: [],
-      reason: "Subagent reported done without concrete evidence; task was not auto-completed.",
+      reason: `Subagent reported ${taskStatus} without concrete evidence; the outcome was not accepted.`,
       terminalStatus: "structured_output_failed",
     };
   }
@@ -365,6 +359,7 @@ export function parseSubagentDelegationResponse(value, expected = {}) {
   return {
     ...common,
     status: taskStatus,
+    ...(taskStatus === "throw" ? { sideEffects: boundedString(payload.sideEffects, 800) || "unknown" } : {}),
     summary,
     evidence,
     reason,

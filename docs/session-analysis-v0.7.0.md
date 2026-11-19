@@ -87,6 +87,6 @@ A deterministic gate can narrow the choice set, but it should not try to replace
 
 1. The build container has no Pi CLI. Real Pi 1.3.0 dynamic tool activation/schema replacement is not verified here.
 2. The four supplied traces do not encode a reliable package hash; they are a retrospective operational baseline, not a clean A/B benchmark.
-3. Subagent visibility is gated, not automatically dispatched. If the tool is already hidden by Compass, Pi's active-tool API may not reveal a later user attempt to disable that already-inactive tool; see `handoff.md` for this edge case.
+3. Subagent visibility is gated, not automatically dispatched. If the tool is already hidden by Compass, Pi's active-tool API may not reveal a later user attempt to disable that already-inactive tool.
 4. The current planning signal is intentionally narrow. It may miss a complex Goal that does not explicitly describe its stages and has not yet produced three distinct write targets.
 5. `agent_reported_satisfied` remains a report state, not independent verification. Human quality review and external evidence remain necessary where the Goal requires them.

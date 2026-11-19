@@ -419,21 +419,22 @@ test("native child compaction cannot resurrect released child process entries", 
   assertPaired(manager);
 });
 
-test("ref writes survive abort, nested scopes, native compaction, and return", () => {
+test("private writes survive the local abort but do not escape compaction and return", () => {
   const manager = host();
   const input = value(manager, "original value");
   applyOperation(manager, { action: "call", task: "outer", capture: [capture(manager, input)] });
-  applyOperation(manager, { action: "call", task: "inner", capture: [capture(manager, input)] });
-  const written = applyOperation(manager, { action: "replace", ids: [input], version: sourceVersion(manager, input), content: "updated shared value" }, { outcome: "aborted" });
+  applyOperation(manager, { action: "call", task: "inner", capture: [{ ...capture(manager, input), mode: "copy" }] });
+  const written = applyOperation(manager, { action: "replace", ids: [input], version: sourceVersion(manager, input), content: "updated local value" }, { outcome: "aborted" });
+  assert.match(modelText(manager), /updated local value/);
   assert.equal(written.planned.continue, false);
   const tail = value(manager, "inner tail");
   manager.appendCompaction("inner summary", tail, 0);
   applyOperation(manager, { action: "return" });
   assert.equal(restoreContextState(manager.getBranch()).frames.length, 1);
-  assert.match(modelText(manager), /updated shared value/);
+  assert.match(modelText(manager), /original value/);
   applyOperation(manager, { action: "return" });
-  assert.match(modelText(manager), /updated shared value/);
-  assert.doesNotMatch(modelText(manager), /original value|inner tail/);
+  assert.match(modelText(manager), /original value/);
+  assert.doesNotMatch(modelText(manager), /updated local value|inner tail/);
 });
 
 test("frame identities use persisted source entries, not session-global provider call IDs", () => {

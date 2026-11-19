@@ -6,10 +6,10 @@ Status: v0.10 local candidate. M0–M7 local delivery gates are complete, with e
 
 Human's current instruction supersedes the old public tool layout, not native safety/ownership requirements. Current implementation remains the preceding snapshot until each milestone below lands. No legacy tool aliases, capability registry, migrations or second workflow loop will be retained. Raw Pi records and Git history remain immutable.
 
-Target: eight initially registered, stable tools. goal alone owns semantic Goal/constraint/criterion definitions and Goal-level decisions/checkpoints; state owns all reads; context_search retrieves evidence; context writes memory/attention/work values; plan owns DAG definition/task/approval/reconciliation; acceptance records criterion evidence only; route owns alternatives and competitor authorization; runtime_guard owns executable mechanical checks. Internal revisions/bindings never become required Agent bookkeeping. Compact JSON serves composition; requested evidence/caveats remain complete. No schema/status churn or Compass loader.
+Current surface: seven initially registered, stable tools. goal alone owns semantic Goal/constraint/criterion definitions and Goal-level decisions/checkpoints; state owns all reads; context_search retrieves evidence; context writes memory/attention/work values; plan owns DAG definition/task/approval/reconciliation; acceptance records criterion evidence only; runtime_guard owns executable mechanical checks. Internal revisions/bindings never become required Agent bookkeeping. Compact JSON serves composition; requested evidence/caveats remain complete. No schema/status churn or Compass loader.
 
 - **R0 — Contract and failure ledger**
-  - [x] Verify all eight responsibilities and schema/result journeys against the implementation and documented host boundaries; record F1–F12 and proving checks in the existing consumer audit.
+  - [x] Verify the original eight responsibilities and schema/result journeys against the implementation and documented host boundaries; record F1–F12 and proving checks in the existing consumer audit.
   - [x] Resolve approval composition without another UI/control plane or model copying long payloads. Independent design re-review cleared the interactive-only/full-preview qualification; no code execution claimed. R0 is the design/ledger delivery commit; implementation gates remain open below.
 - **R1 — Context root fixes**
   - [x] Distinguish no summary from changed summary; no false return checkpoint. Preserve real inner-compaction restoration and complete exchanges.
@@ -27,7 +27,44 @@ Target: eight initially registered, stable tools. goal alone owns semantic Goal/
 - **R4 — Occam and final delivery**
   - [ ] Reconcile every ledger item, inspect all runtime modules/callers and remove dead/duplicate code and tests. Keep targeted behavioral guards, not test volume.
   - [ ] Run focused checks first, mandatory full/core/non-extension/static/native gates at delivery; compare suite duration, tool/schema/result bytes, actual nonempty replay and context CPU/draft sizes. Do not infer provider quality/cache/cost from local measurements.
-  - [ ] Align one Skill, current tool contract, release identity and handoff; independent code and consumer reviews; commit, push and verify remote identity. Mark unproven live/provider behavior explicitly.
+  - [ ] Align the Skill, tool contract, release identity and acceptance instructions; independent code and consumer reviews; commit, push and verify remote identity. Mark unproven live/provider behavior explicitly.
+
+### Next acceptance work
+
+#### 1. DAG execution and recovery
+
+- [x] Close a native batch when its last correlated terminal result arrives late. The installed-host adapter regression failed before the fix and now verifies that a partial result leaves the batch unresolved, the last result settles it once, and no unknown attempt is retried.
+- [x] Consume correlated terminal results per node. An adapter regression keeps a sibling running while the first terminal result becomes visible.
+- [x] Dispatch an assessed successor without waiting for unrelated siblings. The regression held a sibling open and timed out before the fix. Separate active batch records preserve exact request correlation and a shared admission cap.
+- [x] Accept semantic `throw` with reason, evidence and known side effects. Freeze progression and fallback; continue consuming running siblings. Adapter tests verify exact cancellation and that a cancel request is not terminal evidence. No filesystem rollback.
+- [ ] Verify prompt notification of a child `throw` in a disposable Agent session. Stop evidence is currently surfaced in plan state, not a proactive wake.
+- [ ] Verify preflight graph checks, advisory edgeless/shared-cwd warnings, single-node retry of confirmed terminal work, and stale-approval recovery. Keep the human-approved plan distinct from Goal acceptance.
+
+#### 2. Node frames and artifact handoff
+
+- [x] Bind approved parent nodes to native same-session frame commits. A single return submits the outcome and explicit exports; a queued return cannot settle the node. Code Mode remains a separate deterministic route.
+- [ ] Writable children are out of scope under the repository's read-only Subagent constraint. No write locks, automatic merge, or rollback were added.
+- [x] Same-session node handoff uses exact exports and caveats, with order-only edges distinct from artifact inputs. The installed Runner/SessionManager adapter exercises A → assessment → B → throw → C stays pending → approved patch explicitly reuses A. Native child artifact inputs are not exposed.
+
+#### 3. Context and incremental editing
+
+- [x] Inherit pins downward, protect reserved instructions, and isolate frame writes. Child unpin masks inherited retention; complete verified canonical Skill reads auto-pin locally.
+- [x] List retained memory directly and update/delete local Agent-authored memory without unpinning first. Raw provenance and exact original source recovery stay intact.
+- [x] Apply exact native read dedup at append with a qualified pointer and intact raw call/result pairing. Keep queued receipts distinct from the single applied return receipt. Skip already-null context edits on return; the MindStudio workload was not replayed with the new implementation.
+- [x] Incremental Goal edits and DAG patches preserve unaffected progress, retire changed criterion IDs, and request fresh exact approval for material changes.
+
+#### 4. Agent review and delivery
+
+- [ ] Exercise approval, serial/parallel execution, stop, late recovery, replanning and context edits as an Agent. Check call count, receipt clarity, side effects and projection size against the current path. Remove redundant mechanics; do not add a strategy tournament, global ledger, or second scheduler.
+- [x] Run focused and full gates and separate installed-native evidence from adapter coverage. Agent smoke and recovery evidence are listed below; this is not a request for Human live acceptance.
+- Review and publish the scoped Git revision to `chatgpt-only`; verify the remote ref against the final local commit.
+
+### Candidate review evidence
+
+- Planner/worker/integrator journeys: `tests/extension.test.mjs` covers correlated approval, per-node dispatch, partial failure, late evidence, cancellation and incremental edits. `tests/context-integration.test.mjs` covers real installed Pi Runner/SessionManager projection, frame-node commit, artifact handoff/replanning, Skill activation, memory and dedup. Native approval replies and native child events in these tests use adapters, not a provider.
+- Disposable Pi 1.5.2 Agent run (`jrt/deepseek-v4.1-flash`) exercised source-bound Goal, real `read` dedup, frame memory, scoped export and `reported_pass`. The first pass stopped inside a frame. Recovery reached root and reported 1/1 criterion with explicit static-file limitations; it initially confused ordinary return with node outcomes and invented IDs for additions. Review added a frame-return cue, one applied return receipt, explicit return mode and actionable ID diagnostics. Raw transcripts remain local. This does not qualify interactive approval, live child execution, Human acceptance, or end-to-end cost/cache benefits.
+- Final local gates: full 224/224, core 63/63, non-extension 92/92; isolated static preflight and real Pi loader/runner/Worker checks passed. Package dry run excluded `.pi/` and session JSONL.
+- Open: native child stop does not trigger an idle Agent turn; shared-cwd writable scheduling is not supported. No end-to-end MindStudio replay was run.
 
 ## Source of requirements
 
@@ -182,18 +219,9 @@ Exit: native APIs are the execution authorities. No assumed notification deliver
 
 Exit: unapproved and stale plans cannot execute; clear approval can proceed; semantic checks are explicit and traceable, not claimed to be mathematically proven by runtime.
 
-## M6 — route choice, exploration and acceptance-gated stopping
+## M6 — strategy choice (RouteSet retired)
 
-- [x] Distinguish alternative routes from a chosen route's DAG; no automatic route fan-out from merely mentioning alternatives.
-- [x] Use a structured RouteSet questionnaire to align Human-selected routes when the decision matters.
-- [x] Represent explicit authorization for parallel exploration, its scope/budget and correlated competitor identities; do not infer authorization from task size.
-- [x] Compare results against shared acceptance criteria and caveats, not first-finished-wins.
-- [x] Allow exact-identity cancellation of competitors only after the explicit acceptance gate passes.
-- [x] Track cancellation request/acknowledgement/terminal status separately; unknown termination remains unknown.
-- [x] Leave filesystem/worktree/environment coordination to the Agent and native execution capabilities; Compass retains advisory path-scope evidence but no global write lock.
-- [x] Instruct the Agent to stop and revisit root cause when new evidence invalidates the route; existing triage/context operations remain advisory and do not pretend code can recognize every semantic failure.
-
-Exit: unauthorized exploration and premature cancellation are rejected; accepted-route evidence is retained; no new Router or scheduler. The implemented RouteSet is persisted in GoalRun, uses stable Goal/version/baseline bindings and fixed actions with stale-input rejection. It does not create branches or DAG siblings.
+The earlier candidate tracked alternative strategies but never launched them automatically. The current candidate removes that surface, including its persisted state and approval bindings. Agents choose one strategy and create an approved DAG; semantic early exit, replanning, and artifact handoff are not implemented by this removal.
 
 ## M7 — simplify, measure, document and deliver
 
@@ -205,7 +233,7 @@ Exit: unauthorized exploration and premature cancellation are rejected; accepted
 - [x] Apply Occam to the touched scope: remove obsolete schemas/fallbacks, the unused global write-guard implementation/test, dead scheduler rerun state and eager copies of arbitrary tool arguments. Retire the synthetic live-acceptance command/launcher and dedicated fixture/report tests: they could not satisfy normal native approval/assessment gates. Reuse the ordinary Agent workflow and session-report evidence instead of maintaining a second acceptance execution path. Keep source/range proof and meaningful regressions.
 - [x] Measure representative local transition/search memory and CPU costs plus request/context sizes. Collect native usage evidence where available; do not invent provider/cache/cost measurements.
 - [x] Run targeted/full/core/non-extension checks, static preflight, installed host import/API checks and independent high-risk source review; resolve reproduced findings. Verify actual package/Skill discovery from an unrelated target directory, not just source-project auto-discovery. Active interactive Pi registry/provider acceptance remains Human-only.
-- [x] Reconcile requirements: implemented context/retention/retrieval/movement/spill, native composition, DAG and RouteSet gates; reuse native execution/waits/review and parent semantic judgment; unsupported recursive child Compass is explicitly fail-closed, not advertised as implemented. Human-only live evidence stays separate.
+- [x] Reconcile requirements: implemented context/retention/retrieval/movement/spill, native composition, DAG gates; reuse native execution/waits/review and parent semantic judgment; unsupported recursive child Compass is explicitly fail-closed, not advertised as implemented. Human-only live evidence stays separate.
 - [x] Version-control and publish coherent implementation milestones. README/handoff provide a short real-session test guide; local configuration is not included in delivery commits.
 - [ ] Human performs actual Compass/provider acceptance and provides a feedback path. This is the only remaining verification ownership transferred to Human, not development TODOs.
 
@@ -243,7 +271,7 @@ Human live feedback then exposed a missed production seam: the guard kernel dyna
 
 The subsequent consumer-contract revision removes Agent binding/version/revision plumbing rather than merely adding hints. Basic pin/unpin/remember uses stateless exact-source refs; optional context operations reuse the existing loader. Semantic Human sources are explicit and independent of latest-input review. Default results and retained envelopes omit internal audit data, while source details, inherited caveats and derived authorship stay recoverable. The rendered format is context v5 current-only with an explicit v4 rejection regression, not a compatibility path. The native consumer subprocess now executes both Goal/search/remember/compaction recovery and private-copy/edit/updated-ref/export; no source/ref decoding is required by that client. Three focused tests cover stale selection/binding safety, omitted/historical exact recovery and memory provenance/lifetime. Consumer-only schema review and bounded code rereviews cleared actionable findings; no reviewer execution is claimed. The [consumer audit](agent-usage-audit-v0.10.0.md) records the frozen evidence, measured interface costs and limits. Performance scripts reject empty/incorrect scan fixtures instead of reporting them as fast paths.
 
-Native API/installed projection/runner checks, including this provider-free native factory probe, do not establish a real AgentSession/provider cycle. See [measurements](./measurements-v0.10.0.md) for bounded local CPU/memory/draft/request-size data and [handoff](../handoff.md) for Human acceptance and feedback. No provider/cache/token or semantic-quality improvement is claimed from these checks.
+Native API/installed projection/runner checks, including this provider-free native factory probe, do not establish a real AgentSession/provider cycle. See [measurements](./measurements-v0.10.0.md) for bounded local CPU/memory/draft/request-size data and [README](../README.md#human-acceptance) for Human acceptance and feedback. No provider/cache/token or semantic-quality improvement is claimed from these checks.
 
 ## Native reference baseline
 

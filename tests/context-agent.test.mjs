@@ -25,7 +25,7 @@ test("opaque selections cannot update a newer head or redirect multi-value moves
   apply(m, { action: "pin", sources: roots });
   apply(m, { action: "call", task: "private", capture: roots.map((ref) => ({ ref, mode: "copy" })) });
   const before = state(m);
-  assert.throws(() => apply(m, { action: "move", sources: roots }), /Pinned|explicit ref/);
+  assert.throws(() => apply(m, { action: "move", sources: roots }), /read-only in this frame/);
   assert.deepEqual(state(m), before);
 });
 

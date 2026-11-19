@@ -6,6 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { piRoot } from "../scripts/register-pi-host-typebox.mjs";
 import extensionFactory from "../src/index.ts";
+import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
+import { bindDagApprovalQuestionnaire, captureHumanDecision } from "../src/goal-run.mjs";
+import { humanSourceRef, latestHumanSource } from "../src/goal-sources.mjs";
 import { emptyContextState, planWatchBoundary, restoreContextState, searchContext } from "../src/context-core.mjs";
 import { contextRef, contextSelection } from "../src/context-values.mjs";
 import { SessionManager, appendDrafts, assertPaired, contextPreview, modelText, sourceVersion, user } from "./helpers/context-host.mjs";
@@ -87,7 +90,10 @@ async function setup(laterHandler, earlierContextHandler, cwd = "/context-integr
       messageEntryId, toolResultEntryIds: [resultEntryId],
     }, (drafts) => contextPreview(manager, drafts));
     assert.equal(proposal.valid, true);
-    if (apply) appendDrafts(manager, proposal.entries);
+    if (apply) {
+      appendDrafts(manager, proposal.entries);
+      await runner.emitContext(manager.buildSessionProjection().messages);
+    }
     return proposal;
   }
   async function finish(outcome = "completed") {
@@ -142,7 +148,7 @@ test("installed runner chains frame entry and return; only committed metadata be
 test("Agent data-only path enters a long frame and receives correlated terminal receipts", async () => {
   const host = await setup();
   for (let index = 0; index < 350; index++) user(host.manager, `old parent observation ${index}`);
-  const id = user(host.manager, "Font 微软雅黑; red text for unmet targets; green text for challenge success.");
+  user(host.manager, "Font 微软雅黑; red text for unmet targets; green text for challenge success.");
   const tool = host.tools.get("compass_context");
   const search = JSON.parse((await host.tools.get("compass_context_search").execute("recover", { query: "微软雅黑 green unknownword" }, undefined, undefined, host.runner.createContext())).content[0].text);
   const source = search.hits.find((hit) => hit.text?.includes("Font 微软雅黑"));
@@ -414,6 +420,116 @@ test("request snapshots cannot mutate immutable source image blocks", async () =
   const messages = await host.runner.emitContext(host.manager.buildSessionProjection().messages);
   messages.find((message) => message.customType === "pi-compass-v2.value").content.at(-1).data = "mutated downstream";
   assert.deepEqual(host.manager.getEntry(id), original);
+});
+
+async function appendNativeRead(host, args, text, details) {
+  const callId = `file-read-${++nextCall}`;
+  const message = { role: "assistant", content: [{ type: "toolCall", id: callId, name: "read", arguments: args }], api: "test", provider: "test", model: "test", usage: {}, stopReason: "toolUse", timestamp: Date.now() };
+  const messageEntryId = host.manager.appendMessage(message);
+  const result = { role: "toolResult", toolCallId: callId, toolName: "read", content: [{ type: "text", text }], details, isError: false, timestamp: Date.now() };
+  const id = host.manager.appendMessage(result);
+  const proposal = await host.runner.emitBoundary({
+    type: "turn_end", turnIndex: 0, outcome: "completed", message, toolResults: [result],
+    messageEntryId, toolResultEntryIds: [id],
+  }, (drafts) => contextPreview(host.manager, drafts));
+  assert.equal(proposal.valid, true);
+  appendDrafts(host.manager, proposal.entries);
+  return id;
+}
+
+test("planner and frame worker can produce, assess, consume, throw and replan with an exact artifact", async () => {
+  const host = await setup();
+  const { manager, runner, tools } = host;
+  let n = 0;
+  const call = async (name, input) => {
+    const tool = tools.get(name);
+    const output = await tool.execute(`flow-${++n}`, validateToolArguments(tool, { name, arguments: input }), undefined, undefined, runner.createContext());
+    return JSON.parse(output.content[0].text);
+  };
+  const branchState = () => manager.getBranch().findLast((entry) => entry.customType === "pi-compass-v2.goalrun").data;
+  const approve = async () => {
+    const candidate = branchState();
+    const { id, question, questionnaire } = candidate.plan.approvalRequest;
+    const bound = bindDagApprovalQuestionnaire(candidate, { questions: [questionnaire] }, `question-${id}`, `call-${id}`);
+    assert.equal(bound.bound, true);
+    const { state } = captureHumanDecision(bound.state, {
+      source: "ask_user_question", sourceEntryId: `question-${id}`, sourceCallId: `call-${id}`,
+      details: { answers: [{ questionIndex: 0, question, kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION], preview: questionnaire.options[0].preview }] },
+    });
+    assert.ok(state.plan.approval);
+    manager.appendCustomEntry("pi-compass-v2.goalrun", state);
+    await runner.emit({ type: "session_start" });
+  };
+  const view = () => call("compass_state", { view: "plan" });
+  const node = (id, title, extra = {}) => ({ id, title, acceptance: "Observable evidence", ...extra });
+  await call("compass_goal", { action: "set", current: "Document an observed route", constraints: [], criteria: ["Route is documented"], sources: [humanSourceRef(manager.getBranch(), latestHumanSource(manager.getBranch()))] });
+  await call("compass_plan", { action: "define", tasks: [node("a", "Produce observation"), node("b", "Consume observation", { fromTasks: ["a"] }), node("c", "Record output", { dependsOn: ["b"] })] });
+  await approve();
+  const claim = await host.turn({ action: "call", taskId: "a" }, { apply: false });
+  assert.equal((await view()).tasks[0].status, "pending", "a queued frame does not claim the node");
+  appendDrafts(manager, claim.entries);
+  await runner.emitContext(manager.buildSessionProjection().messages);
+  assert.equal((await view()).tasks[0].status, "in_progress");
+  await host.turn({ action: "remember", text: "ROUTE_OBSERVATION", caveats: ["Local evidence only."], lifetime: "session" });
+  const list = await call("compass_state", { view: "retained" });
+  const memory = list.retained.find((hit) => hit.text === "ROUTE_OBSERVATION");
+  assert.ok(memory);
+  const returned = await host.turn({ action: "return", outcome: { status: "done", evidence: "Observed route from local fixture" }, exportSources: [memory.ref] }, { apply: false });
+  assert.equal((await view()).tasks[0].status, "in_progress", "queued return does not settle the node");
+  appendDrafts(manager, returned.entries);
+  await runner.emitContext(manager.buildSessionProjection().messages);
+  const produced = (await view()).tasks[0];
+  assert.equal(produced.status, "done");
+  assert.equal(produced.artifacts.length, 1);
+  assert.ok(!(await view()).ready.includes("b"), "a returned artifact is not a semantic pass");
+  await call("compass_plan", { action: "assess", taskId: "a", status: "pass", evidence: "Compared the route against the approved definition", caveats: ["No provider check."] });
+  await host.turn({ action: "call", taskId: "b" });
+  assert.equal((await view()).tasks[1].status, "in_progress");
+  assert.match(modelText(manager), /ROUTE_OBSERVATION/);
+  assert.match(modelText(manager), /Local evidence only/);
+  assert.match(modelText(manager), /No provider check/);
+  await host.turn({ action: "return", outcome: { status: "throw", reason: "Consumer scope was wrong", evidence: "Local route metadata contradicts the approved target", sideEffects: "None observed" } });
+  const stopped = await view();
+  assert.equal(stopped.stopped.taskId, "b");
+  assert.equal(stopped.tasks[2].status, "pending");
+  assert.deepEqual(stopped.ready, []);
+  await call("compass_plan", { action: "patch", upsertTasks: [{ id: "b", title: "Use the corrected local consumer", fromTasks: [], inputRefs: produced.artifacts }] });
+  await approve();
+  await host.turn({ action: "call", taskId: "b" });
+  assert.equal((await view()).tasks[1].status, "in_progress");
+  assert.match(modelText(manager), /ROUTE_OBSERVATION/);
+  await host.turn({ action: "return", outcome: { status: "done", evidence: "Correct consumer used the original artifact" } });
+  assert.equal((await view()).tasks[1].status, "done");
+  assertPaired(manager);
+  assert.deepEqual(host.errors, []);
+});
+
+test("append keeps an exact repeated read at the tail without rewriting raw history", async () => {
+  const host = await setup();
+  const payload = "READ_PAYLOAD_SAME\nsecond line\n";
+  const first = await appendNativeRead(host, { path: "src/routes.mjs" }, payload);
+  const raw = structuredClone(host.manager.getEntry(first));
+  await appendNativeRead(host, { path: "src/routes.mjs" }, payload);
+  assert.equal(modelText(host.manager).match(/READ_PAYLOAD_SAME/g)?.length, 1);
+  assert.match(modelText(host.manager), /Identical native read payload is retained/);
+  await appendNativeRead(host, { path: "src/other.mjs" }, payload);
+  assert.equal(modelText(host.manager).match(/READ_PAYLOAD_SAME/g)?.length, 2, "equal bytes from another source are not coalesced");
+  assert.deepEqual(host.manager.getEntry(first), raw);
+  assertPaired(host.manager);
+  assert.deepEqual(host.errors, []);
+});
+
+test("only a complete canonical Skill read is automatically pinned in its frame", async () => {
+  const host = await setup();
+  await host.turn({ action: "call", task: "Read the local Skill" });
+  const frame = restoreContextState(host.manager.getBranch()).frames.at(-1).id;
+  await appendNativeRead(host, { path: "skills/custom/SKILL.md", limit: 2 }, "PARTIAL");
+  const full = await appendNativeRead(host, { path: "skills/custom/SKILL.md" }, "COMPLETE_RULES");
+  const pins = restoreContextState(host.manager.getBranch()).pins;
+  assert.deepEqual(pins.map(({ id, scope }) => ({ id, scope })), [{ id: full, scope: frame }]);
+  await host.turn({ action: "return" });
+  assert.deepEqual(restoreContextState(host.manager.getBranch()).pins, []);
+  assert.deepEqual(host.errors, []);
 });
 
 test("explicit active Skill retention survives native compaction and frames, then retires", async () => {

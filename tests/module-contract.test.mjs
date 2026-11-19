@@ -16,22 +16,22 @@ test("Agent JSON contains only the selected payload, never merged internal recei
 });
 
 test("GoalRun reports the current API and release identity", () => {
-  assert.equal(goalRun.GOAL_RUN_API_VERSION, 9);
+  assert.equal(goalRun.GOAL_RUN_API_VERSION, 10);
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   assert.equal(goalRun.GOAL_RUN_RELEASE, manifest.version);
 });
 
-test("Compass exposes exactly the eight fixed tools with closed object schemas", () => {
+test("Compass exposes exactly the seven fixed tools with closed object schemas", () => {
   const { toolSchemas, COMPASS_TOOL_NAMES } = toolSchema;
   assert.deepEqual(COMPASS_TOOL_NAMES, [
     "compass_goal", "compass_state", "compass_context_search", "compass_context",
-    "compass_plan", "compass_acceptance", "compass_route", "runtime_guard",
+    "compass_plan", "compass_acceptance", "runtime_guard",
   ]);
   for (const [name, schema] of Object.entries(toolSchemas)) {
     assert.equal(schema.type, "object", `${name} must be a root object for provider compatibility`);
     assert.equal(schema.additionalProperties, false, `${name} rejects unlisted fields`);
   }
-  assert.deepEqual(toolSchemas.compass_goal.properties.action.enum, ["set", "decide", "checkpoint"]);
-  assert.deepEqual(toolSchemas.compass_state.properties.view.enum, ["summary", "goal", "plan", "acceptance", "history", "route", "execution"]);
+  assert.deepEqual(toolSchemas.compass_goal.properties.action.enum, ["set", "update", "decide", "checkpoint"]);
+  assert.deepEqual(toolSchemas.compass_state.properties.view.enum, ["summary", "goal", "plan", "acceptance", "history", "execution", "retained"]);
 });

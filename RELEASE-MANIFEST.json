@@ -1,7 +1,7 @@
 {
   "name": "pi-compass-v2",
   "version": "0.10.0",
-  "goalRunSchemaVersion": 9,
+  "goalRunSchemaVersion": 10,
   "contextSchemaVersion": 5,
   "runtimeGuardSchemaVersion": 1,
   "minimumPiVersion": "1.5.2",

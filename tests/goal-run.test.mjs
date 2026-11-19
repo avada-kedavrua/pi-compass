@@ -25,18 +25,9 @@ import {
   renewDagApprovalRequest,
   dagApprovalStatus,
   recordTaskAssessment,
-  createRouteSet,
-  bindRouteSetQuestionnaire,
-  recordRouteSelection,
-  proposeRouteExploration,
-  registerCompetitorRun,
-  recordCompetitorResult,
-  acceptRouteResult,
-  updateCompetitorCancellation,
-  routeSetStatus,
 } from "../src/goal-run.mjs";
 import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
-import { createOrRevisePlan, emptyDagState, readyTasks, updateTasks, taskAssessmentIsCurrent } from "../src/dag-core.mjs";
+import { emptyDagState, readyTasks, updateTasks, taskAssessmentIsCurrent } from "../src/dag-core.mjs";
 
 const criteria = ["API request returns expected data", "Started processes are cleaned up"];
 const tasks = [
@@ -80,197 +71,6 @@ function completeAndAssess(state, taskId, evidence) {
   state = transitionTasks(state, "done", [{ id: taskId, evidence }], updateTasks).state;
   return recordTaskAssessment(state, { taskId, status: "pass", evidence: `Assessment against approved criterion: ${evidence}`, caveats: [], unresolvedCaveats: [] }).state;
 }
-function routeState() {
-  const state = withGoal("Goal: compare two implementation strategies", ["Shared smoke test passes"]);
-  return createRouteSet(state, { expectedStateVersion: 0, baselineRef: "git:baseline", criteria: ["AC1"], routes: [{ routeId: "routeA", summary: "Use the existing adapter" }, { routeId: "routeB", summary: "Replace the adapter" }] }).state;
-}
-function humanSelectRoute(state, routeId) {
-  const request = state.routeSet.selectionRequest;
-  const sourceEntryId = `route-entry-${request.id}`;
-  state = bindRouteSetQuestionnaire(state, { expectedStateVersion: state.routeSet.stateVersion,
-    questionnaire: { questions: [request.questionnaire] } }, sourceEntryId, `route-call-${request.id}`).state;
-  return recordRouteSelection(state, {
-    expectedStateVersion: state.routeSet.stateVersion,
-    selectionRequestId: request.id,
-    sourceEntryId,
-    sourceCallId: `route-call-${request.id}`,
-    details: { answers: [{ preview: request.questionnaire.options.find((option) => option.label === routeId).preview }] },
-    questionnaire: { outcome: "answered", answers: [{ questionIndex: 0, question: request.questionnaire.question,
-      answer: routeId, kind: "option" }] },
-  }).state;
-}
-function authorizeRoutes(state) {
-  state = proposeRouteExploration(state, { expectedStateVersion: state.routeSet.stateVersion,
-    scope: "read-only evidence only", budget: 4, routeIds: ["routeA", "routeB"] }).state;
-  const request = state.routeSet.selectionRequest;
-  const sourceEntryId = `route-entry-${request.id}`;
-  state = bindRouteSetQuestionnaire(state, { expectedStateVersion: state.routeSet.stateVersion,
-    questionnaire: { questions: [request.questionnaire] } }, sourceEntryId, `route-call-${request.id}`).state;
-  return recordRouteSelection(state, {
-    expectedStateVersion: state.routeSet.stateVersion,
-    selectionRequestId: request.id,
-    sourceEntryId,
-    sourceCallId: `route-call-${request.id}`,
-    questionnaire: { outcome: "answered", answers: [{ questionIndex: 0, question: request.questionnaire.question,
-      answer: "parallel_exploration", kind: "option" }] },
-    details: { answers: [{ preview: request.questionnaire.options.find((option) => option.label === "parallel_exploration").preview }] },
-  }).state;
-}
-
-test("RouteSet rejects unauthorized parallel exploration", () => {
-  const state = routeState();
-  assert.throws(() => registerCompetitorRun(state, {
-    expectedStateVersion: 1, runId: "run-a", routeId: "routeA", baselineRef: "git:baseline", correlationId: "corr-a",
-  }), /not explicitly Human-authorized/);
-  assert.equal(routeSetStatus(state).exploration.authorized, false);
-});
-
-test("exploration proposal is not authorization and ignores unrelated Human decisions", () => {
-  let state = captureHumanDecision(routeState(), { source: "human", text: "Use the short summary for this discussion." }).state;
-  const proposed = proposeRouteExploration(state, { expectedStateVersion: 1, sourceDecisionId: state.humanDecisions[0].id,
-    scope: "read-only evidence only", budget: 4, routeIds: ["routeA", "routeB"] });
-  state = proposed.state;
-  assert.equal(state.routeSet.exploration.authorized, false);
-  assert.equal(state.routeSet.exploration.scope, "read-only evidence only");
-  assert.notEqual(proposed.selectionRequest.id, "RS1-select");
-  assert.equal(proposed.selectionRequest.questionnaire.options.length, 3);
-  assert.match(proposed.selectionRequest.questionnaire.options.at(-1).preview, /Current Goal v1/);
-  assert.match(proposed.selectionRequest.questionnaire.options.at(-1).preview, /baseline=git:baseline/);
-  assert.match(proposed.selectionRequest.questionnaire.options.at(-1).preview, /Shared acceptance criteria/);
-  assert.match(proposed.selectionRequest.questionnaire.options.at(-1).preview, /Maximum competitor runs: 4/);
-  assert.match(proposed.selectionRequest.questionnaire.options.at(-1).preview, /routeA/);
-  assert.match(proposed.selectionRequest.questionnaire.options.at(-1).preview, /routeB/);
-  assert.throws(() => registerCompetitorRun(state, { expectedStateVersion: 2, runId: "run-a", routeId: "routeA",
-    baselineRef: "git:baseline", correlationId: "corr-a" }), /not explicitly Human-authorized/);
-});
-
-test("exploration proposal scope, budget and route list are bound to a fresh four-option questionnaire", () => {
-  let state = plannedGoal("Compare three approaches");
-  state = createRouteSet(state, { expectedStateVersion: 0, baselineRef: "git:baseline", criteria: ["AC1"], routes: ["A", "B", "C"].map((routeId) => ({ routeId, summary: `Approach ${routeId}` })) }).state;
-  assert.equal(state.routeSet.selectionRequest.questionnaire.options.length, 3);
-  const initialRequest = state.routeSet.selectionRequest;
-  const bareQuestion = bindRouteSetQuestionnaire(state, { expectedStateVersion: 1, questionnaire: initialRequest.questionnaire }, "bare-entry");
-  assert.equal(bareQuestion.bound, false, "bare Q is not the native { questions: [Q] } payload");
-  assert.equal(bindRouteSetQuestionnaire(state, { expectedStateVersion: 1, questionnaire: { questions: [initialRequest.questionnaire] } }, "missing-call").bound, false, "route binding requires the native call identity");
-  const initialRequestId = state.routeSet.selectionRequest.id;
-  state = proposeRouteExploration(state, { expectedStateVersion: 1, scope: "read-only checks", budget: 6, routeIds: ["A", "C"] }).state;
-  const firstRequest = state.routeSet.selectionRequest;
-  assert.equal(firstRequest.questionnaire.options.length, 4);
-  assert.match(firstRequest.questionnaire.options.at(-1).preview, /\[included\] A/);
-  assert.match(firstRequest.questionnaire.options.at(-1).preview, /\[not included\] B/);
-  assert.match(firstRequest.questionnaire.options.at(-1).preview, /\[included\] C/);
-  state = proposeRouteExploration(state, { expectedStateVersion: 2, scope: "different exact scope", budget: 3, routeIds: ["A", "B"] }).state;
-  assert.notEqual(state.routeSet.selectionRequest.id, firstRequest.id);
-  assert.notEqual(firstRequest.id, initialRequestId);
-  assert.match(state.routeSet.selectionRequest.questionnaire.options.at(-1).preview, /different exact scope/);
-  assert.match(state.routeSet.selectionRequest.questionnaire.options.at(-1).preview, /Maximum competitor runs: 3/);
-  assert.equal(bindRouteSetQuestionnaire(state, { expectedStateVersion: 3,
-    questionnaire: { questions: [firstRequest.questionnaire] } }, "stale-entry").bound, false);
-  assert.throws(() => recordRouteSelection(state, { expectedStateVersion: 3, selectionRequestId: firstRequest.id,
-    sourceEntryId: "stale-entry", questionnaire: { outcome: "answered", answers: [] } }), /identity is stale/);
-  const changed = structuredClone(state);
-  changed.routeSet.exploration.scope = "tampered after preview";
-  assert.equal(bindRouteSetQuestionnaire(changed, { expectedStateVersion: 3,
-    questionnaire: { questions: [changed.routeSet.selectionRequest.questionnaire] } }, "tampered-entry").bound, false);
-});
-
-test("route questionnaire answer must correlate to the exact question and contain one note-free option", () => {
-  const base = proposeRouteExploration(routeState(), { expectedStateVersion: 1, scope: "read-only", budget: 2,
-    routeIds: ["routeA", "routeB"] }).state;
-  const tryAnswer = (questionnaire) => {
-    let state = structuredClone(base);
-    const request = state.routeSet.selectionRequest;
-    const sourceEntryId = `entry-${request.id}`;
-    state = bindRouteSetQuestionnaire(state, { expectedStateVersion: 2, questionnaire: { questions: [request.questionnaire] } }, sourceEntryId, "route-answer-call").state;
-    return recordRouteSelection(state, { expectedStateVersion: 2, selectionRequestId: request.id, sourceEntryId, sourceCallId: "route-answer-call", questionnaire, details: { answers: [{ preview: request.questionnaire.options.at(-1).preview }] } });
-  };
-  const answer = { questionIndex: 0, question: base.routeSet.selectionRequest.questionnaire.question,
-    kind: "option", answer: "parallel_exploration", selected: ["parallel_exploration"] };
-  for (const invalid of [
-    { outcome: "answered", answers: [{ ...answer, questionIndex: 1 }] },
-    { outcome: "answered", answers: [{ ...answer, notes: "but also do something else" }] },
-    { outcome: "answered", globalNote: "add an unapproved extra scope", answers: [answer] },
-    { outcome: "answered", answers: [{ ...answer, selected: ["parallel_exploration", "routeA"] }] },
-  ]) assert.throws(() => tryAnswer(invalid), /clear, note-free, correlated structured Human answer/);
-});
-
-test("route selection answers require both the persisted entry and call identity", () => {
-  const state = routeState();
-  const request = state.routeSet.selectionRequest;
-  const sourceEntryId = "route-question-entry";
-  const sourceCallId = "route-question-call";
-  const bound = bindRouteSetQuestionnaire(state, { expectedStateVersion: state.routeSet.stateVersion,
-    questionnaire: { questions: [request.questionnaire] } }, sourceEntryId, sourceCallId).state;
-  const answer = { outcome: "answered", answers: [{ questionIndex: 0, question: request.questionnaire.question,
-    answer: "routeA", selected: ["routeA"], kind: "option" }] };
-  const input = { expectedStateVersion: bound.routeSet.stateVersion, selectionRequestId: request.id, sourceEntryId,
-    sourceCallId: "different-call", questionnaire: answer };
-  assert.throws(() => recordRouteSelection(bound, input), /identity is stale/);
-  assert.equal(bound.routeSet.selectionRequest.status, "presented");
-});
-
-test("RouteSet bounds alternatives at three and direct select cannot bypass the Human choice", () => {
-  const state = routeState();
-  assert.throws(() => createRouteSet(plannedGoal(), { expectedStateVersion: 0, baselineRef: "git:b", criteria: ["AC1"], routes: ["A", "B", "C", "D"].map((routeId) => ({ routeId, summary: routeId })) }), /2..3 alternatives/);
-  assert.throws(() => acceptRouteResult(state, { expectedStateVersion: 1, routeId: "routeA" }), /passing every shared criterion/);
-  assert.equal(state.routeSet.selectedRouteId, null);
-  assert.equal(humanSelectRoute(state, "routeA").routeSet.selectedRouteId, "routeA");
-});
-
-test("RouteSet rejects duplicate normalized criteria and reserved route IDs without mutation", () => {
-  const base = plannedGoal("Goal: compare alternatives");
-  const common = { expectedStateVersion: 0, baselineRef: "git:baseline", routes: [{ routeId: "A", summary: "A" }, { routeId: "B", summary: "B" }] };
-  assert.throws(() => createRouteSet(base, { ...common, criteria: ["AC1", "AC1"] }), /Duplicate shared acceptance criterion/);
-  assert.throws(() => createRouteSet(base, { ...common, criteria: ["AC1"], routes: [{ routeId: "parallel_exploration", summary: "A" }, { routeId: "B", summary: "B" }] }), /reserved/);
-  assert.equal(base.routeSet, null);
-});
-
-test("RouteSet preserves exact competitor identity and shared acceptance evidence", () => {
-  let state = authorizeRoutes(routeState());
-  state = registerCompetitorRun(state, { expectedStateVersion: 3, runId: "run-a", routeId: "routeA", baselineRef: "git:baseline", correlationId: "corr-a" }).state;
-  assert.throws(() => recordCompetitorResult(state, { expectedStateVersion: 4, runId: "run-a", routeId: "routeB", correlationId: "corr-a", criteria: [{ id: "AC1", status: "pass", evidence: "ok" }] }), /Unknown competitor run/);
-  const result = recordCompetitorResult(state, { expectedStateVersion: 4, runId: "run-a", routeId: "routeA", correlationId: "corr-a", criteria: [{ id: "AC1", status: "pass", evidence: "shared smoke test passed" }] });
-  assert.equal(result.acceptanceGate, "passed");
-  assert.equal(result.state.routeSet.competitorRuns[0].result.criteria[0].id, "AC1");
-});
-
-test("RouteSet replaces winning evidence safely and rejects nonterminal cancellation outcomes", () => {
-  let state = authorizeRoutes(routeState());
-  for (const [runId, routeId] of [["run-a", "routeA"], ["run-b", "routeB"], ["run-c", "routeA"]]) {
-    state = registerCompetitorRun(state, { expectedStateVersion: state.routeSet.stateVersion, runId, routeId, baselineRef: "git:baseline", correlationId: `corr-${runId}` }).state;
-  }
-  state = recordCompetitorResult(state, { expectedStateVersion: state.routeSet.stateVersion, runId: "run-a", routeId: "routeA", correlationId: "corr-run-a", criteria: [{ id: "AC1", status: "pass", evidence: "pass" }] }).state;
-  state = acceptRouteResult(state, { expectedStateVersion: state.routeSet.stateVersion, routeId: "routeA" }).state;
-  state = recordCompetitorResult(state, { expectedStateVersion: state.routeSet.stateVersion, runId: "run-a", routeId: "routeA", correlationId: "corr-run-a", criteria: [{ id: "AC1", status: "fail", evidence: "replacement failed" }] }).state;
-  state = recordCompetitorResult(state, { expectedStateVersion: state.routeSet.stateVersion, runId: "run-b", routeId: "routeB", correlationId: "corr-run-b", criteria: [{ id: "AC1", status: "pass", evidence: "pass" }] }).state;
-  assert.equal(state.routeSet.winningRouteId, null);
-  assert.throws(() => updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "request", runId: "run-b", routeId: "routeB", correlationId: "corr-run-b", requestId: "cancel" }), /current accepted winning route/);
-  state = acceptRouteResult(state, { expectedStateVersion: state.routeSet.stateVersion, routeId: "routeB" }).state;
-  state = updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "request", runId: "run-c", routeId: "routeA", correlationId: "corr-run-c", requestId: "cancel" }).state;
-  assert.throws(() => recordCompetitorResult(state, { expectedStateVersion: state.routeSet.stateVersion, runId: "run-c", routeId: "routeA", correlationId: "corr-run-c", criteria: [{ id: "AC1", status: "pass", evidence: "late result" }] }), /cancellation is in progress/);
-  const before = structuredClone(state);
-  assert.throws(() => updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "terminal", runId: "run-c", routeId: "routeA", correlationId: "corr-run-c", requestId: "cancel", terminalStatus: "running" }), /documented native terminal outcome/);
-  assert.deepEqual(state, before);
-  assert.throws(() => updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "terminal", runId: "run-c", routeId: "routeA", correlationId: "corr-run-c", requestId: "cancel", terminalStatus: "invalid_request" }), /documented native terminal outcome/);
-  state = updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "terminal", runId: "run-c", routeId: "routeA", correlationId: "corr-run-c", requestId: "cancel", terminalStatus: "cancelled" }).state;
-  assert.equal(state.routeSet.competitorRuns.find((run) => run.runId === "run-c").status, "cancelled");
-  assert.throws(() => updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "unknown", runId: "run-c", routeId: "routeA", correlationId: "corr-run-c", requestId: "cancel" }), /out of order/);
-});
-
-test("RouteSet cancellation is acceptance-gated and tracks unknown termination", () => {
-  let state = authorizeRoutes(routeState());
-  state = registerCompetitorRun(state, { expectedStateVersion: 3, runId: "run-a", routeId: "routeA", baselineRef: "git:baseline", correlationId: "corr-a" }).state;
-  state = registerCompetitorRun(state, { expectedStateVersion: 4, runId: "run-b", routeId: "routeB", baselineRef: "git:baseline", correlationId: "corr-b" }).state;
-  assert.throws(() => updateCompetitorCancellation(state, { expectedStateVersion: 5, action: "request", runId: "run-b", routeId: "routeB", correlationId: "corr-b", requestId: "cancel-1" }), /acceptance-gated/);
-  state = recordCompetitorResult(state, { expectedStateVersion: 5, runId: "run-a", routeId: "routeA", correlationId: "corr-a", criteria: [{ id: "AC1", status: "pass", evidence: "accepted route evidence" }] }).state;
-  state = acceptRouteResult(state, { expectedStateVersion: 6, routeId: "routeA" }).state;
-  state = updateCompetitorCancellation(state, { expectedStateVersion: 7, action: "request", runId: "run-b", routeId: "routeB", correlationId: "corr-b", requestId: "cancel-1" }).state;
-  state = updateCompetitorCancellation(state, { expectedStateVersion: 8, action: "unknown", runId: "run-b", routeId: "routeB", correlationId: "corr-b", requestId: "cancel-1" }).state;
-  assert.equal(state.routeSet.competitorRuns.find((run) => run.runId === "run-b").status, "unknown");
-  assert.equal(state.routeSet.competitorRuns.find((run) => run.runId === "run-b").cancellation.phase, "unknown");
-  assert.throws(() => updateCompetitorCancellation(state, { expectedStateVersion: state.routeSet.stateVersion, action: "request", runId: "run-b", routeId: "routeB", correlationId: "corr-b", requestId: "cancel-2" }), /unknown cancellation termination/);
-});
-
 test("approval correlation and questionnaire deduplication use both persisted identities", () => {
   let state = revisePlanState(plannedGoal(), { tasks }).state;
   const request = state.plan.approvalRequest;
@@ -307,81 +107,13 @@ test("questionnaire failures correlate and deduplicate by persisted entry and ca
 test("confirmed terminal execution facts reconcile despite stale approval without advancing dependencies", () => {
   let state = withPlan(withGoal());
   state = transitionTasks(state, "start", [{ id: "api" }], updateTasks).state;
-  state.plan.execution = { requestId: "native-batch", status: "unknown", taskIds: ["api"], planRevision: state.plan.revision };
+  state.plan.executions = [{ requestId: "native-batch", status: "unknown", taskIds: ["api"], planRevision: state.plan.revision, results: [{ id: "api", status: "unknown" }] }];
   state = observeHumanInput(state, "followup-human-entry").state;
   assert.equal(dagApprovalStatus(state).approved, false);
   const reconciled = reconcileUnknownExecutionTasks(state, "native-batch", [{ id: "api", status: "done", evidence: "native terminal result" }], updateTasks).state;
   assert.equal(reconciled.plan.tasks.find((task) => task.id === "api").status, "done");
   assert.equal(reconciled.plan.tasks.find((task) => task.id === "ui").status, "pending");
   assert.throws(() => transitionTasks(reconciled, "start", [{ id: "ui" }], updateTasks), /current correlated Human approval/);
-});
-
-test("selected RouteSet route stays isolated from the DAG until the Agent creates one", () => {
-  let state = routeState();
-  state = humanSelectRoute(state, "routeA");
-  assert.equal(state.plan.tasks.length, 0);
-  assert.equal(state.routeSet.selectedRouteId, "routeA");
-  assert.equal(state.plan.routeId, undefined);
-});
-
-test("selecting a route rebinds an existing unscoped DAG and requires fresh approval", () => {
-  for (const structured of [false, true]) {
-    let state = withPlan(withGoal());
-    state = createRouteSet(state, { expectedStateVersion: 0, baselineRef: "git:baseline", criteria: ["AC1"], routes: [{ routeId: "routeA", summary: "Existing approach" }, { routeId: "routeB", summary: "Alternative" }] }).state;
-    assert.equal(dagApprovalStatus(state).approved, false);
-    const before = state.plan.revision;
-    if (structured) {
-      const request = state.routeSet.selectionRequest;
-      state = bindRouteSetQuestionnaire(state, { expectedStateVersion: 1, questionnaire: { questions: [request.questionnaire] } }, "route-entry", "route-call").state;
-      state = recordRouteSelection(state, { expectedStateVersion: 1, selectionRequestId: request.id, sourceEntryId: "route-entry", sourceCallId: "route-call", details: { answers: [{ preview: request.questionnaire.options[0].preview }] },
-        questionnaire: { outcome: "answered", answers: [{ questionIndex: 0, question: request.questionnaire.question, kind: "option", answer: "routeA", selected: ["routeA"] }] } }).state;
-    } else state = humanSelectRoute(state, "routeA");
-    assert.equal(state.plan.routeId, "routeA");
-    assert.ok(state.plan.revision > before);
-    assert.equal(state.plan.approval, null);
-    assert.throws(() => transitionTasks(state, "start", [{ id: "api" }], updateTasks), /approval/);
-    state = approvePlan(state);
-    assert.equal(dagApprovalStatus(state).approved, true);
-    assert.equal(transitionTasks(state, "start", [{ id: "api" }], updateTasks).state.plan.tasks[0].status, "in_progress");
-  }
-});
-
-test("Human route switching resets route-bound DAG evidence and requires fresh approval", () => {
-  let state = withPlan(withGoal());
-  state = createRouteSet(state, { expectedStateVersion: 0, baselineRef: "git:baseline", criteria: ["AC1"], routes: [{ routeId: "routeA", summary: "Original approach" }, { routeId: "routeB", summary: "Alternative" }] }).state;
-  state = humanSelectRoute(state, "routeA");
-  state = approvePlan(state);
-  state = completeAndAssess(state, "api", "existing route A evidence");
-  const revision = state.plan.revision;
-  assert.throws(() => acceptRouteResult(state, { expectedStateVersion: 2, routeId: "routeB" }), /passing every shared criterion/);
-  state = proposeRouteExploration(state, { expectedStateVersion: 2, scope: "read-only comparison", budget: 2,
-    routeIds: ["routeA", "routeB"] }).state;
-  state = humanSelectRoute(state, "routeB");
-  assert.equal(state.routeSet.selectedRouteId, "routeB");
-  assert.equal(state.plan.routeId, "routeB");
-  assert.ok(state.plan.revision > revision);
-  assert.equal(state.plan.tasks.find((task) => task.id === "api").status, "pending");
-  assert.equal(state.plan.tasks.find((task) => task.id === "api").evidence, "");
-  assert.equal(state.plan.approval, null);
-  assert.equal(state.plan.approvalRequest.status, "awaiting_questionnaire");
-  assert.throws(() => transitionTasks(state, "start", [{ id: "api" }], updateTasks), /approval/);
-});
-
-test("route switching refuses to reset an unresolved execution", () => {
-  let state = routeState();
-  state = humanSelectRoute(state, "routeA");
-  state = proposeRouteExploration(state, { expectedStateVersion: 2, scope: "read-only", budget: 2,
-    routeIds: ["routeA", "routeB"] }).state;
-  state.plan.tasks = [{ id: "work", title: "Work", status: "pending", dependsOn: [], acceptance: "done", executor: "parent", writeScope: "read-only" }];
-  state.plan.routeId = "routeA";
-  state.plan.execution = { requestId: "batch-1", taskIds: ["work"], planRevision: state.plan.revision,
-    stateVersion: state.stateRevision, status: "running" };
-  const request = state.routeSet.selectionRequest;
-  const sourceEntryId = `entry-${request.id}`;
-  state = bindRouteSetQuestionnaire(state, { expectedStateVersion: 3, questionnaire: { questions: [request.questionnaire] } }, sourceEntryId, "route-call").state;
-  assert.throws(() => recordRouteSelection(state, { expectedStateVersion: 3, selectionRequestId: request.id, sourceEntryId, sourceCallId: "route-call", details: { answers: [{ preview: request.questionnaire.options.find((option) => option.label === "routeB").preview }] },
-    questionnaire: { outcome: "answered", answers: [{ questionIndex: 0, question: request.questionnaire.question,
-      kind: "option", answer: "routeB", selected: ["routeB"] }] } }), /unresolved DAG execution/);
 });
 
 test("ask-user-question choices are kept as authoritative decisions and retained as authoritative decisions", () => {
@@ -533,7 +265,7 @@ test("DAG is optional for Goal continuity", () => {
 });
 
 test("GoalRun rejects obsolete schema versions instead of migrating or silently reinterpreting them", () => {
-  assert.throws(() => normalizeGoalRunState({ schemaVersion: 8, goal: { original: "obsolete" }, plan: emptyDagState() }), /Unsupported.*schema/);
+  assert.throws(() => normalizeGoalRunState({ schemaVersion: 9, goal: { original: "obsolete" }, plan: emptyDagState() }), /Unsupported.*schema/);
 });
 
 test("new evidence can explicitly supersede a prior decision without deleting its history", () => {
@@ -956,10 +688,10 @@ test("same-text constraint changes preserve evidence but invalidate approval; re
   assert.equal(changed.goal.criteria[0].status, "reported_pass");
   assert.equal(changed.goal.criteria[0].evidence, "verified");
   assert.equal(dagApprovalStatus(changed).approved, false);
-  changed.plan.execution = { requestId: "native-unknown", status: "unknown", taskIds: ["api"] };
+  changed.plan.executions = [{ requestId: "native-unknown", status: "unknown", taskIds: ["api"] }];
   const before = structuredClone(changed);
   assert.throws(() => setGoal(changed, { expectedVersion: 1, current: "Replacement",
-    sourceIds: changed.goal.sourceIds, constraints: [] }), /execution or competitor identity is unresolved/);
+    sourceIds: changed.goal.sourceIds, constraints: [] }), /work is active or unresolved/);
   assert.deepEqual(changed, before);
 });
 

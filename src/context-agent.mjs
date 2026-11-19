@@ -1,4 +1,4 @@
-import { sourceIndex, searchContext } from "./context-core.mjs";
+import { sourceIndex, searchContext, retentionForGoal, visiblePins } from "./context-core.mjs";
 import { currentValue, contextRef, contextSelection } from "./context-values.mjs";
 import { resolveSource } from "./context-retrieval.mjs";
 
@@ -15,7 +15,7 @@ export function agentSearch(branch, boundary, state, params = {}) {
     result = { frame: state.frames.at(-1)?.id ?? "root", truncated: resolved.length > limit, hits: resolved.slice(0, limit).map((item) => {
       const blocks = typeof item.content === "string" ? [{ type: "text", text: item.content }] : item.content;
       const text = blocks.filter((block) => block.type === "text").map((block) => block.text).join("\n");
-      return { ...item, snippet: text.slice(0, 600), truncated: text.length > 600, pinned: state.pins.some((pin) => pin.key === item.binding) };
+      return { ...item, snippet: text.slice(0, 600), truncated: text.length > 600, pinned: visiblePins(state).some((pin) => pin.key === item.binding) };
     }) };
   } else result = searchContext(branch, boundary, state, query);
   const hits = result.hits.map((hit) => {
@@ -39,6 +39,12 @@ export function agentSearch(branch, boundary, state, params = {}) {
     return item;
   });
   return { frame: result.frame, hits, ...(result.truncated ? { incomplete: true } : {}) };
+}
+
+export function retainedContext(branch, boundary, state, goalVersion, limit) {
+  const refs = [...new Set(visiblePins(retentionForGoal(state, goalVersion)).map((pin) => contextRef({ binding: pin.key, version: state.values[pin.key].version })))];
+  const result = agentSearch(branch, boundary, state, { refs, limit: Math.min(limit, 16) });
+  return { frame: result.frame, retained: result.hits, ...(result.incomplete ? { total: refs.length } : {}) };
 }
 
 /** Translate intent once. Agent never transports binding/version/revision tuples. */

@@ -65,4 +65,4 @@ bash scripts/run-live-acceptance.sh
 
 The full test suite should now resolve TypeBox from the installed Pi 1.4.0 host. The launcher must pass the 0.84.0 contract and proposed configuration checks before starting isolated Pi. Run `/compass-live-acceptance` in the TUI and require the generated JSON report to say `PASS`.
 
-Then run the four questionnaire checks in `handoff.md`. Do not claim v0.9.1 live acceptance until the exact package bytes pass those user-side checks.
+Also verify that an exact approval authorizes the displayed plan and that partial, declined, or UI-error results do not. Do not claim v0.9.1 live acceptance until the exact package bytes pass those user-side checks.

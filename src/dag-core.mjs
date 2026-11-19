@@ -15,11 +15,22 @@ export function emptyDagState() {
     planHistory: [],
     activity: [],
     executionHistory: [],
-    execution: null,
+    executions: [],
     executionDrift: null,
+    stopped: null,
     approvalRequest: null,
     approval: null,
   };
+}
+
+export function executionUnresolved(record) {
+  return ["dispatching", "running", "unknown"].includes(record?.status);
+}
+
+// Unresolved attempts are never evicted. Completion metrics have a separate bounded history.
+export function retainExecutions(records) {
+  const latestTerminal = records.findLast((record) => !executionUnresolved(record));
+  return records.filter((record) => executionUnresolved(record) || record === latestTerminal);
 }
 
 function text(value, field) {
@@ -55,6 +66,10 @@ function withStateDefaults(state) {
   };
 }
 
+export function taskDependencies(task) {
+  return [...new Set([...(task.dependsOn ?? []), ...(task.fromTasks ?? [])])];
+}
+
 function normalizeTask(raw, index) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`tasks[${index}] must be an object.`);
@@ -70,10 +85,16 @@ function normalizeTask(raw, index) {
     throw new Error(`tasks[${index}].dependsOn must be an array of task ids.`);
   }
   const normalizedDeps = [...new Set(dependsOn.map((dep) => dep.trim()))];
+  const fromTasks = raw.fromTasks ?? [];
+  const inputRefs = raw.inputRefs ?? [];
+  for (const list of [fromTasks, inputRefs]) {
+    if (!Array.isArray(list) || list.length > 8 || list.some((item) => typeof item !== "string" || !item.trim()) || new Set(list).size !== list.length) throw new Error(`Task ${id} has invalid or duplicate artifact inputs.`);
+  }
   const executor = raw.executor === undefined ? "parent" : raw.executor;
   if (!ALLOWED_EXECUTORS.has(executor)) {
     throw new Error(`tasks[${index}].executor must be one of: ${[...ALLOWED_EXECUTORS].join(", ")}.`);
   }
+  if (executor !== "parent" && (fromTasks.length || inputRefs.length)) throw new Error(`Task ${id}: artifact inputs currently require a same-session parent node.`);
   const agent = raw.agent === undefined ? "scout" : raw.agent;
   if (!ALLOWED_AGENTS.has(agent)) {
     throw new Error(`tasks[${index}].agent must be one of: ${[...ALLOWED_AGENTS].join(", ")}.`);
@@ -92,6 +113,7 @@ function normalizeTask(raw, index) {
     id,
     title,
     dependsOn: normalizedDeps,
+    ...(fromTasks.length ? { fromTasks } : {}), ...(inputRefs.length ? { inputRefs } : {}),
     acceptance,
     output: typeof raw.output === "string" ? raw.output.trim() : "",
     writeScope,
@@ -112,7 +134,7 @@ function assertAcyclic(tasks) {
   const children = new Map(tasks.map((task) => [task.id, []]));
 
   for (const task of tasks) {
-    for (const dep of task.dependsOn) {
+    for (const dep of taskDependencies(task)) {
       if (dep === task.id) throw new Error(`Task "${task.id}" cannot depend on itself.`);
       if (!byId.has(dep)) throw new Error(`Task "${task.id}" depends on unknown task "${dep}".`);
       indegree.set(task.id, indegree.get(task.id) + 1);
@@ -137,6 +159,7 @@ function taskSignature(task) {
   return JSON.stringify({
     title: task.title,
     dependsOn: [...(task.dependsOn ?? [])].sort(),
+    fromTasks: task.fromTasks ?? [], inputRefs: task.inputRefs ?? [],
     acceptance: task.acceptance,
     output: task.output ?? "",
     writeScope: task.writeScope ?? "",
@@ -198,7 +221,7 @@ export function createOrRevisePlan(currentState, input) {
   const preservedTasks = tasks.map((task) => {
     const old = oldById.get(task.id);
     if (sameGoal && old && taskSignature(old) === taskSignature(task)) {
-      return { ...task, status: old.status, evidence: old.evidence ?? "", reason: old.reason ?? "", assessment: old.assessment ?? null };
+      return { ...task, status: old.status, evidence: old.evidence ?? "", reason: old.reason ?? "", assessment: old.assessment ?? null, ...(old.artifacts?.length ? { artifacts: old.artifacts } : {}) };
     }
     if (old && (old.status !== "pending" || old.evidence || old.reason)) {
       return { ...task, reason: "Reset because this task's definition or dependencies changed during replanning." };
@@ -213,10 +236,11 @@ export function createOrRevisePlan(currentState, input) {
     invalidated = false;
     for (const task of preservedTasks) {
       if ((task.status === "done" || task.status === "in_progress")
-        && task.dependsOn.some((dep) => preservedById.get(dep)?.status !== "done")) {
+        && taskDependencies(task).some((dep) => preservedById.get(dep)?.status !== "done")) {
         task.status = "pending";
         task.evidence = "";
         task.assessment = null;
+        delete task.artifacts;
         task.reason = "Invalidated because a prerequisite changed during replanning.";
         invalidated = true;
       }
@@ -271,9 +295,10 @@ export function taskAssessmentIsCurrent(plan, task) {
 }
 
 export function readyTasks(state) {
+  if (state?.stopped) return [];
   const byId = new Map((state?.tasks ?? []).map((task) => [task.id, task]));
   return (state?.tasks ?? []).filter((task) => task.status === "pending"
-    && task.dependsOn.every((dep) => {
+    && taskDependencies(task).every((dep) => {
       const prerequisite = byId.get(dep);
       return prerequisite?.status === "done" && prerequisite.assessment?.status === "pass"
         && taskAssessmentIsCurrent(state, prerequisite);
@@ -307,7 +332,7 @@ export function updateTasks(state, updates) {
     }
     const before = { status: task.status, evidence: task.evidence ?? "", reason: task.reason ?? "" };
     task.status = update.status;
-    if (update.status === "pending") task.assessment = null;
+    if (update.status === "pending") { task.assessment = null; delete task.artifacts; }
     if (update.status === "done") {
       task.evidence = update.evidence.trim();
       task.reason = "";
@@ -334,7 +359,7 @@ export function updateTasks(state, updates) {
 
   for (const task of next.tasks) {
     if (task.status === "done" || task.status === "in_progress") {
-      const unfinished = task.dependsOn.filter((dep) => {
+      const unfinished = taskDependencies(task).filter((dep) => {
         const prerequisite = byId.get(dep);
         return prerequisite?.status !== "done" || prerequisite.assessment?.status !== "pass"
           || !taskAssessmentIsCurrent(next, prerequisite);

@@ -10,7 +10,6 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 - On-demand active/parent/history lexical recovery, source-verified Agent ranking, exact range loads and moves, and verified project-relative artifact spill/reload.
 - Explicit Skill retention and `active|handled|retired` handling with Goal/session lifetimes. Failed or truncated reads cannot be activated as complete Skills.
 - Human-approved DAGs: exact structured questionnaire correlation, material-change invalidation, evidence-bearing assessments, dependency gating, unknown-run fail-closed behavior, and native structured delegation.
-- RouteSets separate from DAGs: explicit route selection, Human-authorized bounded exploration, shared acceptance/caveat comparison, and acceptance-gated competitor cancellation.
 - Native watch ownership by arm identity, repeating/lost/terminal lifecycle handling, branch reconciliation, and explicit frame-to-parent transfer.
 - Optional `runtime_guard`: Agent-written pure JS checks with scoped IDs/CAS revisions, session branch recovery, shared global/local definitions, result-preserving warnings and pre-execution blocks at the native tool_call observation point.
 
@@ -18,7 +17,7 @@ The [field-use audit and resolved TODOs](docs/agent-usage-audit-v0.10.0.md) reco
 
 ## Important boundaries
 
-- No second Pi session, transcript store, conventions registry, scheduler, polling observer, or automatic route fan-out.
+- No second Pi session, transcript store, conventions registry, scheduler, or polling observer.
 - Lexical recovery is not semantic scoring. The Agent may rank verified candidates. Repeat analysis and relocation are explicit/on demand, not an always-on optimizer; a subset without a shared native file revision remains unknown.
 - Filesystem effects are not rolled back by Compass. Artifact writes report possible orphans if readback or a later native commit fails. Race-safe spill/reload currently requires Linux `/proc/self/fd`; other platforms fail closed rather than use a symlink check/open race.
 - Stock Pi 1.5.2 has no general awaited post-compaction canonical-restoration boundary. Compass uses request-side qualified overlays and later existing native boundaries instead of modifying Pi.
@@ -34,11 +33,11 @@ The [field-use audit and resolved TODOs](docs/agent-usage-audit-v0.10.0.md) reco
 
 ## Install
 
-From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v9/context v5 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
+From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v10/context v5 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
 
 ### Tool missing?
 
-Seeing the Compass Skill or starting Pi in this repository does not load `src/index.ts`. For a single invocation without changing settings, use `pi -e /absolute/path/to/pi-compass`, then `/compass-preflight`. If the package is already declared, grant project trust and `/reload`, checking any load error. All eight fixed tools (`compass_goal`, `compass_state`, `compass_context_search`, `compass_context`, `compass_plan`, `compass_acceptance`, `compass_route`, `runtime_guard`) are registered at factory startup; nothing is opened or loaded. `compass_context_search` is discoverable/callable in Code Mode; `compass_context` is model-only and stays directly declared even in Code Mode-only mode. Compass is not inherited by child sessions.
+Seeing the Compass Skill or starting Pi in this repository does not load `src/index.ts`. For a single invocation without changing settings, use `pi -e /absolute/path/to/pi-compass`, then `/compass-preflight`. If the package is already declared, grant project trust and `/reload`, checking any load error. All seven fixed tools (`compass_goal`, `compass_state`, `compass_context_search`, `compass_context`, `compass_plan`, `compass_acceptance`, `runtime_guard`) are registered at factory startup; nothing is opened or loaded. `compass_context_search` is discoverable/callable in Code Mode; `compass_context` is model-only and stays directly declared even in Code Mode-only mode. Compass is not inherited by child sessions.
 
 Context mutations now use flat actions (`compass_context({action,...})`); reload the current schemas before testing. For example, read-only recovery in Code Mode:
 
@@ -73,21 +72,20 @@ See the canonical [local verification results](docs/architecture-v0.10.0.md#fina
 
 ## Human acceptance
 
-In a disposable Pi session rooted at this package (or an explicit safe fixture project):
+After the Agent clears the [delivery gate](AGENTS.md#delivery-gate--agent-first), use a disposable Pi session rooted at this package (or an explicit safe fixture project):
 
 1. Run `/compass-preflight` and confirm the active registry and native dependencies.
 2. Ask the Agent to record a simple semantic Goal via `compass_goal`; verify a DAG is not required. Send a clarification: raw text must not replace the Goal. The Agent explicitly reviews/reaffirms or updates it.
 3. Use `compass_context` for a small `call`/`return`. Check the footer changes between `frame: root` and the committed frame identity, then recover a source with `compass_context_search` and pin it with `compass_context`. Compact or navigate only through native Pi operations and verify the value remains qualified.
-4. Only when provider cost is acceptable, ask the Agent to create a small read-only DAG: two independent inspections and a third depending on both. Review and answer the exact native Human approval questionnaire. The Agent must assess prerequisite evidence before the dependent task starts; parent/Code Mode work must stay with the parent.
+4. Only when provider cost is acceptable, ask the Agent to create a small read-only DAG: two independent inspections and a third depending on both. Verify that partial, modified, declined and UI-error answers do not authorize work. Review and approve the exact proposal. The Agent must assess prerequisite evidence before the dependent task starts; parent/Code Mode work stays with the parent.
 5. In the disposable session, register the [session-scoped guard example](docs/runtime-guards-design.md#注册并使用一条规则). Trigger warn and block, including a nested Code Mode call that discards its result; verify the parent still gets feedback. Change/remove the same ID with the returned scope revision. Global/local tests affect the profile and should use an isolated disposable profile.
 6. Inspect actual native child identities, task evidence, assessments and unknown/stale handling. Export a redacted report with `node scripts/session-report.mjs <session.jsonl> --json`. A local test pass is not live provider acceptance.
 
-Use a disposable session/project: provider calls and filesystem effects remain real. The obsolete automatic live-test command/launcher was removed; acceptance uses the same Agent, native questionnaire and scheduler as ordinary work, not a synthetic dispatch bypass.
+Use a disposable session/project: provider calls and filesystem effects remain real. For feedback, include the action, expected and actual behavior, versions, and relevant frame/source/watch/run IDs. Redact secrets and private transcript content. Acceptance uses the ordinary Agent and native paths, not a synthetic dispatch bypass.
 
 ## References
 
 - [`docs/design.md`](./docs/design.md) — ownership and correctness contract.
 - [`docs/architecture-v0.10.0.md`](./docs/architecture-v0.10.0.md) — requirement-linked M0–M7 checklist and evidence boundaries.
 - [`docs/measurements-v0.10.0.md`](./docs/measurements-v0.10.0.md) — bounded local measurement.
-- [`handoff.md`](./handoff.md) — current delivery state and Human feedback path.
 - Historical v0.9.x validation and session evidence remain under `docs/validation-v0.9.1.md` and `evidence/`; they are not evidence for the current bytes.

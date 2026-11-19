@@ -12,6 +12,7 @@ function taskDefinition(task) {
     id: task.id,
     title: task.title,
     dependsOn: [...(task.dependsOn ?? [])].sort(),
+    fromTasks: task.fromTasks ?? [], inputRefs: task.inputRefs ?? [],
     acceptance: task.acceptance,
     output: task.output ?? "",
     writeScope: task.writeScope ?? "",
@@ -28,13 +29,6 @@ export function dagApprovalBinding(state) {
     goalVersion: version,
     goal: state?.goal?.current ?? null,
     planGoal: state?.plan?.goal ?? null,
-    route: state?.routeSet ? {
-      id: state.routeSet.id,
-      baselineRef: state.routeSet.baselineRef,
-      selectedRouteId: state.routeSet.selectedRouteId,
-      planRouteId: state?.plan?.routeId ?? null,
-      criteria: state.routeSet.criteria,
-    } : null,
     definitionKey: state?.plan?.definitionKey ?? null,
     criteria: (state?.goal?.criteria ?? [])
       .filter((item) => item.goalVersion === version)
@@ -57,12 +51,9 @@ export function dagApprovalBinding(state) {
 
 export function createDagApprovalRequest(state) {
   if (!state?.goal?.current || !state?.plan?.tasks?.length) throw new Error("A current Goal DAG is required before requesting approval.");
-  if (state.routeSet && (!state.routeSet.selectedRouteId || state.plan.routeId !== state.routeSet.selectedRouteId)) {
-    throw new Error("Select and bind the exact route before requesting DAG approval. No state changed.");
-  }
   const id = randomUUID();
   const binding = dagApprovalBinding(state);
-  const tasks = state.plan.tasks.map((task) => `${task.id}: ${task.title}; depends on ${task.dependsOn.join(", ") || "none"}; executor=${task.executor ?? "parent"}; agent=${task.agent ?? ""}; dispatchReason=${task.dispatchReason ?? ""}; output=${task.output ?? ""}; writeScope=${task.writeScope ?? ""}; acceptance=${task.acceptance}`).join("\n");
+  const tasks = state.plan.tasks.map((task) => `${task.id}: ${task.title}; depends on ${task.dependsOn.join(", ") || "none"}; executor=${task.executor ?? "parent"}; agent=${task.agent ?? ""}; dispatchReason=${task.dispatchReason ?? ""}; output=${task.output ?? ""}; writeScope=${task.writeScope ?? ""}; acceptance=${task.acceptance}${task.fromTasks?.length ? `; artifact inputs from ${task.fromTasks.join(", ")}` : ""}${task.inputRefs?.length ? `; input refs=${task.inputRefs.join(", ")}` : ""}`).join("\n");
   const decisions = [
     ...(state.humanDecisions ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => item.summary || item.text),
     ...(state.decisions ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => `${item.id}: ${item.summary}${item.supersededBy ? ` (superseded by ${item.supersededBy})` : ""}`),
@@ -71,7 +62,6 @@ export function createDagApprovalRequest(state) {
   const preview = [
     `Approval request ${id}. This authorizes execution only; it does not establish task success or final Goal acceptance.`,
     `Current Goal v${state.goal.version ?? 1}: ${state.goal.current}`,
-    ...(state.routeSet ? [`RouteSet ${state.routeSet.id}; baseline=${state.routeSet.baselineRef}; selected route=${state.routeSet.selectedRouteId}`] : []),
     `Goal acceptance criteria:\n${(state.goal.criteria ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => `- ${item.id}: ${item.text}`).join("\n") || "- none recorded"}`,
     `Tasks (DAG revision ${state.plan.revision}):\n${tasks}`,
     `Human constraints:\n${(state.goal.constraints ?? []).map((item) => `- ${item}`).join("\n") || "- none recorded"}`,
@@ -112,7 +102,6 @@ export function approvalIsCurrent(state) {
   const request = state?.plan?.approvalRequest;
   const approval = state?.plan?.approval;
   return Boolean(request && approval
-    && (!state.routeSet || (state.routeSet.selectedRouteId && state.plan.routeId === state.routeSet.selectedRouteId))
     && request.status === "answered"
     && request.id === approval.requestId
     && request.sourceEntryId

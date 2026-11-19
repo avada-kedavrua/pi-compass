@@ -36,20 +36,21 @@ test("an inner copy cannot write through an outer ref binding", () => {
   applyOperation(manager, { action: "return" });
   assert.match(modelText(manager), /original/);
   assert.doesNotMatch(modelText(manager), /private mutation/);
-  applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "shared mutation" });
+  assert.throws(() => applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "shared mutation" }), /read-only in this frame/);
   applyOperation(manager, { action: "return" });
-  assert.match(modelText(manager), /shared mutation/);
+  assert.match(modelText(manager), /original/);
+  assert.doesNotMatch(modelText(manager), /shared mutation/);
   assertPaired(manager);
 });
 
-test("an inner ref can update an outer private copy without updating its source", () => {
+test("an inner ref cannot change its enclosing private copy", () => {
   const manager = host();
   const id = value(manager, "original");
   applyOperation(manager, { action: "call", task: "outer private", capture: [capture(manager, id, "copy")] });
   applyOperation(manager, { action: "call", task: "inner shared", capture: [capture(manager, id, "ref")] });
-  applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "private shared mutation" });
+  assert.throws(() => applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "private shared mutation" }), /read-only in this frame/);
   applyOperation(manager, { action: "return" });
-  assert.equal(search(manager, id).snippet, "private shared mutation");
+  assert.equal(search(manager, id).snippet, "original");
   applyOperation(manager, { action: "return" });
   assert.equal(search(manager, id).snippet, "original");
   assert.doesNotMatch(modelText(manager), /private shared mutation/);
@@ -89,7 +90,7 @@ test("derived writes and exports retain structured caveats and provenance", () =
   const id = toolExchange(manager, ["read"]).results[0];
   applyOperation(manager, { action: "pin", ids: [id], kind: "memory", caveats: ["Local evidence only; no provider acceptance."] });
   applyOperation(manager, { action: "unpin", ids: [id] });
-  applyOperation(manager, { action: "call", task: "derive", capture: [capture(manager, id, "ref")] });
+  applyOperation(manager, { action: "call", task: "derive", capture: [capture(manager, id, "copy")] });
   applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "derived conclusion" });
   assert.match(modelText(manager), /Agent-authored derived value/);
   const derivedHit = search(manager, id);

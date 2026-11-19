@@ -191,18 +191,18 @@ test("provider diagnostics survive bounded response parsing and GoalRun normaliz
   }, { requestId: "req-provider", ownerRunId: "wave-provider", nodeId: "provider" });
   let state = createGoalState("Goal: inspect provider behavior");
   state.plan = { ...state.plan, goal: state.goal.current, revision: 1, tasks: [task("provider"), task("provider-note", { executor: "parent", dependsOn: ["provider"] })] };
-  state.plan.execution = {
+  state.plan.executions = [{
     requestId: "wave-provider", taskIds: ["provider"], planRevision: state.plan.revision, status: "completed",
     results: [{ id: "provider", status: "done", model: PRIMARY_MODEL, requestId: parsed.requestId, ownerRunId: parsed.ownerRunId,
       fallbackAttempted: true, fallbackReason: "primary_account_quota_exhausted", providerDiagnostics: parsed.providerDiagnostics,
       primaryProviderDiagnostics: { errorCount: 1, lastError: { kind: "unknown", message: "Primary account quota exhausted", at: 9 } },
       usage: { input: 1, output: 1, cost: 0.01, toolCalls: 1, durationMs: 20 } }],
-  };
+  }];
   state.plan.executionHistory = [{ requestId: "wave-provider", taskIds: ["provider"], status: "completed", taskMetrics: [{ id: "provider", model: PRIMARY_MODEL, fallbackAttempted: true, fallbackReason: "primary_account_quota_exhausted", providerDiagnostics: parsed.providerDiagnostics, primaryProviderDiagnostics: { errorCount: 1, lastError: { kind: "unknown", message: "Primary account quota exhausted", at: 9 } }, primaryDurationMs: 20 }] }];
   const normalized = normalizeGoalRunState(state);
-  assert.equal(normalized.plan.execution.results[0].fallbackReason, "primary_account_quota_exhausted");
-  assert.equal(normalized.plan.execution.results[0].providerDiagnostics.lastError.kind, "unknown");
-  assert.equal(normalized.plan.execution.results[0].primaryProviderDiagnostics.errorCount, 1);
+  assert.equal(normalized.plan.executions[0].results[0].fallbackReason, "primary_account_quota_exhausted");
+  assert.equal(normalized.plan.executions[0].results[0].providerDiagnostics.lastError.kind, "unknown");
+  assert.equal(normalized.plan.executions[0].results[0].primaryProviderDiagnostics.errorCount, 1);
   // The primary provider fault must survive history normalization: the fallback's
   // own diagnostics cannot stand in for why the primary attempt ended.
   assert.equal(normalized.plan.executionHistory[0].taskMetrics[0].providerDiagnostics.retry.phase, "in_flight");
@@ -268,12 +268,12 @@ test("material DAG revisions are refused while a Subagent batch is unresolved", 
     task("b", { executor: "code", writeScope: "src/b.ts" }),
   ];
   state = revisePlanState(state, { acceptanceCriteria: ["Both scoped changes are correct"], tasks }).state;
-  state.plan.execution = { requestId: "batch-1", runId: "run-1", taskIds: ["a"], planRevision: state.plan.revision, stateVersion: state.plan.stateVersion, status: "running" };
+  state.plan.executions = [{ requestId: "batch-1", runId: "run-1", taskIds: ["a"], planRevision: state.plan.revision, stateVersion: state.plan.stateVersion, status: "running" }];
   assert.throws(() => revisePlanState(state, {
     acceptanceCriteria: ["Both scoped changes are correct"],
     changeReason: "New evidence changes task A",
     tasks: tasks.map((item) => item.id === "a" ? { ...item, acceptance: "A's updated completion condition" } : item),
-  }), /reconcile the batch first/);
+  }), /reconcile first/);
   assert.equal(state.plan.tasks[0].acceptance, "Observable result for a", "failed replan must not mutate the current graph");
 });
 
@@ -284,7 +284,7 @@ test("execution events and usage metadata survive GoalRun normalization", () => 
     definitionKey: "digest-a",
     tasks: [task("a"), task("b")],
   });
-  state.plan.execution = {
+  state.plan.executions = [{
     requestId: "wave",
     frameScope: "frame-root",
     taskIds: ["a", "b"],
@@ -296,27 +296,27 @@ test("execution events and usage metadata survive GoalRun normalization", () => 
       requestId: "req-a", ownerRunId: "wave", runId: "run-a", frameScope: "frame-a", summary: "Found entry point",
       usage: { input: 100, output: 20, cacheRead: 50, cacheWrite: 0, cost: 0.01, turns: 1, toolCalls: 2, durationMs: 500 },
     }],
-  };
+  }];
   state = recordExecutionEvent(state, { status: "completed", summary: "Wave completed", text: "a=done" });
   const normalized = normalizeGoalRunState(state);
-  assert.equal(normalized.plan.execution.frameScope, "frame-root");
-  assert.equal(normalized.plan.execution.results[0].runId, "run-a");
-  assert.equal(normalized.plan.execution.results[0].frameScope, "frame-a");
-  assert.equal(normalized.plan.execution.results[0].usage.cost, 0.01);
+  assert.equal(normalized.plan.executions[0].frameScope, "frame-root");
+  assert.equal(normalized.plan.executions[0].results[0].runId, "run-a");
+  assert.equal(normalized.plan.executions[0].results[0].frameScope, "frame-a");
+  assert.equal(normalized.plan.executions[0].results[0].usage.cost, 0.01);
   assert.ok(normalized.events.some((item) => item.kind === "subagent_execution"));
 });
 
 test("GoalRun normalization preserves unknown usage/cost fields as null", () => {
   let state = createGoalState("Goal: inspect usage metadata");
   state.plan = createOrRevisePlan(state.plan, { goal: state.goal.current, definitionKey: "digest-a", tasks: [task("a"), task("b")] });
-  state.plan.execution = {
+  state.plan.executions = [{
     requestId: "wave-missing-metrics", taskIds: ["a"], planRevision: state.plan.revision, status: "completed",
     results: [{ id: "a", status: "done", model: PRIMARY_MODEL, fallbackAttempted: false, requestId: "req-a", ownerRunId: "wave-missing-metrics", runId: "run-a", usage: { input: 100, output: 20 } }],
-  };
+  }];
   state.plan.executionHistory = [{ requestId: "wave-missing-metrics", taskIds: ["a"], status: "completed", metricsComplete: false }];
   const normalized = normalizeGoalRunState(state);
-  assert.equal(normalized.plan.execution.results[0].usage.cost, null);
-  assert.equal(normalized.plan.execution.results[0].usage.durationMs, null);
+  assert.equal(normalized.plan.executions[0].results[0].usage.cost, null);
+  assert.equal(normalized.plan.executions[0].results[0].usage.durationMs, null);
   assert.equal(normalized.plan.executionHistory[0].totalCost, null);
   assert.equal(normalized.plan.executionHistory[0].estimatedParallelSavingsMs, null);
 });

@@ -2,7 +2,11 @@
 
 All numbers below are bounded local measurements, not provider, token-cache or semantic-quality evidence.
 
-## Eight-tool surface and suite cost
+## Seven-tool schema cost
+
+Removing RouteSet reduces the serialized tool schemas from 37,189 to 28,597 bytes (23.1%). The Code Mode declaration renderer measures 11,963 total signature characters, down from 15,442. These are schema measurements, not provider savings.
+
+## R2 eight-tool baseline
 
 R2 replaced the loader/capability layout with eight fixed tools. Measured on this host with `npm test`, `npm run test:core`, `npm run test:non-extension`, and `node --import ./scripts/register-pi-host-typebox.mjs scripts/measure-tool-contract.mjs`:
 

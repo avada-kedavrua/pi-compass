@@ -8,6 +8,7 @@ const sources = array(ref, 64, 1);
 const range = { ...object({ part: { type: "integer", minimum: 0 }, startLine: { type: "integer", minimum: 1 }, endLine: { type: "integer", minimum: 1 } }, []), description: "Lines of the recovered source content, not absolute file line numbers." };
 const caveats = { ...array(string(600), 12), description: "Adds qualifications; inherited caveats are preserved." };
 const lifetime = { ...choice("goal", "session"), description: "Default: current Goal, or session when no Goal exists. Explicit goal requires an existing Goal." };
+const taskId = string(40, { minLength: 1, pattern: "^[A-Za-z][A-Za-z0-9_-]{0,39}$" });
 const operation = (action, fields = {}, required = []) => object({ action: tag(action), ...fields }, ["action", ...required]);
 
 function actions(cases) {
@@ -42,10 +43,10 @@ export function contextToolSchema() {
     operation("unpin", { sources }, ["sources"]),
     operation("remember", { text: string(4000, { minLength: 1, description: "Your compact working memory, not a new tool observation or Human instruction." }), sources: array(ref, 32), caveats, lifetime }, ["text"]),
 
-    operation("call", { task: string(4000, { minLength: 1, description: "Same-session attention frame, not a child Agent or filesystem rollback." }), capture: { ...array(object({ ref, mode: { ...choice("ref", "copy"), description: "ref shares the enclosing value; copy is private. Edit copies only through the new refs returned by call." } }, ["ref", "mode"]), 64), description: "Default none. Applied receipt sources correspond to this order; copies have new refs." } }, ["task"]),
-    operation("return", { result: string(8000), exportSources: { ...array(ref, 64), description: "Only selected values export; retained values keep their lifetime in the parent. Other local work releases; shared-ref writes survive." } }),
+    operation("call", { taskId, task: string(4000, { minLength: 1, description: "Same-session attention frame, not a child Agent or filesystem rollback." }), capture: { ...array(object({ ref, mode: { ...choice("ref", "copy"), description: "ref borrows read-only; copy is private and editable using its returned ref." } }, ["ref", "mode"]), 64), description: "Default none. Applied receipt sources correspond to this order; copies have new refs." } }),
+    operation("return", { outcome: { ...object({ status: choice("done", "blocked", "throw"), evidence: string(1600, { minLength: 1 }), reason: string(600, { minLength: 1 }), sideEffects: string(800, { minLength: 1 }) }, ["status"]), description: "Only for a parent DAG node frame opened with taskId. Omit for an ordinary frame opened with task." }, result: string(8000), exportSources: { ...array(ref, 64), description: "Only selected values export; retained values keep their lifetime in the parent. Other local work releases." } }),
     operation("load", { source: ref, range }, ["source"]),
-    operation("replace", { source: ref, text: string(8000, { minLength: 1, description: "Agent-derived replacement. Human originals and executed calls require a private copy. Unpin a pinned value before editing. Use the applied receipt's updated ref for subsequent operations." }), caveats }, ["source", "text"]),
+    operation("replace", { source: ref, text: string(8000, { minLength: 1, description: "Agent-derived replacement. Human originals and executed calls require a private copy. Edit retained memory directly; unpin originals before editing eligible working values. Use the applied receipt's updated ref for subsequent operations." }), caveats }, ["source", "text"]),
     operation("drop", { sources }, ["sources"]),
     operation("mark", { source: ref, handling: choice("active", "handled", "retired"), reason: string(600, { minLength: 1 }) }, ["source", "handling", "reason"]),
     operation("move", { sources, range, verifiedAgainst: ref }, ["sources"]),
@@ -55,7 +56,6 @@ export function contextToolSchema() {
   return actions(operations);
 }
 
-const taskId = string(40, { minLength: 1, pattern: "^[A-Za-z][A-Za-z0-9_-]{0,39}$" });
 const evidence = string(1600, { minLength: 1 });
 const reason = string(600, { minLength: 1 });
 const criterion = string(24, { minLength: 1 });
@@ -64,8 +64,11 @@ const task = object({
   executor: { ...choice("parent", "code", "subagent"), description: "Default parent. code means deterministic parent Code Mode; subagent must be read-only." },
   agent: choice("scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"),
   output: string(400), writeScope: string(200), dispatchReason: string(400, { minLength: 12, description: "Required for subagent: why another semantic context is worth its cost." }),
+  fromTasks: array(taskId, 8), inputRefs: array(ref, 8),
   frameScope: string(64),
 }, ["id", "title", "acceptance"]);
+const taskPatch = object(task.properties, ["id"]);
+const definitionEdit = (length) => object({ id: string(32, { minLength: 1, description: "Only update/remove an existing ID returned by Compass. Omit id to add; Compass assigns it." }), text: string(length, { minLength: 1, description: "New text. Omit text to remove the existing ID." }) }, []);
 const assessment = { status: choice("pass", "fail", "inconclusive"), evidence, caveats: array(string(400), 8), unresolvedCaveats: array(string(400), 8) };
 
 export const toolSchemas = {
@@ -74,11 +77,12 @@ export const toolSchemas = {
       current: string(4000, { minLength: 1 }), constraints: array(string(600, { minLength: 1 }), 24), sources: array(ref, 16, 1),
       criteria: { ...array(string(300, { minLength: 1 }), 12), description: "Only definition owner. Complete list when supplied; omission preserves current criteria, [] clears. Human refs define the actual objective/constraints, not merely the latest follow-up." },
     }, ["current", "constraints", "sources"]),
+    operation("update", { constraintEdits: array(definitionEdit(600), 24, 1), criterionEdits: array(definitionEdit(300), 12, 1) }),
     operation("decide", { summary: string(320, { minLength: 1 }), rationale: string(500), evidence: string(900), supersedes: array(string(32, { minLength: 1 }), 8), taskIds: array(taskId, 24) }, ["summary"]),
     operation("checkpoint", { ref: string(500, { minLength: 1, description: "Real recoverable Git/artifact reference; not an automatic snapshot or rollback." }), note: string(320) }, ["ref"]),
   ]),
   compass_state: object({
-    view: { ...choice("summary", "goal", "plan", "acceptance", "history", "route", "execution"), description: "Default compact summary. Other views return complete requested domain evidence. Read-only; no tool loading." },
+    view: { ...choice("summary", "goal", "plan", "acceptance", "history", "execution", "retained"), description: "Default compact summary. Other views return complete requested domain evidence. Read-only; no tool loading." },
     cursor: string(80, { minLength: 1, description: "Opaque previous cursor; copy unchanged for summary deltas." }),
     limit: { type: "integer", minimum: 1, maximum: 20 },
   }, []),
@@ -86,12 +90,15 @@ export const toolSchemas = {
   compass_context: contextToolSchema(),
   compass_plan: actions([
     operation("define", { tasks: array(task, 24, 2), reason }, ["tasks"]),
+    operation("patch", { upsertTasks: array(taskPatch, 24, 1), removeTasks: array(taskId, 24, 1), reason }),
     operation("request_approval"),
     operation("start", { taskIds: array(taskId, 24, 1) }, ["taskIds"]),
     operation("done", { tasks: array(object({ id: taskId, evidence }, ["id", "evidence"]), 24, 1) }, ["tasks"]),
     operation("block", { tasks: array(object({ id: taskId, reason }, ["id", "reason"]), 24, 1) }, ["tasks"]),
     operation("reopen", { tasks: array(object({ id: taskId, reason }, ["id", "reason"]), 24, 1) }, ["tasks"]),
     operation("assess", { taskId, ...assessment }, ["taskId", "status", "evidence"]),
+    operation("throw", { taskId, reason, evidence, sideEffects: string(800, { minLength: 1 }) }, ["taskId", "reason", "evidence"]),
+    operation("cancel", { taskId, requestId: string(128, { minLength: 1, description: "Exact current attempt from the execution view." }) }, ["taskId", "requestId"]),
     operation("resolve", {
       requestId: string(128, { minLength: 1 }), confirmedNoActiveRuns: { type: "boolean", const: true },
       confirmationEvidence: string(600, { minLength: 12, description: "Observed native Subagent status proving all recorded child runs terminal; never assume unknown means stopped." }),
@@ -99,26 +106,5 @@ export const toolSchemas = {
     }, ["requestId", "confirmedNoActiveRuns", "confirmationEvidence", "results"]),
   ]),
   compass_acceptance: object({ results: array(object({ criterion, status: choice("reported_pass", "failed", "blocked", "inconclusive"), evidence: string(2000, { minLength: 1 }) }, ["criterion", "status", "evidence"]), 12, 1) }, ["results"]),
-  compass_route: actions([
-    operation("define", {
-      baselineRef: string(300, { minLength: 1 }), criteria: array(criterion, 12, 1),
-      routes: array(object({
-        routeId: taskId, summary: string(500, { minLength: 1 }), rationale: string(500),
-        assumptions: array(string(300), 8), dependencies: array(string(300), 8), risks: array(string(300), 8), expectedCost: string(120), expectedLatency: string(120),
-      }, ["routeId", "summary"]), 3, 2),
-    }, ["baselineRef", "routes"]),
-    operation("request_selection"),
-    operation("explore", { scope: string(500, { minLength: 1 }), budget: { type: "integer", minimum: 2, maximum: 24 }, routeIds: array(taskId, 3, 2) }, ["scope", "budget", "routeIds"]),
-    operation("accept", { routeId: taskId }, ["routeId"]),
-    operation("register", { routeId: taskId, runId: string(128, { minLength: 1 }), correlationId: string(128, { minLength: 1 }), baselineRef: string(300, { minLength: 1 }) }, ["routeId", "runId", "correlationId", "baselineRef"]),
-    operation("result", {
-      routeId: taskId, runId: string(128, { minLength: 1 }), correlationId: string(128, { minLength: 1 }),
-      criteria: array(object({ id: criterion, status: choice("pass", "fail", "inconclusive"), evidence }, ["id", "status", "evidence"]), 12),
-      caveats: array(string(400), 8), unresolvedCaveats: array(string(400), 8), evidenceRefs: array(string(160), 8), summary: string(800), status: choice("failed"),
-    }, ["routeId", "runId", "correlationId"]),
-    ...["cancel_request", "cancel_ack", "cancel_terminal", "cancel_unknown"].map((action) => operation(action, {
-      routeId: taskId, runId: string(128, { minLength: 1 }), correlationId: string(128, { minLength: 1 }), requestId: string(128, { minLength: 1 }), terminalStatus: string(32),
-    }, ["routeId", "runId", "correlationId", "requestId"])),
-  ]),
 };
 export const COMPASS_TOOL_NAMES = [...Object.keys(toolSchemas), "runtime_guard"];
