@@ -7,9 +7,9 @@
   "minimumPiVersion": "1.5.2",
   "testedPiRuntime": "Pi 1.5.2 installed projection/runner/import checks; not live provider acceptance",
   "piSubagentsPinned": "0.88.1",
-  "implementationCommit": "85192d2",
+  "implementationCommit": "afc5197",
   "validationLog": "docs/architecture-v0.10.0.md#final-local-evidence",
-  "liveEvidence": "Disposable Agent smoke and recovery on Pi 1.5.2 passed for static file evidence and context operations. Interactive Human approval and live Child/provider acceptance remain open.",
+  "liveEvidence": "The Pi 1.5.2 native Runner verified exact dual approval and automatic serial handoff with injected answers. Live TUI, child and provider acceptance remain open.",
   "releaseCaveats": [
     "Stock-Pi post-compaction continuity uses qualified request overlays until an existing native boundary",
     "GoalRun v11 and context v6 are current-only; older snapshots require a fresh session or supported branch, with no migration or reset",

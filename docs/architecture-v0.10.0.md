@@ -44,18 +44,18 @@ Current surface: seven initially registered, stable tools. goal alone owns seman
 
 - [x] Bind approved parent nodes to native same-session frame commits. A single return submits the outcome and explicit exports; a queued return cannot settle the node. Code Mode remains a separate deterministic route.
 - [ ] Writable children are out of scope under the repository's read-only Subagent constraint. No write locks, automatic merge, or rollback were added.
-- [x] Same-session node handoff uses exact exports and caveats, with order-only edges distinct from artifact inputs. The installed Runner/SessionManager adapter exercises A → assessment → B → throw → C stays pending → approved patch explicitly reuses A. Native child artifact inputs are not exposed.
+- [x] Same-session node handoff uses exact exports and caveats. The native Runner exercises automatic A → B → C with no main turn and B → throw → main with C pending. A fixture also verifies that a replan can reuse A’s exact export. Native child artifact inputs are not exposed.
 
 #### 3. Context and incremental editing
 
 - [x] Inherit pins downward, protect reserved instructions, and isolate frame writes. Child unpin masks inherited retention; complete verified canonical Skill reads auto-pin locally.
 - [x] List retained memory directly and update/delete local Agent-authored memory without unpinning first. Raw provenance and exact original source recovery stay intact.
 - [x] Apply exact native read dedup at append with a qualified pointer and intact raw call/result pairing. Keep queued receipts distinct from the single applied return receipt. Skip already-null context edits on return; the MindStudio workload was not replayed with the new implementation.
-- [x] Incremental Goal edits and DAG patches preserve unaffected progress, retire changed criterion IDs, and request fresh exact approval for material changes.
+- [x] Incremental Goal edits and DAG patches preserve unaffected progress. New criterion IDs retire stale evidence and invalidate only the Goal stamp; task definition or ordering changes invalidate the DAG stamp.
 
 #### 4. Agent review and delivery
 
-- [ ] Exercise approval, serial/parallel execution, stop, late recovery, replanning and context edits as an Agent. Check call count, receipt clarity, side effects and projection size against the current path. Remove redundant mechanics; do not add a strategy tournament, global ledger, or second scheduler.
+- [x] Exercise the signed execution paths through the native Runner and scoped adapters: dual approval, serial handoff, readonly dispatch, stop, exact recovery and replanning. No manual opens or intermediary assessment calls for serial frames. Model/provider behavior and live cost are separate and unmeasured for this revision.
 - [x] Run focused and full gates and separate installed-native evidence from adapter coverage. Agent smoke and recovery evidence are listed below; this is not a request for Human live acceptance.
 - Review and publish the scoped Git revision to `chatgpt-only`; verify the remote ref against the final local commit.
 
@@ -240,7 +240,7 @@ The earlier candidate tracked alternative strategies but never launched them aut
 
 ## Final local evidence
 
-Current implementation `85192d2`: full 233/233, core 66/66, non-extension 96/96, isolated preflight passed. The Pi 1.5.2 native runner exercises Goal setup, exact TUI approval with an injected questionnaire answer, RPC refusal, parent frame commit, dependency assessment, Code task completion and Goal acceptance. Adapter regressions cover missing artifact recovery, independent launch refusals and invalidation of an in-flight preflight after discarding a plan. These checks did not launch a child, render a live terminal questionnaire or call a provider.
+Current implementation `afc5197`: full 237/237, core 68/68, non-extension 98/98, isolated preflight passed. The unpatched Pi 1.5.2 loader/Runner uses an injected two-tab questionnaire answer, verifies RPC refusal, and commits A → B → C without a manual open, main turn or separate frame assessment. It checks exact artifact/caveat visibility, reload and duplicate boundary recovery, B throw → main with C pending, new-input pause with stamp reuse, and Code Mode and Goal acceptance. A native Runner plus delegation-bus fixture verifies that a returned frame releases an independent read-only child while the next frame is active; separate adapter checks cover unknown results and launch refusal. No live terminal rendering, child launch or provider request was run for this revision.
 
 Earlier implementation `a426acc`, including semantic Goal foundation `63a14ff` and field-use corrections. The [consumer audit](agent-usage-audit-v0.10.0.md) records the latest frozen input/hash, five failed pin attempts, the redesigned consumption path, bounded reviews and measured interface/retention cost. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v5 reject unsupported snapshots without migration/reset; native raw history is unchanged.
 
