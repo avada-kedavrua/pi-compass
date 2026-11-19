@@ -32,7 +32,7 @@
 }
 ```
 
-注册返回 applied/unchanged、scope/id/revision、cursor；不回显源码。revision 是**作用域版本**，不是单条规则的计数。注册完成后，后续准入使用新规则；已准入或运行的调用不追溯撤销。Code Mode 中应顺序 await 注册与被保护操作，不能并行注册和执行后假定顺序。
+注册回执保留 applied/unchanged、scope/id/revision；不回显源码，也不发列表 cursor。revision 是**本次提交的作用域版本**，不是单条规则的计数或返回时的最新全局状态。注册完成后，后续准入使用新规则；已准入或运行的调用不追溯撤销。Code Mode 中应顺序 await 注册与被保护操作，不能并行注册和执行后假定顺序。
 
 ## 固定操作面
 
@@ -40,12 +40,12 @@
 
 | action | 输入与行为 |
 |---|---|
-| get | 默认返回各 scope 的 revision 和简短规则列表；scope 可筛选，cursor 原样回传；完全未变只回 unchanged/cursor。指定 id 时默认 session，返回该规则源码/案例/来源。scope/ID 及列表/详情投影参与 cursor；一条规则的详情不能让完整列表误报 unchanged。 |
+| get | 默认返回各 scope 的 revision 和简短规则列表；指定 scope 时只返回该 scope，cursor 仅在同一列表视图复用。未变只回 unchanged/cursor。指定 id 时默认 session，返回规则定义和 scope revision，不带 cursor。 |
 | put | expectedRevision + rule；创建或完整替换同 scope 的 ID。验证结构、纯函数表达式和提供的案例，再 CAS 激活。完全相同的定义不重跑 VM 或写入。 |
-| test | scope/id + cases；只运行判定，返回逐例结果，stateChanged=false。不执行真实工具或真实设备动作。 |
+| test | scope/id + cases；只运行判定，按输入顺序返回 verdict 和相关原因；只有不符时才附 expected。不写状态、不执行真实工具或真实设备动作。 |
 | remove | scope/id + expectedRevision；只删除该 scope 的定义。删除也推进 scope revision，不能以重用旧 ID 绕过版本检查。 |
 
-scope 默认 session。未知 ID、过期版本、非法字段、案例失败和不可用 runtime 不等同。验证失败不激活；Native session 写入结果不确定时返回 unknown，先 get 核对而非盲重试。已提交但刷新回执失败会明确 stateChanged=true，不伪装成无变化。
+scope 默认 session。未知 ID、过期版本、非法字段、案例失败和不可用 runtime 不等同。验证失败不激活；Native session 写入结果不确定时回执为 `stateChanged:"unknown"`，先 get 核对而非盲重试。成功写入直接返回本次提交的 revision，不重读整个 scope。
 
 ### 判定函数与观察
 
@@ -74,7 +74,7 @@ unknown、坏返回值、异常、超预算、取消和超时不伪装成语义�
 
 `runtime_guard` 不受自身规则封锁，避免坏规则锁死修复；仍受其他原生权限控制。修复须使用对应 scope 和新 revision，不能用 local 弱化 global。存储损坏需要 Human 修复对应文件或选择支持的 Native branch，不提供静默重置。
 
-提醒最多聚合 16 个分组，正文受约 2 KiB 预算限制；省略时有 omitted 计数，不声称完整。hint 是短的可操作修正建议，不复述整份规则或原始工具输入。
+提醒用短文本列出受影响的工具、规则、结果及修正建议。相同命中聚合计数，最多 16 组、约 2 KiB；省略时注明次数。不复述整份规则、内部调用 ID 或原始工具输入。
 
 ## Scope 与持久化
 

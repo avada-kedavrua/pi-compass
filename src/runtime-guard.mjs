@@ -13,6 +13,34 @@ import {
 const installed = new WeakMap();
 const canonical = (cwd) => { try { return fs.realpathSync(cwd); } catch { return path.resolve(cwd); } };
 
+function readGuard(view, op, scope, sessionId) {
+  if (op.id) {
+    if (op.cursor !== undefined) throw new Error("Use a cursor only for a guard listing, not with id.");
+    const rule = view.states[scope].rules.find((item) => item.id === op.id);
+    if (!rule) throw new Error(`Unknown guard ${scope}/${op.id}.`);
+    return { scope, revision: view.states[scope].revision, rule };
+  }
+  const selected = op.scope ? [scope] : GUARD_SCOPES;
+  const scopes = Object.fromEntries(selected.map((name) => [name, view.states[name].revision]));
+  // Revisions can repeat on different native branches; the restore epoch can
+  // also change on the same branch without changing any definitions.
+  const identity = [view.store.path, scopes];
+  if (Object.hasOwn(scopes, "local")) identity.push(view.project);
+  if (Object.hasOwn(scopes, "session")) identity.push(sessionId, view.states.session.rules);
+  const cursor = createHash("sha256").update(JSON.stringify(identity)).digest("hex").slice(0, 32);
+  if (op.cursor === cursor) return { unchanged: true, cursor };
+  const rules = selected.flatMap((name) => view.states[name].rules.map(({ id, tools, effect }) => ({ scope: name, id, tools, effect })));
+  return { cursor, scopes, rules };
+}
+
+function noticeLine({ tool, scope, id, effect, verdict, reason, hint, count }) {
+  let action = effect === "block" ? "Blocked" : "Warned";
+  if (verdict === "unknown") action += " (check unavailable)";
+  const subject = [scope && `${scope}/${id}`, count > 1 && `${count} calls`].filter(Boolean).join(", ");
+  const next = [reason, hint].filter(Boolean).join(" — ").replace(/\s+/g, " ").trim();
+  return `- ${action} ${tool}${subject ? ` (${subject})` : ""}: ${next}`;
+}
+
 export class RuntimeGuards {
   constructor(pi, { profileDir, vm = new GuardVM() } = {}) {
     if (typeof profileDir !== "function" && (typeof profileDir !== "string" || !profileDir)) throw new Error("Runtime guards require the host profileDir provider.");
@@ -22,7 +50,6 @@ export class RuntimeGuards {
     this.session = emptyGuardState();
     this.epoch = 0;
     this.notices = new Map();
-    this.parents = new Map();
     this.pending = Promise.resolve();
     this.cache = null;
     this.omitted = 0;
@@ -30,7 +57,6 @@ export class RuntimeGuards {
   restore(ctx) {
     this.epoch++;
     this.notices.clear();
-    this.parents.clear();
     this.omitted = 0;
     try {
       if (!ctx.sessionManager?.getBranch) throw new Error("Native guard branch is unavailable.");
@@ -57,9 +83,7 @@ export class RuntimeGuards {
       this.cache = { project, versions: states.map((s) => s.revision), states };
     }
     const states = { global: this.cache.states[0], local: this.cache.states[1], session: this.session };
-    const scopeKey = ctx.sessionManager?.getSessionId?.() ?? "native-session";
-    const cursor = createHash("sha256").update(JSON.stringify([store.path, project, scopeKey, ...GUARD_SCOPES.map((s) => states[s].revision), this.epoch])).digest("hex").slice(0, 32);
-    return { states, cursor, project, keys, store };
+    return { states, project, keys, store };
   }
   control(operation, ctx, signal = ctx.signal) {
     const epoch = this.epoch;
@@ -75,7 +99,15 @@ export class RuntimeGuards {
       ? { source: rule.check, event: projectGuardEvent(rule, item.event, item.event.cwd ?? ctx.cwd) }
       : { source: 'e=>({verdict:"pass"})', event: {} });
     const results = await this.vm.evaluate(checks, { signal });
-    return results.map((result, index) => ({ index, expected: cases[index].expected, ...result, passed: result.verdict === cases[index].expected }));
+    return results.map((result, index) => result.verdict === cases[index].expected ? result : { ...result, expected: cases[index].expected });
+  }
+  async #validateRule(rule, ctx, signal) {
+    const [compiled] = await this.vm.evaluate([{ source: rule.check, compileOnly: true }], { signal });
+    if (compiled.verdict !== "pass" || compiled.error) throw new Error(`Invalid guard check: ${compiled.error ?? compiled.reason ?? "invalid function"}`);
+    if (!rule.cases) return;
+    const results = await this.#cases(rule, rule.cases, ctx, signal);
+    const failed = results.flatMap(({ expected, verdict, error, reason }, index) => expected ? [`case ${index + 1}: expected ${expected}, got ${verdict}${error || reason ? ` (${error || reason})` : ""}`] : []);
+    if (failed.length) throw new Error(`Guard cases failed: ${failed.join("; ")}`);
   }
   async #control(op, ctx, signal) {
     if (this.closed || signal?.aborted) throw new Error("Guard operation cancelled before activation.");
@@ -86,44 +118,32 @@ export class RuntimeGuards {
     if (!GUARD_SCOPES.includes(scope)) throw new Error("scope must be global|local|session.");
     const view = await this.snapshot(ctx);
     if (epoch !== this.epoch) throw new Error("Guard branch changed during state loading; no state changed.");
-    if (op.action === "get") {
-      if (op.scope || op.id) view.cursor = createHash("sha256").update(JSON.stringify([view.cursor, scope, op.id ?? null])).digest("hex").slice(0, 32);
-      if (op.cursor === view.cursor && !op.id) return { cursor: view.cursor, unchanged: true };
-      if (op.id) {
-        const rule = view.states[scope].rules.find((item) => item.id === op.id);
-        if (!rule) throw new Error(`Unknown guard ${scope}/${op.id}.`);
-        return { scope, revision: view.states[scope].revision, rule, cursor: view.cursor };
-      }
-      return { cursor: view.cursor, coverage: "tool_call observed inputs; direct and nested, not post-plugin final inputs or independent child processes", scopes: Object.fromEntries(GUARD_SCOPES.map((s) => [s, view.states[s].revision])),
-        rules: GUARD_SCOPES.filter((s) => !op.scope || s === scope).flatMap((s) => view.states[s].rules.map(({ id, tools, effect }) => ({ scope: s, id, tools, effect }))) };
-    }
+    if (op.action === "get") return readGuard(view, op, scope, ctx.sessionManager?.getSessionId?.());
     if (op.action === "test") {
       const rule = view.states[scope].rules.find((item) => item.id === op.id);
       if (!rule) throw new Error(`Unknown guard ${scope}/${op.id}.`);
-      return { stateChanged: false, cases: await this.#cases(rule, guardCases(op.cases), ctx, signal) };
+      const cases = await this.#cases(rule, guardCases(op.cases), ctx, signal);
+      if (epoch !== this.epoch) throw new Error("Guard branch changed during testing.");
+      return { cases };
     }
     const current = view.states[scope];
     if (op.expectedRevision !== current.revision) throw new Error(`Stale ${scope} scope revision: expected ${current.revision}, received ${op.expectedRevision}.`);
-    let rules;
-    if (op.action === "put") {
-      const rule = normalizeGuardRule(op.rule);
-      // Identical definitions need no VM or persistence round trip.
-      const old = current.rules.find((item) => item.id === rule.id);
-      if (JSON.stringify(old) === JSON.stringify(rule)) {
-        if (epoch !== this.epoch) throw new Error("Guard branch changed during registration.");
-        if (scope !== "session") view.store.mutate(scope === "global" ? "global" : `local:${view.project}`, op.expectedRevision, (value) => value);
-        return { resultStatus: "unchanged", scope, id: rule.id, revision: current.revision, cursor: view.cursor };
-      }
-      const compiled = await this.vm.evaluate([{ source: rule.check, compileOnly: true }], { signal });
-      if (compiled[0].verdict !== "pass" || compiled[0].error) throw new Error(`Invalid guard check: ${compiled[0].error ?? compiled[0].reason ?? "invalid function"}`);
-      if (rule.cases) {
-        const failed = (await this.#cases(rule, rule.cases, ctx, signal)).filter((item) => !item.passed);
-        if (failed.length) throw new Error(`Guard cases failed: ${JSON.stringify(failed)}`);
-      }
-      rules = [...current.rules.filter((item) => item.id !== rule.id), rule];
-    } else {
-      if (!current.rules.some((item) => item.id === op.id)) throw new Error(`Unknown guard ${scope}/${op.id}.`);
-      rules = current.rules.filter((item) => item.id !== op.id);
+    const rule = op.action === "put" ? normalizeGuardRule(op.rule) : null;
+    const id = rule?.id ?? op.id;
+    const old = current.rules.find((item) => item.id === id);
+    if (!rule && !old) throw new Error(`Unknown guard ${scope}/${id}.`);
+    const key = scope === "global" ? view.keys[0] : view.keys[1];
+    const names = new Set(rule ? (this.pi.getAllTools?.() ?? []).map((tool) => tool.name) : []);
+    const unresolvedTargets = rule?.tools.filter((name) => name !== "*" && !names.has(name)) ?? [];
+    const receipt = { scope, id, ...(unresolvedTargets.length ? { unresolvedTargets } : {}) };
+    if (rule && JSON.stringify(old) === JSON.stringify(rule)) {
+      if (scope !== "session") view.store.mutate(key, op.expectedRevision, (value) => value);
+      return { resultStatus: "unchanged", ...receipt, revision: current.revision };
+    }
+    const rules = current.rules.filter((item) => item.id !== id);
+    if (rule) {
+      await this.#validateRule(rule, ctx, signal);
+      rules.push(rule);
     }
     const candidate = normalizeGuardState({ ...current, revision: current.revision + 1, rules });
     if (epoch !== this.epoch) throw new Error("Guard branch changed during validation; no rule was activated.");
@@ -139,37 +159,24 @@ export class RuntimeGuards {
       }
       this.session = candidate;
     } else {
-      view.store.mutate(scope === "global" ? "global" : `local:${view.project}`, op.expectedRevision, () => candidate);
+      view.store.mutate(key, op.expectedRevision, () => candidate);
       this.cache = null;
     }
-    try {
-      const next = await this.snapshot(ctx);
-      if (epoch !== this.epoch) throw new Error("The native branch changed after the guard committed.");
-      const names = new Set((this.pi.getAllTools?.() ?? []).map((tool) => tool.name));
-      const unresolvedTargets = op.action === "put" ? op.rule.tools.filter((name) => name !== "*" && !names.has(name)) : [];
-      return { resultStatus: "applied", scope, id: op.rule?.id ?? op.id, revision: next.states[scope].revision, ...(next.states[scope].revision !== candidate.revision ? { appliedRevision: candidate.revision } : {}), cursor: next.cursor, ...(unresolvedTargets.length ? { unresolvedTargets } : {}) };
-    } catch (cause) {
-      const error = new Error("Guard committed but receipt refresh failed; get current state before another mutation.", { cause });
-      error.stateChanged = true;
-      throw error;
-    }
+    return { resultStatus: "applied", ...receipt, revision: candidate.revision };
   }
   note(event, hit) {
-    let root = event.toolCallId;
-    for (let depth = 0; depth < 32 && this.parents.get(root); depth++) root = this.parents.get(root);
-    const key = JSON.stringify([root, hit.scope, hit.id, hit.revision, hit.effect, hit.verdict, hit.reason]);
+    const key = JSON.stringify([event.toolName, hit.scope, hit.id, hit.revision, hit.effect, hit.verdict, hit.reason, hit.hint]);
     const old = this.notices.get(key);
     if (old) { old.count++; return; }
-    if (this.notices.size < 16) this.notices.set(key, { toolCallId: root, ...hit, count: 1 });
+    if (this.notices.size < 16) this.notices.set(key, { tool: event.toolName, ...hit, count: 1 });
     else this.omitted++;
   }
   block(event, reason, epoch) {
-    if (epoch === this.epoch && event.parentToolCallId) this.note(event, { runtimeError: true, effect: "block", verdict: "unknown", reason });
+    if (epoch === this.epoch && event.parentToolCallId) this.note(event, { effect: "block", verdict: "unknown", reason });
     return { block: true, reason };
   }
   async check(event, ctx) {
     if (event.toolName === "runtime_guard") return;
-    this.parents.set(event.toolCallId, event.parentToolCallId ?? null);
     const epoch = this.epoch;
     let view;
     try {
@@ -203,14 +210,17 @@ export class RuntimeGuards {
     } catch (error) { return this.block(event, `Guard runtime unavailable; call not executed. Reload the extension or repair its host/store. ${String(error.message).slice(0, 240)}`, epoch); }
   }
   flush(event) {
-    this.parents.clear();
     if (!this.notices.size) return;
-    const hits = [];
+    const lines = ["Runtime guard"];
+    let bytes = Buffer.byteLength(lines[0]);
     for (const hit of this.notices.values()) {
-      if (Buffer.byteLength(JSON.stringify([...hits, hit])) <= 1900) hits.push(hit);
-      else this.omitted += hit.count;
+      const line = noticeLine(hit);
+      const size = Buffer.byteLength(line) + 1;
+      if (bytes + size > 1840) this.omitted += hit.count;
+      else { lines.push(line); bytes += size; }
     }
-    const content = JSON.stringify({ runtimeGuard: "notice", hits, ...(this.omitted ? { omitted: this.omitted } : {}) });
+    if (this.omitted) lines.push(`- ${this.omitted} more calls omitted.`);
+    const content = lines.join("\n");
     this.notices.clear();
     this.omitted = 0;
     return { entries: [...(event.entries ?? []), { type: "custom_message", customType: GUARD_NOTICE_TYPE, content, display: false }] };
@@ -235,7 +245,7 @@ export function registerRuntimeGuards(pi, options) {
     async execute(_id, args, signal, ...rest) {
       const ctx = rest.findLast((item) => item?.sessionManager) ?? {};
       try { return agentResult(await guards.control(args.operation, ctx, signal)); }
-      catch (error) { return { ...agentResult({ resultStatus: error.stateChanged === true ? "applied" : error.stateChanged === "unknown" ? "unknown" : "rejected", stateChanged: error.stateChanged ?? false, error: String(error.message) }), isError: true }; }
+      catch (error) { return { ...agentResult({ stateChanged: error.stateChanged ?? false, error: String(error.message) }), isError: true }; }
     },
   });
   for (const name of ["session_start", "session_tree", "before_agent_start"]) pi.on(name, (_event, ctx) => guards.restore(ctx));

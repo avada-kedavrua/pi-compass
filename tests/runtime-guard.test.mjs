@@ -39,8 +39,7 @@ function fixture(t, options = {}) {
 test("native session guard CRUD: immediate block, idempotence, cases, stale revisions and branch restore", async (t) => {
   const h = fixture(t);
   const first = await h.control({ action: "put", expectedRevision: 0, rule: rule() });
-  assert.equal(first.revision, 1);
-  assert.equal(first.rule, undefined, "mutation does not echo code");
+  assert.deepEqual(first, { resultStatus: "applied", scope: "session", id: "exact-cd", revision: 1 }, "mutation gives the next CAS revision, not a listing cursor or rule body");
   assert.equal((await h.call("cd x")).block, true);
   assert.equal(await h.call("printf 'cd x'"), undefined, "a rule's exact semantic coverage remains Agent-owned");
   assert.equal((await h.control({ action: "put", expectedRevision: 1, rule: rule() })).resultStatus, "unchanged");
@@ -48,11 +47,17 @@ test("native session guard CRUD: immediate block, idempotence, cases, stale revi
   await assert.rejects(h.control({ action: "put", expectedRevision: 1, rule: { ...rule(), cases: [{ event: { toolName: "bash", input: { command: "cd x" } }, expected: "pass" }] } }), /cases failed/);
   assert.equal((await h.control({ action: "get" })).scopes.session, 1);
   const detail = await h.control({ action: "get", id: "exact-cd" });
-  assert.notEqual((await h.control({ action: "get", cursor: detail.cursor })).unchanged, true, "a single-rule detail cannot satisfy a full-list projection");
-  const verified = await h.control({ action: "test", id: "exact-cd", cases: [{ event: { toolName: "bash", input: { command: "cd x" } }, expected: "violation" }] });
-  assert.equal(verified.stateChanged, false);
-  assert.equal(verified.cases[0].passed, true);
-  assert.equal((await h.control({ action: "get", cursor: first.cursor })).unchanged, true);
+  assert.deepEqual(detail, { scope: "session", revision: 1, rule: rule() });
+  const verified = await h.control({ action: "test", id: "exact-cd", cases: [
+    { event: { toolName: "bash", input: { command: "cd x" } }, expected: "violation" },
+    { event: { toolName: "bash", input: { command: "pwd" } }, expected: "violation" },
+  ] });
+  assert.deepEqual(verified, { cases: [{ verdict: "violation" }, { verdict: "pass", expected: "violation" }] });
+  const list = await h.control({ action: "get" });
+  assert.equal(list.coverage, undefined);
+  h.guards.restore(h.ctx);
+  assert.deepEqual(await h.control({ action: "get", cursor: list.cursor }), { unchanged: true, cursor: list.cursor });
+  await assert.rejects(h.control({ action: "get", id: "exact-cd", cursor: list.cursor }), /cursor only for a guard listing/);
   const parent = h.manager.getLeafId();
   await h.control({ action: "remove", id: "exact-cd", expectedRevision: 1 });
   assert.equal(await h.call("cd x"), undefined);
@@ -60,6 +65,10 @@ test("native session guard CRUD: immediate block, idempotence, cases, stale revi
   await h.runner.emit({ type: "session_tree" });
   assert.equal((await h.call("cd x")).block, true, "native branch restores its rule, not the other branch's deletion");
   assert.equal(h.manager.getBranch().filter((entry) => entry.customType === GUARD_STATE_TYPE).length, 1);
+  h.manager.resetLeaf();
+  await h.runner.emit({ type: "session_tree" });
+  await h.control({ action: "put", expectedRevision: 0, rule: { ...rule(), hint: "Branch-specific hint." } });
+  assert.notEqual((await h.control({ action: "get", cursor: list.cursor })).cursor, list.cursor, "the same revision on another branch need not mean the same rule");
 });
 
 test("global and local definitions share CAS persistence without local override or cross-project leakage", async (t) => {
@@ -70,6 +79,7 @@ test("global and local definitions share CAS persistence without local override 
   const localView = await h.control({ action: "get", scope: "local" });
   const globalView = await h.control({ action: "get", scope: "global", cursor: localView.cursor });
   assert.notEqual(globalView.unchanged, true, "a different projection needs its own cursor");
+  assert.deepEqual(globalView.scopes, { global: 1 });
   assert.equal(globalView.rules[0].scope, "global");
   const other = new RuntimeGuards(h.api, { profileDir: path.join(h.dir, "profile") });
   other.restore(h.ctx);
@@ -78,6 +88,7 @@ test("global and local definitions share CAS persistence without local override 
   const initial = await other.control({ action: "get" }, sibling);
   assert.deepEqual(initial.scopes, { global: 1, local: 0, session: 0 });
   await h.control({ action: "remove", scope: "global", id: "exact-cd", expectedRevision: 1 });
+  assert.deepEqual(await h.control({ action: "get", scope: "local", cursor: localView.cursor }), { unchanged: true, cursor: localView.cursor }, "irrelevant scope changes do not invalidate the cursor");
   assert.equal(await other.check({ toolName: "bash", toolCallId: "other", input: { command: "cd x" } }, sibling), undefined);
   assert.equal((await other.control({ action: "get" }, sibling)).scopes.global, 2);
 });
@@ -101,9 +112,7 @@ test("native boundary notice reaches parent for nested warn without changing JSO
   assert.equal(boundary.valid, true);
   assert.equal(boundary.continue, false, "a warning never forces a provider turn");
   const notice = boundary.entries.find((entry) => entry.customType === GUARD_NOTICE_TYPE);
-  const hits = JSON.parse(notice.content).hits;
-  assert.deepEqual(hits.map(({ effect, revision, count }) => ({ effect, revision, count })), [{ effect: "warn", revision: 1, count: 2 }, { effect: "block", revision: 2, count: 1 }]);
-  assert.equal(hits[0].toolCallId, "outer");
+  assert.equal(notice.content, "Runtime guard\n- Warned bash (session/exact-cd, 2 calls): Use relative paths.\n- Blocked bash (session/exact-cd): Use relative paths.");
   appendDrafts(h.manager, boundary.entries);
   assert.match(modelText(h.manager), /runtime-guard.notice/);
   assertPaired(h.manager);
@@ -244,7 +253,7 @@ test("every nested runtime block remains visible if Code Mode discards the error
   db.exec("PRAGMA user_version=9");
   db.close();
   assert.equal((await broken.call("pwd", { toolCallId: "outer/1", parentToolCallId: "outer" })).block, true);
-  assert.match(broken.guards.flush({ entries: [] }).entries[0].content, /unavailable/);
+  assert.match(broken.guards.flush({ entries: [] }).entries[0].content, /Blocked \(check unavailable\) bash: Guard runtime unavailable/);
 
   let race = false;
   let h;

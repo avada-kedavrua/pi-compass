@@ -155,7 +155,7 @@ export function guardToolSchema() {
   return object({ operation: { anyOf: [
     object({ action: action("put"), scope, expectedRevision: revision, rule }, ["action", "expectedRevision", "rule"]),
     object({ action: action("remove"), scope, expectedRevision: revision, id }, ["action", "expectedRevision", "id"]),
-    object({ action: action("get"), scope, id, cursor: text(64) }, ["action"]),
+    object({ action: action("get"), scope, id, cursor: { ...text(64), description: "Reuse only for the same listing scope; omit when reading by id." } }, ["action"]),
     object({ action: action("test"), scope, id, cases }, ["action", "id", "cases"]),
   ] } }, ["operation"]);
 }

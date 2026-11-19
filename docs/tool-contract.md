@@ -1,6 +1,8 @@
 # Compass tool contract — current development source
 
-Seven fixed tools are registered for the session; nothing is loaded, opened or hidden by Compass. `compass_state` is the only read surface. Agent payloads are selected JSON, never merged internal receipts: `content[0]` is the Agent-facing object, native `details` carries protocol state. A mutation receipt returns only the next cursor plus what the next step needs. Validation failures state that nothing changed. Raw Pi history, native tool identity and the Human's tool preferences remain native-owned.
+Seven fixed tools are registered for the session. `compass_state` is the GoalRun read surface. Raw Pi history, native tool identity and the Human's tool preferences remain native-owned.
+
+**Result format follows the consumer.** Use compact JSON in `content[0]` for values the Agent or Code Mode may reuse verbatim: IDs, revisions, refs, cursors, status, and exact next-call arguments. Include a cursor only when the matching view can use it. Use plain text for a short explanation and Markdown bullets for grouped notices without a programmatic consumer. Keep Pi protocol metadata in `details`; do not repeat the same payload as both JSON and prose or modify another tool's result to carry a notice. Failures distinguish no mutation from an uncertain outcome.
 
 ## compass_goal — semantic definitions only
 
@@ -54,9 +56,9 @@ Context schema v6 is current-only. Older snapshots fail visibly; there is no mig
 
 ## runtime_guard — executable mechanical checks
 
-`runtime_guard({operation:{action,...}})`: `get|put|test|remove` manage Agent-written pure-JS checks under session/local/global scope revisions with CAS. `put` validates code and optional cases before activation and does not echo code. Default scope is session; local binds the canonical project cwd; global affects the profile store. Local cannot weaken global.
+`runtime_guard({operation:{action,...}})`: `get|put|test|remove` manage Agent-written pure-JS checks under session/local/global scope revisions with CAS. `put` validates code and optional cases before activation and does not echo code. Default scope is session; local binds the canonical project cwd; global affects the profile store. Local cannot weaken global. A cursor is only for a repeated listing of the same scope. `put`/`remove` return the committed scope revision, not a listing cursor. `get` with `id` reads the full rule.
 
-Coverage is the native `tool_call` observation, including Code Mode nested calls — not later plugin rewrites, independent child processes or arbitrary OS actions. `warn` leaves business results untouched and delivers boundary feedback to the parent; `block` prevents the observed call and returns a native error. `unknown` stays unknown, the control tool stays repairable, and no rule is generated from Human prose. See [runtime-guards-design.md](runtime-guards-design.md).
+Coverage is the native `tool_call` observation, including Code Mode nested calls — not later plugin rewrites, independent child processes or arbitrary OS actions. `warn` leaves business results untouched and delivers a short boundary notice to the parent; `block` prevents the observed call and returns a native error. `unknown` stays unknown, the control tool stays repairable, and no rule is generated from Human prose. See [runtime-guards-design.md](runtime-guards-design.md).
 
 ## Boundaries
 

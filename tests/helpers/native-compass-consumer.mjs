@@ -215,13 +215,21 @@ try {
     assert.notEqual(result.isError, true, JSON.stringify(result));
     return JSON.parse(result.content[0].text);
   };
-  assert.deepEqual((await control({ action: "get" })).scopes, { global: 0, local: 0, session: 0 });
+  const empty = await control({ action: "get" });
+  assert.deepEqual(empty.scopes, { global: 0, local: 0, session: 0 });
+  assert.deepEqual(empty.rules, []);
+  assert.deepEqual(await control({ action: "get", cursor: empty.cursor }), { unchanged: true, cursor: empty.cursor });
   assert.equal(fs.existsSync(path.join(getAgentDir(), "runtime-guards.sqlite")), false);
   const rule = { id: "host-check", tools: ["bash"], read: ["input.command"], effect: "block", check: 'e=>({verdict:e.input.command==="blocked"?"violation":"pass"})', hint: "Use an allowed command." };
-  await control({ action: "put", scope: "global", expectedRevision: 0, rule });
+  const registered = await control({ action: "put", scope: "global", expectedRevision: empty.scopes.global, rule });
+  // Native loader fixture registers Compass only, not the target tool.
+  assert.deepEqual(registered, { resultStatus: "applied", scope: "global", id: rule.id, revision: 1, unresolvedTargets: ["bash"] });
   assert.equal(fs.existsSync(path.join(getAgentDir(), "runtime-guards.sqlite")), true);
   assert.equal((await runner.emitToolCall({ type: "tool_call", toolName: "bash", toolCallId: "blocked", input: { command: "blocked" } })).block, true);
   assert.equal(await runner.emitToolCall({ type: "tool_call", toolName: "bash", toolCallId: "allowed", input: { command: "allowed" } }), undefined);
+  const removed = await control({ action: "remove", scope: registered.scope, id: registered.id, expectedRevision: registered.revision });
+  assert.deepEqual(removed, { resultStatus: "applied", scope: "global", id: rule.id, revision: 2 });
+  assert.equal(await runner.emitToolCall({ type: "tool_call", toolName: "bash", toolCallId: "removed", input: { command: "blocked" } }), undefined);
   assert.deepEqual(errors, []);
   console.log("native factory, TUI approval/RPC refusal, empty-policy read, owned VM and profile storage passed");
 } finally { await runner.emit({ type: "session_shutdown" }); }

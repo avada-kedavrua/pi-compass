@@ -98,7 +98,7 @@ Run `node scripts/measure-runtime-guards.mjs` after installing the owned depende
 | One matching rule passes | 5.881 / 7.698 ms |
 | One matching rule blocks | 5.569 / 6.722 ms |
 
-First put, including module/WASM/Worker startup and private store creation: 51.052 ms. Mutation JSON: 123 bytes; compact listing: 294 bytes; exact unchanged listing: 62 bytes. Serialized JSON excludes the native tool envelope and is not a provider-token measurement.
+The timing sample above measured 51.052 ms for the first put, including module/WASM/Worker startup and private store creation. A later same-fixture before/after receipt check measured 123 → 79 bytes for put, 294 → 175 for the all-scope listing, and 62 unchanged for an exact repeated listing. These are serialized payload bytes, excluding the native tool envelope; not a provider-token measurement.
 
 Whole-process RSS was 50,135,040 bytes before the sample and 109,985,792 at its end. This includes Node, SQLite, worker, VM allocations and GC timing; it is not sole-attributed guard memory. Worker VM memory and V8 heap have separate caps, and idle workers are reaped; no zero-overhead or zero-RSS claim is made.
 
