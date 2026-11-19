@@ -240,7 +240,7 @@ The earlier candidate tracked alternative strategies but never launched them aut
 
 ## Final local evidence
 
-Current implementation `8436106`: full 229/229, core 64/64, non-extension 94/94, isolated preflight passed. The Pi 1.5.2 native-runner regression reproduced refusal in `tui` mode before the fix and now approves the canonical questionnaire while still rejecting RPC. A separate disposable loader probe used the installed questionnaire 2.15.0’s in-process answer interface and verified the pi-subagents 0.89.1 bridge and public preflight. It did not render a live terminal questionnaire, start a child, or call a provider.
+Current implementation `85192d2`: full 233/233, core 66/66, non-extension 96/96, isolated preflight passed. The Pi 1.5.2 native runner exercises Goal setup, exact TUI approval with an injected questionnaire answer, RPC refusal, parent frame commit, dependency assessment, Code task completion and Goal acceptance. Adapter regressions cover missing artifact recovery, independent launch refusals and invalidation of an in-flight preflight after discarding a plan. These checks did not launch a child, render a live terminal questionnaire or call a provider.
 
 Earlier implementation `a426acc`, including semantic Goal foundation `63a14ff` and field-use corrections. The [consumer audit](agent-usage-audit-v0.10.0.md) records the latest frozen input/hash, five failed pin attempts, the redesigned consumption path, bounded reviews and measured interface/retention cost. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v5 reject unsupported snapshots without migration/reset; native raw history is unchanged.
 
