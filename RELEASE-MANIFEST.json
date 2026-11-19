@@ -7,7 +7,7 @@
   "minimumPiVersion": "1.5.2",
   "testedPiRuntime": "Pi 1.5.2 installed projection/runner/import checks; not live provider acceptance",
   "piSubagentsPinned": "0.88.1",
-  "implementationCommit": "9e19c9a",
+  "implementationCommit": "7206a80",
   "validationLog": "docs/architecture-v0.10.0.md#final-local-evidence",
   "liveEvidence": "Disposable Agent smoke and recovery on Pi 1.5.2 passed for static file evidence and context operations. Interactive Human approval and live Child/provider acceptance remain open.",
   "releaseCaveats": [
