@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
-  CONTEXT_MESSAGE_TYPE, sourceIndex, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, prepareContextOperation, releaseWatchMessages, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
+  CONTEXT_MESSAGE_TYPE, PLAN_STOP_MESSAGE_TYPE, sourceIndex, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, prepareContextOperation, releaseWatchMessages, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
 } from "../src/context-core.mjs";
 import {
   SessionManager, appendDrafts, applyOperation, assertPaired, contextPreview, modelText, queueOperation, sourceVersion,
@@ -547,9 +547,11 @@ test("return preserves material native external results without exporting child 
   applyOperation(manager, { action: "call", task: "await one native result" });
   manager.appendCustomMessageEntry("subagent-result", "Native read-only child evidence; inspect before acceptance.", true);
   manager.appendCustomMessageEntry("watch-condition", "Native event result with a material finding.", true);
+  manager.appendCustomMessageEntry(PLAN_STOP_MESSAGE_TYPE, "A child stopped this DAG.", true);
   applyOperation(manager, { action: "return" });
   assert.match(modelText(manager), /Native read-only child evidence/);
   assert.match(modelText(manager), /Native event result with a material finding/);
+  assert.match(modelText(manager), /A child stopped this DAG/);
   assert.doesNotMatch(modelText(manager), /await one native result/);
 });
 

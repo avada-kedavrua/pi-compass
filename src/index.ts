@@ -1,4 +1,4 @@
-import { getAgentDir, type ExtensionCommandContext, type ExtensionContext, type ToolCallEvent, type TurnEndEvent } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type ToolCallEvent, type TurnEndEvent } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -17,7 +17,7 @@ import { registerRuntimeGuards } from "./runtime-guard.mjs";
 import { DELEGATION_EVENTS, FALLBACK_MODEL, PRIMARY_MODEL, REVIEW_MODEL, DEFAULT_TIMEOUT_MS, MAX_WAVE_TASKS, START_ACK_TIMEOUT_MS, assessWavePolicy, hasCompleteUsageMetrics, buildSubagentDelegationRequest, delegationCandidates, parseSubagentDelegationResponse, normalizeProviderDiagnostics, providerFallbackReason, readOnlyLaunchRefusal } from "./execution-orchestrator.mjs";
 import { executionUnresolved, readyTasks, retainExecutions, taskDependencies, updateTasks } from "./dag-core.mjs";
 import { setGoal, updateGoal, patchPlanState, discardPlan, addressedConstraints, observeHumanInput, stateCursor, GOAL_RUN_API_VERSION, GOAL_RUN_RELEASE, recordAcceptanceResult, bindApprovalQuestionnaire, captureHumanDecision, recordTaskAssessment, renewApprovalRequests, emptyGoalRunState, mergeTrace, normalizeGoalRunState, recordCheckpoint, recordDecision, recordFailure, recordHumanQuestionnaireFailure, recordExecutionDrift, recordExecutionEvent, recordWriteTarget, revisePlanState, settleParentNode, stopPlan, transitionTasks, reconcileUnknownExecutionTasks, expandApprovalProposal } from "./goal-run.mjs";
-import { CONTEXT_MESSAGE_TYPE, CONTEXT_STATE_TYPE, emptyContextState, normalizeContextState, pinnedContextOverlay, scopedDagArtifacts, planContextBoundary, planContextTransition, planRetentionBoundary, planObservationBoundary, planWatchBoundary, prepareContextOperation, validateContextOperation, releaseWatchMessages, restoreContextState } from "./context-core.mjs";
+import { CONTEXT_MESSAGE_TYPE, CONTEXT_STATE_TYPE, PLAN_STOP_MESSAGE_TYPE, emptyContextState, normalizeContextState, pinnedContextOverlay, scopedDagArtifacts, planContextBoundary, planContextTransition, planRetentionBoundary, planObservationBoundary, planWatchBoundary, prepareContextOperation, validateContextOperation, releaseWatchMessages, restoreContextState } from "./context-core.mjs";
 
 const STATE_ENTRY_TYPE = "pi-compass-v2.goalrun";
 const MAX_TRACE_ENTRIES = 24;
@@ -405,28 +405,29 @@ function parsedTaskEvidence(parsed: any): string {
 // Only an execution still awaiting this exact request may take it: a manually
 // reconciled or superseded batch is evidence too and must not be overwritten.
 
-function applyDelegationOutcomeUnlocked(pi: any, waveId: string, task: any, parsed: any, fallbackAttempted: boolean, primaryError = "") {
+function applyDelegationOutcomeUnlocked(pi: ExtensionAPI, waveId: string, nodeId: string, parsed: ParsedDelegation, fallbackAttempted: boolean, primaryError = "") {
   let execution = executionBatch(waveId);
   if (!execution) return;
-  let index = executionResultIndex(execution, task.id);
+  let index = executionResultIndex(execution, nodeId);
   if (index < 0) return;
   const currentResult = execution.results[index];
-  const taskStatus = state.plan.tasks.find((item: any) => item.id === task.id)?.status;
+  const previouslyStopped = Boolean(state.plan.stopped);
+  const taskStatus = state.plan.tasks.find(({ id }: { id: string }) => id === nodeId)?.status;
   if (taskStatus === "in_progress") {
     if (parsed.status === "throw") {
-      state = stopPlan(state, { taskId: task.id, reason: parsed.reason, evidence: parsedTaskEvidence(parsed), sideEffects: parsed.sideEffects }, updateTasks);
+      state = stopPlan(state, { taskId: nodeId, reason: parsed.reason, evidence: parsedTaskEvidence(parsed), sideEffects: parsed.sideEffects }, updateTasks);
     } else if (parsed.status === "done") {
       // A correlated terminal response is a fact, not approval for further work.
       // Preserve it even if new Human input has paused semantic progression.
-      state.plan = updateTasks(state.plan, [{ id: task.id, status: "done", evidence: parsedTaskEvidence(parsed) }], { terminalEvidence: true });
+      state.plan = updateTasks(state.plan, [{ id: nodeId, status: "done", evidence: parsedTaskEvidence(parsed) }], { terminalEvidence: true });
     } else {
       const reason = clip(`${parsed?.terminalStatus ? `Subagent ${parsed.terminalStatus}: ` : ""}${parsed?.reason || parsed?.summary || "Subagent returned no valid task evidence."}`, 600);
-      state.plan = updateTasks(state.plan, [{ id: task.id, status: "blocked", reason }]);
+      state.plan = updateTasks(state.plan, [{ id: nodeId, status: "blocked", reason }]);
     }
   }
   execution = executionBatch(waveId);
   if (!execution) return;
-  index = executionResultIndex(execution, task.id);
+  index = executionResultIndex(execution, nodeId);
   if (index < 0) return;
   execution.results[index] = {
     ...execution.results[index],
@@ -444,13 +445,25 @@ function applyDelegationOutcomeUnlocked(pi: any, waveId: string, task: any, pars
   };
   state = recordExecutionEvent(state, {
     status: execution.results[index].status,
-    summary: `Subagent task ${task.id}: ${execution.results[index].status}${fallbackAttempted ? " via DeepSeek fallback" : ""}.`,
+    summary: `Subagent task ${nodeId}: ${execution.results[index].status}${fallbackAttempted ? " via DeepSeek fallback" : ""}.`,
     text: clip(`${execution.results[index].summary}${execution.results[index].error ? `\nReason: ${execution.results[index].error}` : ""}`, 1200),
     ref: execution.results[index].runId || "",
   });
   settleDelegationWave(waveId);
   persistState(pi);
+  return previouslyStopped ? undefined : state.plan.stopped ?? undefined;
 }
+
+function signalDelegatedStop(pi: Pick<ExtensionAPI, "sendMessage">, stop: { taskId: string; reason: string }) {
+  // Pi starts an idle turn or steers the active one at a safe boundary. This is
+  // a notification, not a frame pop, cancellation, or second execution loop.
+  pi.sendMessage({
+    customType: PLAN_STOP_MESSAGE_TYPE,
+    content: `Compass DAG stopped by child ${stop.taskId}: ${stop.reason}\nDo not start more DAG work. If inside a frame, finish it with its observed outcome before replanning in main. See compass_state(view=plan) for stop evidence and side effects; running siblings are not cancelled.`,
+    display: true,
+  }, { triggerTurn: true, deliverAs: "steer" });
+}
+
 function settleDelegationWave(waveId: string, confirmation = "") {
   const execution = executionBatch(waveId);
   if (!executionUnresolved(execution)) return;
@@ -529,46 +542,68 @@ async function runDelegatedNode(pi: any, generation: number, ctx: any, runtime: 
   await consumeDelegationResponse(pi, generation, result.request, terminal, ctx, runtime, false);
 }
 
-function consumeDelegationResponse(pi: any, generation: number, request: any, outcome: any, ctx: any, runtime: any, allowFallback: boolean) {
-  return serializedInBranch(pi, generation, async () => {
-    const { ownerRunId: waveId, nodeId, requestId } = request;
-    const execution = executionBatch(waveId);
-    if (!execution) return;
-    const index = executionResultIndex(execution, nodeId);
-    const row = execution.results[index];
-    if (row?.requestId !== requestId || !executionUnresolved(row)) return;
-    const { parsed, response } = outcome;
+function unsettledAttempt({ ownerRunId, nodeId, requestId }: DelegationRequest) {
+  const execution = executionBatch(ownerRunId);
+  if (!execution) return;
+  const index = executionResultIndex(execution, nodeId);
+  const row = execution.results[index];
+  if (row?.requestId === requestId && executionUnresolved(row)) return { execution, index, row };
+}
+
+function fallbackAllowed(ctx: ExtensionContext, row: { cancelRequested?: boolean }) {
+  return !row.cancelRequested && !state.plan.stopped && !state.plan.executions.some((batch: { status: string }) => batch.status === "unknown")
+    && approvalIsCurrent(state) && goalInputIsCurrent(ctx);
+}
+
+function finishDelegation(pi: ExtensionAPI, generation: number, ctx: ExtensionContext, request: DelegationRequest, parsed: ParsedDelegation, row: { fallbackAttempted: boolean; primaryError?: string }) {
+  const stop = applyDelegationOutcomeUnlocked(pi, request.ownerRunId, request.nodeId, parsed, row.fallbackAttempted, row.primaryError);
+  if (!inCurrentBranch(pi, generation)) return;
+  if (stop) signalDelegatedStop(pi, stop);
+  else scheduleReadySubagentWaves(pi, ctx);
+}
+
+async function consumeDelegationResponse(pi: any, generation: number, request: DelegationRequest, outcome: any, ctx: ExtensionContext, runtime: any, allowFallback: boolean) {
+  const { parsed, response } = outcome;
+  const retry = await serializedInBranch(pi, generation, () => {
+    const attempt = unsettledAttempt(request);
+    if (!attempt) return;
+    const { execution, index, row } = attempt;
     if (!parsed) {
       execution.results[index] = { ...row, status: "unknown", error: outcome.reason };
-      settleDelegationWave(waveId);
+      settleDelegationWave(request.ownerRunId);
       persistState(pi);
       return;
     }
-    const fallbackReason = allowFallback && !row.cancelRequested && !state.plan.stopped
-      && !state.plan.executions.some((batch: any) => batch.status === "unknown") && providerFallbackReason(response);
-    if (fallbackReason && approvalIsCurrent(state) && goalInputIsCurrent(ctx)) {
-      const fallback = { ...request, model: FALLBACK_MODEL, requestId: randomUUID() };
-      const refusal = await checkLaunch(pi, ctx, runtime, fallback);
-      if (!inCurrentBranch(pi, generation)) return;
-      if (refusal) parsed.reason += ` Fallback refused: ${refusal}`;
-      if (!refusal && approvalIsCurrent(state) && goalInputIsCurrent(ctx)) {
-        execution.results[index] = { ...row,
-          status: "dispatching", requestId: fallback.requestId, model: FALLBACK_MODEL,
-          fallbackAttempted: true, fallbackReason, primaryError: clip(parsed.reason, 400),
-          primaryUsage: parsed.usage, primaryProviderDiagnostics: parsed.providerDiagnostics,
-          runId: null, error: "", observedToolCount: null, observedTools: [],
-        };
-        persistState(pi);
-        if (!inCurrentBranch(pi, generation)) return;
-        if (!state.plan.stopped && approvalIsCurrent(state) && goalInputIsCurrent(ctx)) {
-          // Return the promise boxed to release the state queue before waiting.
-          return { request: fallback, response: dispatchOneDelegation(pi, generation, runtime, fallback, ctx) };
-        }
-        execution.results[index] = row;
-      }
+    const reason = allowFallback && providerFallbackReason(response);
+    if (reason && fallbackAllowed(ctx, row)) {
+      return { reason, goalStamp: state.goal.approval.requestId, planStamp: state.plan.approval.requestId };
     }
-    applyDelegationOutcomeUnlocked(pi, waveId, { id: nodeId }, parsed, row.fallbackAttempted, row.primaryError);
-    if (inCurrentBranch(pi, generation)) scheduleReadySubagentWaves(pi, ctx);
+    finishDelegation(pi, generation, ctx, request, parsed, row);
+  });
+  if (!retry || !inCurrentBranch(pi, generation)) return;
+  const fallback = { ...request, model: FALLBACK_MODEL, requestId: randomUUID() };
+  // Like primary preflight, model/profile resolution must not delay terminal
+  // evidence from another child, especially a stop that vetoes this launch.
+  const refusal = await checkLaunch(pi, ctx, runtime, fallback);
+  return serializedInBranch(pi, generation, () => {
+    const attempt = unsettledAttempt(request);
+    if (!attempt) return;
+    const { execution, index, row } = attempt;
+    const sameApproval = state.goal.approval?.requestId === retry.goalStamp && state.plan.approval?.requestId === retry.planStamp;
+    if (refusal || !sameApproval || !fallbackAllowed(ctx, row)) {
+      const terminal = refusal ? { ...parsed, reason: `${parsed.reason} Fallback refused: ${refusal}` } : parsed;
+      finishDelegation(pi, generation, ctx, request, terminal, row);
+      return;
+    }
+    execution.results[index] = { ...row,
+      status: "dispatching", requestId: fallback.requestId, model: FALLBACK_MODEL,
+      fallbackAttempted: true, fallbackReason: retry.reason, primaryError: clip(parsed.reason, 400),
+      primaryUsage: parsed.usage, primaryProviderDiagnostics: parsed.providerDiagnostics,
+      runId: null, error: "", observedToolCount: null, observedTools: [],
+    };
+    persistState(pi);
+    // No await between persisting the attempt and invoking native dispatch.
+    return { request: fallback, response: dispatchOneDelegation(pi, generation, runtime, fallback, ctx) };
   });
 }
 function dispatchAdmission(ctx: ExtensionContext) {
@@ -598,6 +633,7 @@ function reportDispatchError(ctx: any, error: unknown) {
 }
 
 type DelegationRequest = ReturnType<typeof buildSubagentDelegationRequest>;
+type ParsedDelegation = NonNullable<ReturnType<typeof parseSubagentDelegationResponse>>;
 async function preflightCandidates(pi: unknown, ctx: ExtensionContext, runtime: unknown, candidates: ReturnType<typeof delegationCandidates>, limit: number, waveId: string, stillCurrent: () => boolean) {
   const { current: goal, constraints } = state.goal;
   const passed: { task: (typeof candidates)[number]; request: DelegationRequest }[] = [];

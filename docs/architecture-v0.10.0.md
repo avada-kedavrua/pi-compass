@@ -22,12 +22,12 @@ Current surface: seven initially registered, stable tools. goal alone owns seman
   - [x] Explicit `parent|code|subagent` intent, read-only Subagent enforcement plus `dispatchReason`, current-binding semantic assessments, unknown-batch reconciliation (`confirmedNoActiveRuns` + `confirmationEvidence`), route/competitor identity and acceptance gates are retained with regression coverage.
   - [x] Old registrations were replaced, not wrapped: fixed non-overlapping action schemas in `src/tool-schema.mjs`, one read surface (`compass_state` views), minimal receipts, native tool preferences untouched. R2 evidence: domain `goal-run`+`dag-core` 69/69; full suite 230/230 in 3.58 s; core 77/77; non-extension 106/106; static/native preflight and subagents contract 36/36 PASS; eight-tool schema total 37,189 bytes with the largest Code Mode signature at 3,972 chars. The R2 delivery commit records this state.
 - **R3 — Native consumption and further convergence**
-  - [ ] Exercise the new public calls through installed native loading/dispatch: exact initial names, stable schemas, opaque proposal expansion/answer qualification, and Code Mode callability.
-  - [ ] Replay the field failures against the actual new surface; challenge source/result completeness and remove residual duplicated validation/records discovered at this seam. Review, commit and push.
+  - [x] Exercise installed native loading and dispatch: fixed registry, two-tab canonical preview expansion/qualification and actual Code Mode tool routing. See [Final local evidence](#final-local-evidence).
+  - [x] Replay the MindStudio stale-start and partial Code Mode batch through the installed `AgentSession` with a scripted stream, without touching MindStudio. Goal drafts no longer take source refs; node entry is automatic and the context tool stays model-only. This is a replay of the failure sequence, not the full workload.
 - **R4 — Occam and final delivery**
-  - [ ] Reconcile every ledger item, inspect all runtime modules/callers and remove dead/duplicate code and tests. Keep targeted behavioral guards, not test volume.
-  - [ ] Run focused checks first, mandatory full/core/non-extension/static/native gates at delivery; compare suite duration, tool/schema/result bytes, actual nonempty replay and context CPU/draft sizes. Do not infer provider quality/cache/cost from local measurements.
-  - [ ] Align the Skill, tool contract, release identity and acceptance instructions; independent code and consumer reviews; commit, push and verify remote identity. Mark unproven live/provider behavior explicitly.
+  - [x] Reconcile the four current milestones below; review the touched stop, fallback, native tool and frame boundaries. Keep scoped behavioral coverage.
+  - [x] Run focused, full, core, non-extension, and isolated preflight checks. Measure schema/result bytes, the scripted failure replay call count, and local context draft size and CPU against `262d566`; see [measurements](measurements-v0.10.0.md#local-stop-and-field-recovery-checks).
+  - [x] Align the tool contract and release identity; review the scoped diff alongside native consumer evidence. Record local and live boundaries separately. No separate model reviewer or real provider was used for this follow-up.
 
 ### Next acceptance work
 
@@ -37,13 +37,13 @@ Current surface: seven initially registered, stable tools. goal alone owns seman
 - [x] Consume correlated terminal results per node. An adapter regression keeps a sibling running while the first terminal result becomes visible.
 - [x] Dispatch an assessed successor without waiting for unrelated siblings. The regression held a sibling open and timed out before the fix. Separate active batch records preserve exact request correlation and a shared admission cap.
 - [x] Accept semantic `throw` with reason, evidence and known side effects. Freeze progression and fallback; continue consuming running siblings. Adapter tests verify exact cancellation and that a cancel request is not terminal evidence. No filesystem rollback.
-- [ ] Verify prompt notification of a child `throw` in a disposable Agent session. Stop evidence is currently surfaced in plan state, not a proactive wake.
-- [ ] Verify preflight graph checks, advisory edgeless/shared-cwd warnings, single-node retry of confirmed terminal work, and stale-approval recovery. Keep the human-approved plan distinct from Goal acceptance.
+- [x] After committing the first correlated child `throw`, request one native Pi wake. An offline `AgentSession` test verifies idle wake and duplicate suppression; an adapter verifies sibling fallback preflight cannot block the stop.
+- [x] Verify malformed graphs and edgeless advice, exact recovery of a launch-refused node and individual rerun of a confirmed terminal node, and stale-input recovery without asking for a second unchanged stamp. Shared-CWD conflict detection is not implemented: automatic children remain read-only and Compass does not coordinate writers.
 
 #### 2. Node frames and artifact handoff
 
 - [x] Bind approved parent nodes to native same-session frame commits. A single return submits the outcome and explicit exports; a queued return cannot settle the node. Code Mode remains a separate deterministic route.
-- [ ] Writable children are out of scope under the repository's read-only Subagent constraint. No write locks, automatic merge, or rollback were added.
+- Deferred: writable children are out of scope under the repository's read-only Subagent constraint. No write locks, automatic merge, or rollback were added.
 - [x] Same-session node handoff uses exact exports and caveats. The native Runner exercises automatic A → B → C with no main turn and B → throw → main with C pending. A fixture also verifies that a replan can reuse A’s exact export. Native child artifact inputs are not exposed.
 
 #### 3. Context and incremental editing
@@ -65,7 +65,7 @@ Current surface: seven initially registered, stable tools. goal alone owns seman
 - Disposable Pi 1.5.2 Agent run (`jrt/deepseek-v4.1-flash`) exercised source-bound Goal, real `read` dedup, frame memory, scoped export and `reported_pass`. The first pass stopped inside a frame. Recovery reached root and reported 1/1 criterion with explicit static-file limitations; it initially confused ordinary return with node outcomes and invented IDs for additions. Review added a frame-return cue, one applied return receipt, explicit return mode and actionable ID diagnostics. Raw transcripts remain local. This does not qualify interactive approval, live child execution, Human acceptance, or end-to-end cost/cache benefits.
 - Final local gates: full 224/224, core 63/63, non-extension 92/92; isolated static preflight and real Pi loader/runner/Worker checks passed. Package dry run excluded `.pi/` and session JSONL.
 - White-box follow-up: full 228/228, core 64/64, non-extension 93/93, and isolated static preflight passed. Through the actual Pi loader in a disposable profile, public launch-contract resolution for pi-subagents 0.88.1 and 0.89.1 rejected stock `scout` tools and accepted the repository’s read-only override. This check did not execute a child or call a provider. The structured request cannot bind a preflight digest atomically; profiles must remain stable through launch.
-- Open: native child stop does not trigger an idle Agent turn; shared-cwd writable scheduling is not supported. No end-to-end MindStudio replay was run.
+- Open for Human live acceptance: native interactive approval, real child execution and provider behavior. Shared-CWD writable scheduling remains out of scope. A targeted MindStudio failure replay ran offline, not the full workload.
 
 ## Source of requirements
 

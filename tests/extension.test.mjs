@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import extensionFactory from "../src/index.ts";
+import { FALLBACK_MODEL } from "../src/execution-orchestrator.mjs";
 import { exactAnswers } from "./helpers/goal-state.mjs";
 import { dagApprovalStatus, normalizeGoalRunState } from "../src/goal-run.mjs";
-import { humanSourceRef, latestHumanSource } from "../src/goal-sources.mjs";
+import { humanSourceRef } from "../src/goal-sources.mjs";
 
 // Native extension surface: fixed seven tools, code-owned preconditions,
 // interactive-only proposal expansion and structured-delegation consumption.
@@ -20,6 +21,7 @@ function fakePi(options = {}) {
   const tools = new Map();
   const entries = options.entries ?? [];
   const delegation = [];
+  const notices = [];
   let active = [...(options.active ?? ["read", "bash", "edit", "write", "amend", "codemode", "subagent", "ask_user_question"])];
   const emit = (name, payload) => {
     for (const handler of [...(bus.get(name) ?? [])]) handler(payload);
@@ -49,7 +51,10 @@ function fakePi(options = {}) {
     });
   });
   const pi = {
-    hooks, tools, entries, delegation,
+    hooks, tools, entries, delegation, notices,
+    sendMessage(message, options) {
+      notices.push({ message, options, stopped: stateOf(pi).plan.stopped });
+    },
     events: { on: subscribe, emit },
     on(name, handler) { hooks.set(name, [...(hooks.get(name) ?? []), handler]); },
     registerTool(definition) { tools.set(definition.name, definition); },
@@ -433,6 +438,10 @@ test("a delegated throw freezes progression and cancellation targets one exact s
     assert.equal(plan.ready, undefined);
     assert.equal(plan.stopped.taskId, "api");
     assert.equal(plan.stopped.sideEffects, "No writes observed.");
+    assert.deepEqual(pi.notices.map(({ message, options, stopped: committed }) => ({ type: message.customType, options, taskId: committed?.taskId })), [
+      { type: "pi-compass-v2.plan-stop", options: { triggerTurn: true, deliverAs: "steer" }, taskId: "api" },
+    ], "the first correlated stop requests one native wake after persistence");
+    assert.match(pi.notices[0].message.content, /approved plan targets the retired router/);
     assert.equal((await view(pi)).plan.stoppedBy, "api");
     assert.equal(cancels.length, 0, "a throw does not cancel siblings by itself");
     const active = pi.delegation.find((request) => request.nodeId === "ui");
@@ -450,23 +459,34 @@ test("a delegated throw freezes progression and cancellation targets one exact s
   }
   assert.equal(stateOf(pi).plan.tasks[2].status, "pending");
   assert.equal(pi.delegation.length, 2);
+  assert.equal(pi.notices.length, 1, "settling a sibling does not request another wake");
 });
 
-test("a semantic stop suppresses fallback but still consumes a sibling failure", async () => {
-  const sibling = Promise.withResolvers();
-  const pi = fakePi({ respondDelegation: (request) => request.nodeId === "api" ? {
-    status: "completed", result: { kind: "structured", value: {
-      status: "throw", summary: "Scope mismatch", evidence: ["README.md documents a different API"],
-      reason: "The Goal needs a revised plan.",
-    } },
-  } : sibling.promise });
+test("a delegated throw commits during a sibling fallback preflight and suppresses that launch", { timeout: 2000 }, async () => {
+  const stop = Promise.withResolvers();
+  const checkingFallback = Promise.withResolvers();
+  const releaseFallback = Promise.withResolvers();
+  const pi = fakePi({
+    respondDelegation: (request) => request.nodeId === "api" ? stop.promise : { status: "failed", error: "Provider returned 503" },
+    launchPreflight: async (request) => {
+      if (request.model === FALLBACK_MODEL) {
+        checkingFallback.resolve();
+        await releaseFallback.promise;
+      }
+      return launchProjection(request);
+    },
+  });
   await plannedGoal(pi);
   await approve(pi);
+  await checkingFallback.promise;
   try {
-    await waitFor(() => stateOf(pi).plan.stopped?.taskId === "api", "the stop is committed before the sibling fails");
+    stop.resolve({ status: "completed", result: { kind: "structured", value: {
+      status: "throw", summary: "Scope mismatch", evidence: ["README.md documents a different API"], reason: "The Goal needs a revised plan.",
+    } } });
+    await waitFor(() => pi.notices.length === 1, "the stop wakes main without waiting for sibling preflight", 150);
   } finally {
-    sibling.resolve({ status: "failed", error: "Provider returned 503" });
-    await waitFor(() => stateOf(pi).plan.executions[0].status === "completed", "the sibling failure is consumed");
+    releaseFallback.resolve();
+    await waitFor(() => stateOf(pi).plan.executions[0].status === "completed", "the sibling failure is consumed", 500);
   }
   assert.equal(pi.delegation.length, 2, "the 503 cannot initiate a fallback after a stop");
   assert.match(stateOf(pi).plan.tasks[1].reason, /503/);
@@ -522,8 +542,9 @@ test("unavailable launch preflight leaves all candidates pending with a plan-vis
   assert.ok(plan.tasks.every((task) => task.status === "pending"));
 });
 
-test("an unsafe child is blocked without consuming a slot or delaying an independent safe child", async () => {
-  const pi = fakePi({ launchPreflight: (request) => launchProjection(request, request.agent === "scout" ? ["write"] : ["read"]) });
+test("a refused child does not delay safe work and only the reopened node retries", async () => {
+  let profileFixed = false;
+  const pi = fakePi({ launchPreflight: (request) => launchProjection(request, !profileFixed && request.agent === "scout" ? ["write"] : ["read"]) });
   const unsafe = Array.from({ length: 7 }, (_, idx) => ({ ...tasks[0], id: `unsafe${idx}` }));
   await plannedGoal(pi, [...unsafe, { ...tasks[1], agent: "delegate" }, { ...tasks[1], id: "dependent", dependsOn: [unsafe[0].id] }]);
   await approve(pi);
@@ -535,6 +556,16 @@ test("an unsafe child is blocked without consuming a slot or delaying an indepen
     assert.equal(task.status, "blocked");
     assert.match(task.reason, /outside the read-only role: write.*No child was dispatched.*reopen/);
   }
+  profileFixed = true;
+  const retry = receipt(await call(pi, "compass_plan", { action: "reopen", tasks: [{ id: unsafe[0].id, reason: "Restore the read-only profile" }] }));
+  assert.deepEqual(retry.affected, [unsafe[0].id, "dependent"]);
+  await waitFor(() => stateOf(pi).plan.tasks[0].status === "done", "only the repaired node completes");
+  assert.deepEqual(pi.delegation.map(({ nodeId }) => nodeId), ["ui", unsafe[0].id]);
+  assert.equal(stateOf(pi).plan.tasks[1].status, "blocked");
+  await call(pi, "compass_plan", { action: "reopen", tasks: [{ id: "ui", reason: "Verify terminal re-execution is scoped" }] });
+  await waitFor(() => pi.delegation.length === 3 && stateOf(pi).plan.tasks.find(({ id }) => id === "ui").status === "done", "terminal node reruns once");
+  assert.deepEqual(pi.delegation.map(({ nodeId }) => nodeId), ["ui", unsafe[0].id, "ui"]);
+  assert.notEqual(pi.delegation[0].requestId, pi.delegation[2].requestId);
 });
 
 test("preflight does not hold Goal state open or launch an obsolete plan", { timeout: 2000 }, async () => {

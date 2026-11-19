@@ -2,6 +2,8 @@
 
 ## 0.10.0 — seven-tool candidate
 
+- Wake main through Pi after the first correlated child `throw` is persisted. Sibling results still settle, and a fallback under preflight cannot delay the stop or launch afterward. No pi-subagents changes.
+
 - Separate Goal and DAG signatures in one tabbed native questionnaire. Draft Goals without provenance refs. Make main the only planning frame, commit eligible serial frames and their exact handoffs without intermediate model turns, and return to main on semantic throw. GoalRun v11/context v6 reject earlier snapshots without migration.
 
 - Make unapproved DAGs non-blocking for the Goal and let the Agent discard inactive plans. Carry the next approval or execution step in receipts. Validate artifact producers at definition and check exact inputs before reporting parent readiness. Admit read-only native nodes independently without holding the state queue during preflight.

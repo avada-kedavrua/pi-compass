@@ -11,6 +11,7 @@ export { contentVersion } from "./context-values.mjs";
 
 export const CONTEXT_STATE_TYPE = "pi-compass-v2.context";
 export const CONTEXT_MESSAGE_TYPE = "pi-compass-v2.context-message";
+export const PLAN_STOP_MESSAGE_TYPE = "pi-compass-v2.plan-stop";
 export const CONTEXT_SCHEMA_VERSION = 6;
 const INTENT_TYPE = `${CONTEXT_STATE_TYPE}.intent`;
 const MAX_DEPTH = 16;
@@ -18,7 +19,7 @@ const MAX_SOURCES = 256;
 const MAX_CONTROL_BYTES = 2 * 1024 * 1024;
 const MAX_PINS = 64;
 const MAX_CONTENT_BYTES = 128 * 1024;
-const EXTERNAL_MESSAGES = new Set(["watch-condition", "watch-lost", "subagent-result"]);
+const EXTERNAL_MESSAGES = new Set(["watch-condition", "watch-lost", "subagent-result", PLAN_STOP_MESSAGE_TYPE]);
 const RESERVED_MESSAGES = new Set(RESERVED_CUSTOM_TYPES);
 
 function fail(message) { throw new Error(`${message} No context changed.`); }

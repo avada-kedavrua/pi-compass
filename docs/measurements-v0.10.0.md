@@ -2,7 +2,13 @@
 
 All numbers below are bounded local measurements, not provider, token-cache or semantic-quality evidence.
 
-## Seven-tool schema cost
+## Local stop and field recovery checks
+
+Compared with `262d566` on the same Pi 1.5.2 host: 38,168 schema bytes and 15,511 Code Mode signature characters before and after (seven tools). Compact state JSON stayed 193 bytes, or 52 for an unchanged cursor. In the 1,000-message fixture, frame entry took 2.34 ms median vs. 2.26 ms; both generated 1,002 edits and 168,973 bytes of drafts. These small timing samples do not establish a speed change.
+
+The scripted MindStudio failure replay used four model-stream invocations: stale start, unchanged Goal review, authorized batch with a later failure, and final reply. No provider was called. The separate child-stop fixture measured one Pi wake for a duplicate terminal delivery and no change to the pending dependent. Neither is a replay of the full live workload.
+
+## Earlier seven-tool schema cost
 
 Removing RouteSet reduces the serialized tool schemas from 37,189 to 28,597 bytes (23.1%). The Code Mode declaration renderer measures 11,963 total signature characters, down from 15,442. These are schema measurements, not provider savings.
 
