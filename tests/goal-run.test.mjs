@@ -21,6 +21,7 @@ import {
   transitionTasks,
   reconcileUnknownExecutionTasks,
   revisePlanState,
+  discardPlan,
   bindDagApprovalQuestionnaire,
   renewDagApprovalRequest,
   dagApprovalStatus,
@@ -426,6 +427,24 @@ test("acceptance evidence accepts realistic bounded evidence and survives state 
   const normalized = normalizeGoalRunState(state);
   assert.equal(normalized.goal.criteria[0].evidence.length, evidence.trim().length);
   assert.equal(normalized.goal.criteria[0].evidence, evidence.trim());
+});
+
+test("drafts do not gate Goal completion; discarding inactive work preserves Goal evidence and plan identity isolation", () => {
+  let state = revisePlanState(plannedGoal(), { tasks }).state;
+  const revision = state.plan.revision;
+  for (const { id } of state.goal.criteria) {
+    state = recordAcceptanceResult(state, { criterionId: id, status: "reported_pass", evidence: "Observed independently of the draft" }).state;
+  }
+  assert.equal(goalOutcomeStatus(state).status, "agent_reported_satisfied");
+  const approved = approvePlan(state);
+  assert.equal(goalOutcomeStatus(approved).status, "incomplete");
+  const started = transitionTasks(approved, "start", [{ id: "api" }], updateTasks).state;
+  assert.throws(() => discardPlan(started), /active or unresolved/);
+  const discarded = discardPlan(approved).state;
+  assert.deepEqual(discarded.goal, approved.goal);
+  assert.equal(dagApprovalStatus(discarded).approved, false);
+  assert.equal(goalOutcomeStatus(discarded).status, "agent_reported_satisfied");
+  assert.ok(revisePlanState(discarded, { tasks }).state.plan.revision > revision);
 });
 
 test("reported acceptance does not hide a blocked Goal task", () => {

@@ -14,7 +14,7 @@ import {
   providerFallbackReason,
   normalizeProviderDiagnostics,
   parseSubagentDelegationResponse,
-  selectReadySubagentTasks,
+  delegationCandidates,
 } from "../src/execution-orchestrator.mjs";
 import { emptyDagState, createOrRevisePlan, taskAssessmentBinding, updateTasks } from "../src/dag-core.mjs";
 import { bindDagApprovalQuestionnaire, captureHumanDecision } from "../src/goal-run.mjs";
@@ -70,11 +70,10 @@ test("ready Subagent selection requires explicit read-only executor and satisfie
       task("e", { writeScope: "src/**" }),
     ],
   };
-  assert.deepEqual(selectReadySubagentTasks(plan).map((item) => item.id), ["a"]);
-  assert.deepEqual(selectReadySubagentTasks(plan, 1).map((item) => item.id), ["a"]);
+  assert.deepEqual(delegationCandidates(plan).map((item) => item.id), ["a"]);
   plan.tasks[0].status = "done";
   plan.tasks[0].assessment = { status: "pass", binding: taskAssessmentBinding(plan, plan.tasks[0]) };
-  assert.deepEqual(selectReadySubagentTasks(plan).map((item) => item.id), ["b"]);
+  assert.deepEqual(delegationCandidates(plan).map((item) => item.id), ["b"]);
 });
 
 test("DAG validation rejects Subagent tasks without explicit read-only scope", () => {
@@ -423,7 +422,7 @@ test("low-savings serialization cools down and re-probes rather than staying ser
 
 test("Subagent selection requires an explicit separate-context cost-benefit rationale", () => {
   const plan = { tasks: [task("a", { dispatchReason: "" }), task("b")] };
-  assert.deepEqual(selectReadySubagentTasks(plan).map((item) => item.id), ["b"]);
+  assert.deepEqual(delegationCandidates(plan).map((item) => item.id), ["b"]);
   assert.throws(() => createOrRevisePlan(emptyDagState(), {
     goal: "inspect independent areas",
     definitionKey: "digest-a",

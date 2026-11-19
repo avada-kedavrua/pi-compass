@@ -7,16 +7,17 @@ import { executionDriftReason } from "./write-scope.mjs";
 import { questionnaireFailureResultPatch, normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 import { latestHumanSource, resolveGoalSources } from "./goal-sources.mjs";
 import { agentResult } from "./compass-result.mjs";
-import { agentState } from "./agent-state.mjs";
+import { agentState, planApproval, planProgress } from "./agent-state.mjs";
+import { nodeInputResolver } from "./node-inputs.mjs";
+import { approvalIsCurrent } from "./dag-approval.mjs";
 import { toolSchemas, COMPASS_TOOL_NAMES } from "./tool-schema.mjs";
-import { approvalPrompt } from "./dag-approval.mjs";
 import { agentSearch, agentContextOperation, retainedContext } from "./context-agent.mjs";
-import { contextSelection, currentValue, RESERVED_CUSTOM_TYPES } from "./context-values.mjs";
+import { RESERVED_CUSTOM_TYPES } from "./context-values.mjs";
 import { registerRuntimeGuards } from "./runtime-guard.mjs";
-import { DELEGATION_EVENTS, FALLBACK_MODEL, PRIMARY_MODEL, REVIEW_MODEL, DEFAULT_TIMEOUT_MS, MAX_WAVE_TASKS, START_ACK_TIMEOUT_MS, assessWavePolicy, hasCompleteUsageMetrics, buildSubagentDelegationRequest, selectReadySubagentTasks, parseSubagentDelegationResponse, normalizeProviderDiagnostics, providerFallbackReason, readOnlyLaunchRefusal } from "./execution-orchestrator.mjs";
+import { DELEGATION_EVENTS, FALLBACK_MODEL, PRIMARY_MODEL, REVIEW_MODEL, DEFAULT_TIMEOUT_MS, MAX_WAVE_TASKS, START_ACK_TIMEOUT_MS, assessWavePolicy, hasCompleteUsageMetrics, buildSubagentDelegationRequest, delegationCandidates, parseSubagentDelegationResponse, normalizeProviderDiagnostics, providerFallbackReason, readOnlyLaunchRefusal } from "./execution-orchestrator.mjs";
 import { executionUnresolved, readyTasks, retainExecutions, taskDependencies, updateTasks } from "./dag-core.mjs";
-import { setGoal, updateGoal, patchPlanState, addressedConstraints, observeHumanInput, stateCursor, GOAL_RUN_API_VERSION, GOAL_RUN_RELEASE, recordAcceptanceResult, bindDagApprovalQuestionnaire, captureHumanDecision, dagApprovalStatus, recordTaskAssessment, renewDagApprovalRequest, emptyGoalRunState, mergeTrace, normalizeGoalRunState, recordCheckpoint, recordDecision, recordFailure, recordHumanQuestionnaireFailure, recordExecutionDrift, recordExecutionEvent, recordWriteTarget, revisePlanState, stopPlan, transitionTasks, reconcileUnknownExecutionTasks, expandApprovalProposal } from "./goal-run.mjs";
-import { CONTEXT_MESSAGE_TYPE, CONTEXT_STATE_TYPE, emptyContextState, normalizeContextState, pinnedContextOverlay, planContextBoundary, planRetentionBoundary, planObservationBoundary, planWatchBoundary, prepareContextOperation, validateContextOperation, releaseWatchMessages, restoreContextState, sourceIndex } from "./context-core.mjs";
+import { setGoal, updateGoal, patchPlanState, discardPlan, addressedConstraints, observeHumanInput, stateCursor, GOAL_RUN_API_VERSION, GOAL_RUN_RELEASE, recordAcceptanceResult, bindDagApprovalQuestionnaire, captureHumanDecision, recordTaskAssessment, renewDagApprovalRequest, emptyGoalRunState, mergeTrace, normalizeGoalRunState, recordCheckpoint, recordDecision, recordFailure, recordHumanQuestionnaireFailure, recordExecutionDrift, recordExecutionEvent, recordWriteTarget, revisePlanState, stopPlan, transitionTasks, reconcileUnknownExecutionTasks, expandApprovalProposal } from "./goal-run.mjs";
+import { CONTEXT_MESSAGE_TYPE, CONTEXT_STATE_TYPE, emptyContextState, normalizeContextState, pinnedContextOverlay, planContextBoundary, planRetentionBoundary, planObservationBoundary, planWatchBoundary, prepareContextOperation, validateContextOperation, releaseWatchMessages, restoreContextState } from "./context-core.mjs";
 
 const STATE_ENTRY_TYPE = "pi-compass-v2.goalrun";
 const MAX_TRACE_ENTRIES = 24;
@@ -34,7 +35,7 @@ let activePi: any = pi;
 let branchGeneration = 0;
 let lastCommittedState: any = emptyGoalRunState();
 const delegationRuntimes = new WeakMap<object, any>();
-const autoSchedulers = new WeakMap<object, Promise<unknown>>();
+const autoSchedulers = new WeakMap<object, { rerun: boolean }>();
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
@@ -545,12 +546,12 @@ function consumeDelegationResponse(pi: any, generation: number, request: any, ou
     }
     const fallbackReason = allowFallback && !row.cancelRequested && !state.plan.stopped
       && !state.plan.executions.some((batch: any) => batch.status === "unknown") && providerFallbackReason(response);
-    if (fallbackReason && dagApprovalStatus(state).approved && goalInputIsCurrent(ctx)) {
+    if (fallbackReason && approvalIsCurrent(state) && goalInputIsCurrent(ctx)) {
       const fallback = { ...request, model: FALLBACK_MODEL, requestId: randomUUID() };
       const refusal = await checkLaunch(pi, ctx, runtime, fallback);
       if (!inCurrentBranch(pi, generation)) return;
       if (refusal) parsed.reason += ` Fallback refused: ${refusal}`;
-      if (!refusal && dagApprovalStatus(state).approved && goalInputIsCurrent(ctx)) {
+      if (!refusal && approvalIsCurrent(state) && goalInputIsCurrent(ctx)) {
         execution.results[index] = { ...row,
           status: "dispatching", requestId: fallback.requestId, model: FALLBACK_MODEL,
           fallbackAttempted: true, fallbackReason, primaryError: clip(parsed.reason, 400),
@@ -559,7 +560,7 @@ function consumeDelegationResponse(pi: any, generation: number, request: any, ou
         };
         persistState(pi);
         if (!inCurrentBranch(pi, generation)) return;
-        if (!state.plan.stopped && dagApprovalStatus(state).approved && goalInputIsCurrent(ctx)) {
+        if (!state.plan.stopped && approvalIsCurrent(state) && goalInputIsCurrent(ctx)) {
           // Return the promise boxed to release the state queue before waiting.
           return { request: fallback, response: dispatchOneDelegation(pi, generation, runtime, fallback, ctx) };
         }
@@ -570,13 +571,12 @@ function consumeDelegationResponse(pi: any, generation: number, request: any, ou
     if (inCurrentBranch(pi, generation)) scheduleReadySubagentWaves(pi, ctx);
   });
 }
-function readyForDispatch(ctx: any) {
-  if (!state.goal.current || state.plan.stopped || !dagApprovalStatus(state).approved || !goalInputIsCurrent(ctx)) return [];
-  const batches = state.plan.executions;
-  if (batches.some((batch: any) => batch.status === "unknown")) return [];
-  const active = batches.reduce((count: number, batch: any) => count + batch.results.filter(executionUnresolved).length, 0);
-  const available = MAX_WAVE_TASKS - active;
-  return available > 0 ? selectReadySubagentTasks(state.plan, available) : [];
+function dispatchAdmission(ctx: ExtensionContext) {
+  if (!state.goal.current || state.plan.stopped || !goalInputIsCurrent(ctx) || !approvalIsCurrent(state)) return null;
+  const active = state.plan.executions.reduce((count: number, batch: any) => count + batch.results.filter(executionUnresolved).length, 0);
+  if (active >= MAX_WAVE_TASKS) return null;
+  const candidates = delegationCandidates(state.plan);
+  return candidates.length ? { candidates, active } : null;
 }
 
 function recordDispatchFailure(pi: any, tasks: any[], reason: string) {
@@ -597,41 +597,71 @@ function reportDispatchError(ctx: any, error: unknown) {
   ctx?.ui?.notify?.(`Compass dispatch could not finish: ${error instanceof Error ? error.message : String(error)}`, "error");
 }
 
-async function admitReadySubagents(pi: any, generation: number, ctx: any) {
-  if (!inCurrentBranch(pi, generation) || !readyForDispatch(ctx).length) return;
-  const cwd = contextCwd(ctx);
-  const availability = await executionAvailability(pi, cwd);
-  await serializedInBranch(pi, generation, async () => {
-    const candidates = readyForDispatch(ctx);
-    if (!candidates.length) return;
-    const policy = assessWavePolicy(candidates, state.plan.executionHistory, candidates.length);
-    if (["serial_short_tasks", "provider_cooldown"].includes(policy.mode) && state.plan.executions.some(executionUnresolved)) return;
-    const ready = candidates.slice(0, policy.maxTasks);
+type DelegationRequest = ReturnType<typeof buildSubagentDelegationRequest>;
+async function preflightCandidates(pi: unknown, ctx: ExtensionContext, runtime: unknown, candidates: ReturnType<typeof delegationCandidates>, limit: number, waveId: string, stillCurrent: () => boolean) {
+  const { current: goal, constraints } = state.goal;
+  const passed: { task: (typeof candidates)[number]; request: DelegationRequest }[] = [];
+  const refused: { id: string; reason: string }[] = [];
+  for (let cursor = 0; cursor < candidates.length && passed.length < limit;) {
+    const group = candidates.slice(cursor, cursor + limit - passed.length);
+    cursor += group.length;
+    const checked = await Promise.all(group.map(async (task) => {
+      try {
+        const request = buildSubagentDelegationRequest({
+          task, goal, constraints, cwd: ctx.cwd,
+          ownerRunId: waveId, requestId: randomUUID(), model: primaryModelForTask(task),
+        });
+        const reason = await checkLaunch(pi, ctx, runtime, request);
+        return reason ? { task, reason } : { task, request };
+      } catch (error) {
+        return { task, reason: error instanceof Error ? error.message : String(error) };
+      }
+    }));
+    if (!stillCurrent()) return null;
+    for (const { task, request, reason } of checked) {
+      if (request) passed.push({ task, request });
+      else refused.push({ id: task.id, reason: "Launch preflight refused: " + reason + " No child was dispatched; fix the cause and reopen this task." });
+    }
+  }
+  return { passed, refused };
+}
+
+async function admitReadySubagents(pi: unknown, generation: number, ctx: ExtensionContext, { candidates, active }: NonNullable<ReturnType<typeof dispatchAdmission>>) {
+  const policy = assessWavePolicy(candidates, state.plan.executionHistory, MAX_WAVE_TASKS - active);
+  if (active && ["serial_short_tasks", "provider_cooldown"].includes(policy.mode)) return;
+  const approvalId = state.plan.approval.requestId;
+  const stillCurrent = () => inCurrentBranch(pi, generation) && state.plan.approval?.requestId === approvalId && goalInputIsCurrent(ctx);
+  const availability = await executionAvailability(pi, ctx.cwd);
+  if (!stillCurrent()) return;
+  const waveId = randomUUID();
+  // Native configuration/model resolution may await; do not hold the state queue.
+  const selected = availability.ok ? await preflightCandidates(pi, ctx, availability.runtime, candidates, policy.maxTasks, waveId, stillCurrent) : null;
+  await serializedInBranch(pi, generation, () => {
+    if (!stillCurrent()) return;
+    const current = dispatchAdmission(ctx);
+    if (!current) return;
     if (!availability.ok) {
-      recordDispatchFailure(pi, ready, availability.reason);
+      recordDispatchFailure(pi, current.candidates, availability.reason);
       return;
     }
-    const waveId = randomUUID();
+    if (!selected) return;
+    const eligible = new Set(current.candidates.map(({ id }) => id));
+    const refused = selected.refused.filter(({ id }) => eligible.has(id));
+    const passed = selected.passed.filter(({ task }) => eligible.has(task.id));
+    if (!refused.length && !passed.length) return;
+    const ready = passed.map(({ task }) => task);
+    const requests = passed.map(({ request }) => request);
+    state.plan.executions = state.plan.executions.filter((batch: any) => batch.status !== "failed");
+    state.plan = updateTasks(state.plan, [
+      ...refused.map((task) => ({ ...task, status: "blocked" })),
+      ...ready.map(({ id }) => ({ id, status: "in_progress" })),
+    ]);
+    if (refused.length) state = recordExecutionEvent(state, {
+      status: "blocked", summary: "Native launch preflight blocked: " + refused.map(({ id }) => id).join(", ") + ". See plan for reasons.",
+    });
+    if (!passed.length) { persistState(pi); return; }
     const frameScope = restoreContextState(ctx.sessionManager.getBranch()).frames.at(-1)?.id ?? null;
-    let requests;
-    try {
-      requests = ready.map((task: any) => buildSubagentDelegationRequest({
-        task, goal: state.goal.current, constraints: state.goal.constraints, cwd,
-        ownerRunId: waveId, requestId: randomUUID(), model: primaryModelForTask(task),
-      }));
-    } catch (error) {
-      recordDispatchFailure(pi, ready, error instanceof Error ? error.message : String(error));
-      return;
-    }
-    const refusals = await Promise.all(requests.map((request: any) => checkLaunch(pi, ctx, availability.runtime, request)));
-    if (!inCurrentBranch(pi, generation) || !goalInputIsCurrent(ctx)) return;
-    const denied = refusals.findIndex(Boolean);
-    if (denied >= 0) {
-      recordDispatchFailure(pi, ready, `${ready[denied].id}: ${refusals[denied]} No child was dispatched.`);
-      return;
-    }
-    state = transitionTasks(state, "start", ready.map((task: any) => ({ id: task.id })), updateTasks).state;
-    const batch = executionRecordForWave(waveId, ready, state.plan.revision, state.plan.stateVersion, requests.map((request: any) => request.requestId), policy, frameScope);
+    const batch = executionRecordForWave(waveId, ready, state.plan.revision, state.plan.stateVersion, requests.map(({ requestId }) => requestId), policy, frameScope);
     state.plan.executions.push(batch);
     state = recordExecutionEvent(state, {
       status: "dispatching", summary: `Prepared ${ready.length} read-only Subagent task(s).`, text: policy.reason, ref: waveId,
@@ -639,7 +669,7 @@ async function admitReadySubagents(pi: any, generation: number, ctx: any) {
     persistState(pi);
     for (const [i, request] of requests.entries()) {
       if (!inCurrentBranch(pi, generation)) return;
-      if (!dagApprovalStatus(state).approved || !goalInputIsCurrent(ctx)) {
+      if (!approvalIsCurrent(state) || !goalInputIsCurrent(ctx)) {
         const staged = executionBatch(waveId);
         const pendingIds = staged.taskIds.slice(i);
         state.plan = updateTasks(state.plan, pendingIds.map((id: string) => ({ id, status: "pending" })));
@@ -656,12 +686,17 @@ async function admitReadySubagents(pi: any, generation: number, ctx: any) {
 
 // Claim dispatch in the branch queue, but never hold admission while children run.
 function scheduleReadySubagentWaves(pi: any, ctx: any) {
-  if (autoSchedulers.has(pi) || !readyForDispatch(ctx).length) return false;
+  const admission = dispatchAdmission(ctx);
+  if (!admission) return false;
+  const pending = autoSchedulers.get(pi);
+  if (pending) { pending.rerun = true; return false; }
   const generation = branchGeneration;
-  const admission = Promise.resolve().then(() => admitReadySubagents(pi, generation, ctx));
-  autoSchedulers.set(pi, admission);
-  void admission.catch((error) => reportDispatchError(ctx, error)).finally(() => {
-    if (autoSchedulers.get(pi) === admission) autoSchedulers.delete(pi);
+  const claim = { rerun: false };
+  autoSchedulers.set(pi, claim);
+  void admitReadySubagents(pi, generation, ctx, admission).catch((error) => reportDispatchError(ctx, error)).finally(() => {
+    if (autoSchedulers.get(pi) !== claim) return;
+    autoSchedulers.delete(pi);
+    if (claim.rerun) scheduleReadySubagentWaves(pi, ctx);
   });
   return true;
 }
@@ -729,25 +764,8 @@ function contextBoundaryPreview(ctx: any) {
     canContinue: true,
   };
 }
-function nodeInputs(task: any, ctx: any) {
-  const from = (task.fromTasks ?? []).map((id: string) => state.plan.tasks.find((item: any) => item.id === id));
-  const refs = [...(task.inputRefs ?? [])];
-  for (const prerequisite of from) {
-    if (!prerequisite?.artifacts?.length) throw new Error(`Node ${prerequisite?.id ?? "prerequisite"} has no exported artifact. Patch the plan or return an artifact from that node. No state changed.`);
-    refs.push(...prerequisite.artifacts);
-  }
-  const index = sourceIndex(ctx.sessionManager.getBranch(), { context: contextBoundaryPreview(ctx) });
-  const captures = [...new Set(refs)].map((ref: any) => {
-    const selection = contextSelection(ref);
-    const value = currentValue(contextState, index, selection.id, { key: selection.binding });
-    if (value.version !== selection.version || index.byId.get(selection.id)?.details?.action !== "export") {
-      throw new Error("The planned artifact is stale or is not an exported frame value. Select the current exact export. No state changed.");
-    }
-    return { ...selection, mode: "ref" };
-  });
-  const carried = state.plan.tasks.filter((item: any) => (item.artifacts ?? []).some((ref: string) => refs.includes(ref)));
-  const caveats = [...from, ...carried].flatMap((item: any) => item.assessment?.caveats ?? []);
-  return { captures, caveats: [...new Set(caveats)] };
+function nodeInputs(task: unknown, ctx: ExtensionContext) {
+  return noMutation(() => nodeInputResolver(state.plan, contextState, ctx.sessionManager.getBranch(), () => contextBoundaryPreview(ctx))(task));
 }
 
 function verifyNodeOperation(operation: any, ctx: any) {
@@ -757,10 +775,10 @@ function verifyNodeOperation(operation: any, ctx: any) {
   const task = state.plan.tasks.find((item: any) => item.id === taskId);
   if (!task || state.goal.version !== goalVersion || state.plan.revision !== planRevision) throw new Error("The node belongs to an older Goal or plan. No state changed.");
   if (operation.action === "call") {
-    if (!goalInputIsCurrent(ctx) || !dagApprovalStatus(state).approved || !readyTasks(state.plan).some((item: any) => item.id === taskId)) {
+    if (!goalInputIsCurrent(ctx) || !approvalIsCurrent(state) || !readyTasks(state.plan).some((item: any) => item.id === taskId)) {
       throw new Error("The node is not ready under a current exact approval. No state changed.");
     }
-    if (task.executor !== "parent" || contextState.frames.length) throw new Error("Start a parent node from the root frame; Code Mode and native children have separate execution routes. No state changed.");
+    if (task.executor !== "parent") throw new Error("Only parent nodes use compass_context call(taskId). Code and subagent work use separate execution routes. No state changed.");
     return task;
   } else if (operation.action === "return") {
     if (contextState.frames.at(-1)?.node?.taskId !== taskId || task.status !== "in_progress") throw new Error("Only the active node frame can submit this outcome. No state changed.");
@@ -780,7 +798,7 @@ function reconcileNodeFrame(ctx: any) {
   if (!task || state.goal.version !== node.goalVersion || state.plan.revision !== node.planRevision) return;
   let expired = false;
   if (!outcome) {
-    if (task.status === "pending" && goalInputIsCurrent(ctx) && dagApprovalStatus(state).approved && readyTasks(state.plan).some((item: any) => item.id === task.id)) {
+    if (task.status === "pending" && goalInputIsCurrent(ctx) && approvalIsCurrent(state) && readyTasks(state.plan).some((item: any) => item.id === task.id)) {
       state = transitionTasks(state, "start", [{ id: task.id }], updateTasks).state;
     } else {
       expired = true;
@@ -868,10 +886,9 @@ function afterMutation(pi: any, cwd: string) { state.projectRoot = cwd; persistS
 function stateResult(data: any = {}, unchanged = false) {
   return agentResult({ ...(unchanged ? { unchanged: true } : {}), ...data, cursor: stateCursor(state, contextState.revision) }, { stateRevision: state.stateRevision });
 }
-function planResult(data: any = {}, unchanged = false) {
-  const approval = dagApprovalStatus(state);
-  const prompt = !approval.approved ? approvalPrompt(state.plan.approvalRequest) : null;
-  return stateResult({ ...data, approval: approval.approved ? "approved" : approval.status, ...(prompt ? { prompt } : {}), ...(approval.approved ? { ready: readyTasks(state.plan).map((task: any) => task.id) } : {}) }, unchanged);
+function planResult(ctx: ExtensionContext, data = {}, unchanged = false) {
+  const branch = ctx.sessionManager.getBranch();
+  return stateResult({ ...data, ...planProgress(state, branch, contextState, () => contextBoundaryPreview(ctx)) }, unchanged);
 }
 function refreshAfterHumanInput(pi: any, ctx: any) { state.projectRoot = contextCwd(ctx); persistState(pi); }
 function restoreForTool(ctx: any, readOnly: boolean) {
@@ -898,10 +915,10 @@ function handleQuestionResult(pi: any, event: any, ctx: any) {
     if (!captured.captured) return;
     state = captured.state;
     persistState(pi);
-    if (dagApprovalStatus(state).approved) scheduleReadySubagentWaves(pi, ctx);
+    const queued = scheduleReadySubagentWaves(pi, ctx);
     const complete = normalizeQuestionnaireRecord(details, { preserveFullText: true });
     const decision = complete ? { outcome: complete.outcome, answers: complete.answers.map(({ question, answer, selected, notes }) => ({ question, answer, ...(selected ? { selected } : {}), ...(notes ? { notes } : {}) })), ...(complete.globalNote ? { note: complete.globalNote } : {}), ...(complete.unanswered?.length ? { unanswered: complete.unanswered } : {}) } : null;
-    if (owned) return { content: agentResult({ decision, ...(dagApprovalStatus(state).approved ? { plan: "approved" } : {}) }).content };
+    if (owned) return { content: planResult(ctx, { decision, ...(queued ? { dispatch: "queued" } : {}) }).content };
   });
 }
 
@@ -922,7 +939,7 @@ function registerTools(pi: any) {
           const candidate = latest ? observeHumanInput(state, latest).state : state;
           const result = noMutation(() => setGoal(candidate, { expectedVersion: candidate.goal.version, current: params.current, constraints: params.constraints, sourceIds: resolveGoalSources(branch, params.sources), ...(Object.hasOwn(params, "criteria") ? { criteria: params.criteria } : {}) }));
           if (result.changed) { state = result.state; afterMutation(pi, contextCwd(ctx)); }
-          return stateResult({ ...(result.replaced ? { replaced: true } : {}), ...(Object.hasOwn(params, "criteria") ? { criteria: state.goal.criteria.map(({ id, text }: any) => ({ id, text })) } : {}), ...(state.plan.tasks.length && !dagApprovalStatus(state).approved ? { approval: "required" } : {}) }, !result.changed);
+          return stateResult({ ...(result.replaced ? { replaced: true } : {}), ...(Object.hasOwn(params, "criteria") ? { criteria: state.goal.criteria.map(({ id, text }: any) => ({ id, text })) } : {}), ...(state.plan.tasks.length && !approvalIsCurrent(state) ? planApproval(state) : {}) }, !result.changed);
         }
         if (params.action === "update") {
           const latest = latestHumanSource(ctx.sessionManager.getBranch());
@@ -932,7 +949,7 @@ function registerTools(pi: any) {
           return stateResult({
             ...(params.constraintEdits ? { constraints: addressedConstraints(state.goal.constraints) } : {}),
             ...(params.criterionEdits ? { criteria: state.goal.criteria.map(({ id, text }: any) => ({ id, text })) } : {}),
-            ...(state.plan.tasks.length && !dagApprovalStatus(state).approved ? { approval: "required" } : {}),
+            ...(state.plan.tasks.length && !approvalIsCurrent(state) ? planApproval(state) : {}),
           }, !result.changed);
         }
         if (params.action === "decide") {
@@ -958,7 +975,7 @@ function registerTools(pi: any) {
         }
         const latest = latestHumanSource(branch);
         const observed = latest && latest !== state.latestHumanEntryId ? observeHumanInput(state, latest).state : state;
-        return agentResult(agentState(observed, branch, contextState, params));
+        return agentResult(agentState(observed, branch, contextState, params, () => contextBoundaryPreview(ctx)));
       },
     },
     compass_context_search: {
@@ -966,7 +983,7 @@ function registerTools(pi: any) {
       execute: async (params: any, ctx: any) => agentResult(agentSearch(ctx.sessionManager.getBranch(), { context: contextBoundaryPreview(ctx) }, contextState, params)),
     },
     compass_context: {
-      label: "Context", exposure: "model-only", description: "Retain compact qualified memory or full originals; manage same-session attention frames and work values. Reuse opaque refs. One pin/unpin/remember may accompany sibling tools; other operations must be standalone. queued is provisional; use the native applied/rejected receipt, never poll. A frame is not filesystem rollback. Export retained values explicitly to preserve their lifetime in the parent.",
+      label: "Context", exposure: "model-only", description: "Retain memory and manage same-session frames. Start an approved parent node with call(taskId) and finish with return(outcome); use call(task) for ordinary attention. Reuse opaque refs. One pin/unpin/remember may accompany sibling tools; other operations must be standalone. queued is provisional; use the native applied/rejected receipt, never poll. A frame is not filesystem rollback. Export retained values explicitly to preserve their lifetime in the parent.",
       execute: async (input: any, ctx: any, toolCallId: string) => {
         const branch = ctx.sessionManager.getBranch();
         const boundary = { context: contextBoundaryPreview(ctx) };
@@ -975,7 +992,7 @@ function registerTools(pi: any) {
           if (input.task !== undefined) throw new Error("Choose taskId for a plan node or task for ordinary attention, not both. No state changed.");
           normalized.node = { taskId: input.taskId, goalVersion: state.goal.version, planRevision: state.plan.revision };
           const task = verifyNodeOperation(normalized, ctx);
-          const { captures, caveats } = (task.fromTasks?.length || task.inputRefs?.length) ? nodeInputs(task, ctx) : { captures: [], caveats: [] };
+          const { captures, caveats } = nodeInputs(task, ctx);
           normalized.capture = [...captures, ...(normalized.capture ?? [])];
           normalized.task = [task.title, `Acceptance: ${task.acceptance}`, task.writeScope ? `Write scope: ${task.writeScope}` : "", ...caveats.map((note) => `Input caveat: ${note}`)].filter(Boolean).join("\n");
         }
@@ -1001,29 +1018,35 @@ function registerTools(pi: any) {
       },
     },
     compass_plan: {
-      label: "Plan", description: "Own an optional DAG: define replaces its full task graph, request_approval renews a proposal, start/done/block/reopen update tasks, assess records semantic criterion checks, throw stops progression with evidence and known side effects, cancel requests cancellation of one exact native attempt without settling it, resolve reconciles a verified terminal unknown batch. Goal alone defines criteria. Definition is a draft, not authorization. Forward the small returned prompt to native ask_user_question; code supplies its full exact proposal. Read plans through compass_state.",
+      label: "Plan", description: "Optional DAG. define/patch produce a draft; call ask_user_question with the returned prompt unchanged. request_approval retrieves or refreshes a missing/expired proposal. discard abandons an inactive DAG without changing Goal evidence. After approval: parent uses compass_context call(taskId)/return(outcome); code uses start/done; subagent launches automatically. assess completed prerequisites before dependents start. See compass_state(view=plan or execution); use block/reopen to recover a task, throw to stop the DAG, cancel/resolve for exact native attempts.",
       execute: async (params: any, ctx: any) => {
         const action = params.action;
         if (action === "define" || action === "patch") {
           const input = { ...params, changeReason: params.reason };
           const result = noMutation(() => action === "patch" ? patchPlanState(state, input) : revisePlanState(state, input));
           state = result.state;
-          if (!result.changed) return planResult({}, true);
+          if (!result.changed) return planResult(ctx, {}, true);
           afterMutation(pi, contextCwd(ctx));
           const { added, changed, removed } = state.plan.planHistory.at(-1);
           const warnings = state.plan.tasks.every((task: any) => taskDependencies(task).length === 0)
             ? ["No dependencies: check that the tasks are independent and that a DAG adds value."] : [];
-          return planResult({ diff: { added, changed, removed }, ...(warnings.length ? { warnings } : {}) });
+          return planResult(ctx, { diff: { added, changed, removed }, ...(warnings.length ? { warnings } : {}) });
+        }
+        if (action === "discard") {
+          if (contextState.frames.some((frame: any) => frame.node)) throw new Error("Return from the DAG node frame before discarding the plan. No state changed.");
+          const result = noMutation(() => discardPlan(state));
+          if (result.changed) { state = result.state; afterMutation(pi, contextCwd(ctx)); }
+          return stateResult({ plan: null }, !result.changed);
         }
         if (action === "request_approval") {
           const result = noMutation(() => renewDagApprovalRequest(state));
-          state = result.state; afterMutation(pi, contextCwd(ctx));
-          return planResult();
+          if (result.changed) { state = result.state; afterMutation(pi, contextCwd(ctx)); }
+          return planResult(ctx, {}, !result.changed);
         }
         if (action === "assess") {
           const result = noMutation(() => recordTaskAssessment(state, params));
           state = result.state; afterMutation(pi, contextCwd(ctx));
-          return planResult({ task: params.taskId, assessment: result.assessment.status });
+          return planResult(ctx, { task: params.taskId, assessment: result.assessment.status });
         }
         if (action === "resolve") return resolveExecution(pi, params, ctx);
         if (action === "cancel") return cancelDelegatedAttempt(pi, params);
@@ -1032,7 +1055,7 @@ function registerTools(pi: any) {
           if (state.plan.tasks.find((task: any) => task.id === params.taskId)?.executor === "subagent") throw new Error("Only a correlated child result can report throw for a delegated task. No state changed.");
           state = noMutation(() => stopPlan(state, params, updateTasks));
           afterMutation(pi, contextCwd(ctx));
-          return planResult({ stopped: state.plan.stopped });
+          return planResult(ctx);
         }
         if (!["start", "done", "block", "reopen"].includes(action)) throw new Error("Unknown plan action. No state changed.");
         const items = action === "start" ? params.taskIds.map((id: string) => ({ id })) : params.tasks;
@@ -1048,7 +1071,7 @@ function registerTools(pi: any) {
         if (state.plan.executions.some((batch: any) => batch.results.some((row: any) => executionUnresolved(row) && items.some((item: any) => item.id === row.id)))) throw new Error("Task belongs to an unresolved native attempt; read execution state and reconcile it first. No state changed.");
         const result = noMutation(() => transitionTasks(state, action, items, updateTasks));
         state = result.state; afterMutation(pi, contextCwd(ctx));
-        return planResult({ affected: result.affected });
+        return planResult(ctx, { affected: result.affected });
       },
     },
     compass_acceptance: {
@@ -1114,7 +1137,7 @@ function resolveExecution(pi: any, params: any, ctx: any) {
   });
   settleDelegationWave(params.requestId, clip(params.confirmationEvidence, 600));
   afterMutation(pi, contextCwd(ctx));
-  return planResult({ requestId: params.requestId, settled: result.affected });
+  return planResult(ctx, { requestId: params.requestId, settled: result.affected });
 }
 
 registerTools(pi);
@@ -1234,7 +1257,7 @@ pi.on("session_shutdown", async (_event: any, ctx: any) => {
       const nodeOperation = event.toolResults?.find((result: any) => !result.isError && result.toolName === "compass_context" && result.details?.contextOperation?.node)?.details.contextOperation;
       if (nodeOperation) {
         const task = verifyNodeOperation(nodeOperation, ctx);
-        if (task && (task.fromTasks?.length || task.inputRefs?.length)) nodeInputs(task, ctx);
+        if (task) nodeInputs(task, ctx);
       }
       const planned = planContextBoundary({ state: contextState, branch, boundary: event });
       if (planned) {

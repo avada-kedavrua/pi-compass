@@ -80,22 +80,18 @@ export function readOnlyLaunchRefusal(request, result) {
   return denied.length ? `Native profile exposes tools outside the read-only role: ${denied.join(", ")}.` : null;
 }
 
-export function selectReadySubagentTasks(plan, maxTasks = MAX_WAVE_TASKS) {
-  if (!plan || !Array.isArray(plan.tasks) || !plan.tasks.length) return [];
-  if (!Number.isInteger(maxTasks) || maxTasks < 1) throw new Error("maxTasks must be a positive integer.");
-  return readyTasks(plan).filter((task) => task.executor === "subagent"
-    && String(task.writeScope ?? "").trim().toLowerCase() === "read-only"
-    && typeof task.dispatchReason === "string" && task.dispatchReason.trim().length >= 12)
-    .slice(0, Math.min(MAX_WAVE_TASKS, maxTasks));
+function isReadOnlySubagent(task) {
+  return task?.executor === "subagent" && task.writeScope?.trim().toLowerCase() === "read-only"
+    && typeof task.dispatchReason === "string" && task.dispatchReason.trim().length >= 12;
+}
+
+export function delegationCandidates(plan, ready = readyTasks(plan)) {
+  if (plan.executions?.some((batch) => batch.status === "unknown")) return [];
+  return ready.filter(isReadOnlySubagent);
 }
 
 export function assessWavePolicy(readyTasks, history = [], maxTasks = MAX_WAVE_TASKS) {
-  const candidates = Array.isArray(readyTasks) ? readyTasks.filter((task) =>
-    task?.status === "pending"
-    && task.executor === "subagent"
-    && String(task.writeScope ?? "").trim().toLowerCase() === "read-only"
-    && typeof task.dispatchReason === "string" && task.dispatchReason.trim().length >= 12
-  ) : [];
+  const candidates = Array.isArray(readyTasks) ? readyTasks.filter((task) => task?.status === "pending" && isReadOnlySubagent(task)) : [];
   const limit = Math.min(MAX_WAVE_TASKS, Math.max(1, Number.isInteger(maxTasks) ? maxTasks : MAX_WAVE_TASKS), candidates.length || 1);
   if (candidates.length <= 1) {
     return { mode: "single", maxTasks: candidates.length, reason: "Only one eligible independent read-only Subagent task is ready.", observedSamples: 0, medianSavingsMs: null };

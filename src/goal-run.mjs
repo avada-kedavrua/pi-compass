@@ -394,7 +394,7 @@ function outcomeSummary(state, acceptance = acceptanceSummary(state)) {
   if (!state.goal.current) {
     return { status: "no_goal", evidenceLevel: "none", independentlyVerified: false, unresolvedTaskIds: [], blockedTaskIds: [], failedCriterionIds: [], blockedCriterionIds: [], unverifiedCriterionIds: [] };
   }
-  const tasks = Array.isArray(state.plan?.tasks) ? state.plan.tasks : [];
+  const tasks = state.plan.approval || planHasActiveWork(state) ? state.plan.tasks : [];
   const unresolvedTaskIds = tasks.filter((task) => task.status !== "done").map((task) => task.id);
   const blockedTaskIds = tasks.filter((task) => task.status === "blocked").map((task) => task.id);
   const currentCriteria = (state.goal.criteria ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1));
@@ -499,7 +499,7 @@ export function setGoal(stateValue, input = {}) {
   const criteriaProvided = Object.hasOwn(input, "criteria");
   const criteria = criteriaProvided ? validateGoalCriteria(input.criteria)
     : (creating || replacing ? [] : (state.goal.criteria ?? []).filter((item) => item.goalVersion === state.goal.version).map((item) => item.text));
-  if (replacing && (hasUnresolvedExecution(state) || state.plan.tasks.some((task) => task.status === "in_progress"))) throw new Error("Cannot replace the Goal while work is active or unresolved. No state changed.");
+  if (replacing && planHasActiveWork(state)) throw new Error("Cannot replace the Goal while work is active or unresolved. No state changed.");
   const oldConstraints = JSON.stringify(state.goal.constraints ?? []);
   const oldCriteria = JSON.stringify((state.goal.criteria ?? []).filter((item) => item.goalVersion === state.goal.version).map((item) => item.text));
   const semanticChanged = oldConstraints !== JSON.stringify(constraints) || oldCriteria !== JSON.stringify(criteria);
@@ -527,8 +527,7 @@ export function setGoal(stateValue, input = {}) {
   if (semanticChanged && !creating && !replacing) {
     if (state.plan.tasks.length) {
       state.plan.definitionKey = goalDefinitionKey(state.goal);
-      state.plan.approval = null;
-      state.plan.approvalRequest = criteria.length ? createDagApprovalRequest(state) : null;
+      refreshPlanApproval(state);
     }
   }
   if (criteriaProvided && oldCriteria !== JSON.stringify(criteria)) appendEvent(state, "acceptance_defined", { summary: `Defined ${criteria.length} explicit acceptance criteria.` });
@@ -573,6 +572,10 @@ export function updateGoal(stateValue, input) {
 
 function hasUnresolvedExecution(state) {
   return state.plan.executions.some(executionUnresolved);
+}
+
+function planHasActiveWork(state) {
+  return hasUnresolvedExecution(state) || state.plan.tasks.some((task) => task.status === "in_progress");
 }
 
 export function captureHumanDecision(stateValue, input) {
@@ -880,8 +883,8 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
   const criteria = state.goal.criteria.filter((item) => item.goalVersion === state.goal.version);
   const acceptanceStatusValue = acceptanceSummary(state);
   const outcome = outcomeSummary(state, acceptanceStatusValue);
-  const outcomeCaveat = acceptanceStatusValue.status === "reported_satisfied" && state.plan.tasks.some((task) => task.status === "blocked")
-    ? `Acceptance is Agent-reported satisfied, but DAG task(s) remain blocked: ${state.plan.tasks.filter((task) => task.status === "blocked").map((task) => task.id).join(", ")}. Explain the blocker before claiming the overall Goal outcome is achieved.`
+  const outcomeCaveat = acceptanceStatusValue.status === "reported_satisfied" && outcome.blockedTaskIds.length
+    ? `Acceptance is Agent-reported satisfied, but DAG task(s) remain blocked: ${outcome.blockedTaskIds.join(", ")}. Explain the blocker before claiming the overall Goal outcome is achieved.`
     : null;
   const result = {
     cursor,
@@ -955,16 +958,14 @@ export function revisePlanState(stateValue, input) {
   const previousRevision = state.plan.revision ?? 0;
   const nextPlan = createOrRevisePlan(state.plan, planInput);
   const changed = nextPlan.revision !== previousRevision;
-  if (changed && (hasUnresolvedExecution(state) || state.plan.tasks.some((task) => task.status === "in_progress"))) throw new Error("Cannot materially revise the DAG while a task remains active. Consume terminal results or reconcile first.");
+  if (changed && planHasActiveWork(state)) throw new Error("Cannot materially revise the DAG while a task remains active. Consume terminal results or reconcile first.");
   state.plan = nextPlan;
   if (changed) {
     state.plan.stopped = null;
     state.plan.executions = [];
     state.plan.executionDrift = null;
-    state.plan.approval = null;
-    state.plan.approvalRequest = null;
+    refreshPlanApproval(state);
   }
-  if (changed) state.plan.approvalRequest = createDagApprovalRequest(state);
   if (changed) appendEvent(state, previousRevision ? "plan_revised" : "plan_created", {
     summary: `DAG r${state.plan.revision}: ${state.plan.tasks.length} tasks.`,
     text: input.changeReason || (previousRevision ? "Reason not recorded." : "Initial plan."),
@@ -972,15 +973,32 @@ export function revisePlanState(stateValue, input) {
   return { state, changed };
 }
 
+export function discardPlan(stateValue) {
+  const state = normalizeGoalRunState(stateValue);
+  if (planHasActiveWork(state)) throw new Error("Cannot discard a DAG while work is active or unresolved. Consume terminal results or reconcile first. No state changed.");
+  if (!state.plan.tasks.length) return { state, changed: false };
+  state.plan = { ...emptyDagState(), revision: state.plan.revision };
+  return { state, changed: true };
+}
+
+function refreshPlanApproval(state) {
+  // The previous request must not exclude its own answer from a new proposal’s binding.
+  state.plan.approval = null;
+  state.plan.approvalRequest = null;
+  if (state.goal.criteria.length) state.plan.approvalRequest = createDagApprovalRequest(state);
+}
+
 export function renewDagApprovalRequest(stateValue) {
   const state = normalizeGoalRunState(stateValue);
   if (!state.plan?.tasks?.length || state.plan.goal !== state.goal.current) throw new Error("A current Goal DAG is required to request approval. No state changed.");
   if (state.plan.stopped) throw new Error("The DAG was stopped; revise its definition before requesting approval. No state changed.");
+  if (!state.goal.criteria.length) throw new Error("Define Goal acceptance criteria before requesting approval. No state changed.");
+  if (state.goal.reviewedInputId !== state.latestHumanEntryId) throw new Error("Review the latest Human input with compass_goal before requesting approval. No state changed.");
+  const request = state.plan.approvalRequest;
+  if (approvalIsCurrent(state) || (request?.status === "awaiting_questionnaire" && request.binding === dagApprovalBinding(state))) return { state, request, changed: false };
   if (hasUnresolvedExecution(state)) throw new Error("Cannot request new approval while a Subagent batch is unresolved. No state changed.");
-  state.plan.approvalRequest = null;
-  state.plan.approval = null;
-  state.plan.approvalRequest = createDagApprovalRequest(state);
-  return { state, request: state.plan.approvalRequest };
+  refreshPlanApproval(state);
+  return { state, request: state.plan.approvalRequest, changed: true };
 }
 
 export function bindDagApprovalQuestionnaire(stateValue, input, sourceEntryId, toolCallId = "") {
@@ -1042,8 +1060,10 @@ export function dagApprovalStatus(stateValue) {
   const request = state.plan.approvalRequest;
   // An answered request that no longer matches current input/definitions is stale,
   // never approved: "answered" alone would misreport withdrawn authorization.
-  const status = approved ? "approved" : !request ? "not_requested" : request.status === "answered" ? "stale" : request.status;
-  return { approved, requestId: request?.id ?? null, status, currentBinding: dagApprovalBinding(state) };
+  let status = request?.status ?? "not_requested";
+  if (approved) status = "approved";
+  else if (status === "answered" || (status === "awaiting_questionnaire" && request.binding !== dagApprovalBinding(state))) status = "stale";
+  return { approved, status };
 }
 
 export function reconcileUnknownExecutionTasks(stateValue, requestId, items, updateTasksFn) {

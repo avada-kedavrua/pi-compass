@@ -11,7 +11,7 @@ Compass registers seven fixed tools: `compass_goal`, `compass_state`, `compass_c
 
 ## Goal and evidence
 
-- `compass_goal({action:"set",current,constraints,sources,criteria?})` records your semantic interpretation. Select the original Human refs that actually define the objective; state and search return usable refs. Follow-up review never rewrites provenance.
+- `compass_goal({action:"set",current,constraints,sources,criteria?})` records your semantic interpretation. Use only original Human message refs that define the objective (usually `compass_state.input.ref`); never include reads, issue results, or Agent-derived values. Record those separately as evidence.
 - `compass_goal` is the only place criteria are defined. Plan and acceptance consume the returned `AC*` IDs. Use `update` to edit selected constraint/criterion IDs from `view:"goal"`; use `set` with a different objective only to replace the Goal.
 - After material Human input, reaffirm the Goal before resuming approved work. Unchanged semantics keep the exact approval; a different objective replaces the Goal and resets its work. Use `decide` for material decisions and `checkpoint` for a real recoverable ref.
 - Read with `compass_state`: default summary, then `view:goal|plan|acceptance|history|execution` only for what is missing. Reuse returned cursors unchanged; an exact repeat answers `unchanged`. `historyGap` means the delta is bounded, not complete.
@@ -23,9 +23,9 @@ Compass registers seven fixed tools: `compass_goal`, `compass_state`, `compass_c
 ## Plans and Subagents
 
 - A DAG is optional. Choose `executor` explicitly: coupled reasoning stays with `parent`, deterministic batching with `code`, bounded read-only investigation with `subagent`. Every `subagent` task needs `writeScope:"read-only"` and a `dispatchReason` explaining why another context is worth the call.
-- Definition is a draft. `request_approval` (or a material `define` change) returns a small `prompt`; pass it unchanged to the native question tool. Code supplies the complete proposal; you never copy long payloads. Interactive Pi is required — RPC/no-UI fails closed.
-- For an approved `parent` node, use standalone `compass_context({action:"call",taskId})`, then `return` with `{outcome,exportSources}`. Submit once and use the committed result; `fromTasks` imports assessed artifacts and caveats. Use `inputRefs` to reuse an exact prior export. Use `compass_plan patch` for a partial DAG edit.
-- After exact approval, Compass dispatches ready read-only Subagent tasks itself. Do not start them manually or redispatch them. Consume results, then `assess` a completed prerequisite with real evidence before dependents unlock.
+- `define`/`patch` give you a draft, not authorization. If the receipt contains `prompt`, call `ask_user_question` with that object unchanged. Use `request_approval` when a proposal needs reissuing. Native Pi TUI only. If the DAG is no longer useful, `discard` an inactive plan without changing the Goal.
+- After approval, `ready` lists manual work: `parent` uses standalone `compass_context call(taskId)` from root, then committed `return(outcome)`; `code` uses `compass_plan start/done`. Compass dispatches read-only `subagent` tasks itself. Fix and reopen preflight-blocked tasks; never start or redispatch them manually.
+- `assess` completed prerequisites with real evidence before dependents unlock. Use `dependsOn` for ordering. Use `fromTasks` only when a parent node must import another parent node’s explicit exports, or `inputRefs` to reuse an exact export. `waiting` explains missing or stale inputs.
 - If evidence invalidates the plan, report `throw` with the reason, evidence and known side effects. For native children, check execution state and `cancel` only exact attempts you judge invalidated; a request is not a terminal result. Do not assume rollback.
 - `unknown` batches require native Subagent status evidence and `compass_plan({action:"resolve",...})`; never retry them. A task marked done is not Goal acceptance.
 

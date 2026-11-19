@@ -36,7 +36,7 @@ At append, verified exact repeated native reads keep the newest payload at the t
 
 ## Planning scope
 
-A DAG executes steps of one chosen strategy. Parallel nodes contribute distinct pieces of work; they do not race alternative implementations. The Agent chooses the strategy and replans when evidence invalidates it. No RouteSet or multi-strategy execution registry.
+A DAG executes steps of one chosen strategy. A draft does not gate the Goal, and the Agent can discard an inactive plan without changing Goal evidence. An approved plan with unfinished work is distinct from Goal acceptance. Independent nodes contribute distinct pieces of work; one node’s native launch refusal stops that node and its dependents, not independent eligible work. The Agent chooses the strategy and replans when evidence invalidates it. No RouteSet or multi-strategy execution registry.
 
 ## Compatibility
 

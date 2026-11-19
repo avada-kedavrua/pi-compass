@@ -25,6 +25,15 @@ test("initial plan marks independent tasks ready and dependent task blocked", ()
   assert.deepEqual(readyTasks(state).map((task) => task.id), ["inspect-api", "inspect-ui"]);
 });
 
+test("frame artifact dependencies cannot name an executor that cannot export", () => {
+  const graph = (executor) => [
+    { id: "producer", title: "Inspect", acceptance: "Observation", executor, writeScope: "read-only", dispatchReason: "Read-only separate observation" },
+    { id: "consumer", title: "Combine", acceptance: "Summary", fromTasks: ["producer"] },
+  ];
+  for (const executor of ["code", "subagent"]) assert.throws(() => plan(emptyDagState(), graph(executor)), /only parent node frames export artifacts/);
+  assert.doesNotThrow(() => plan(emptyDagState(), graph("parent")));
+});
+
 test("rejects duplicate task ids", () => {
   assert.throws(() => plan(emptyDagState(), [
     { id: "same", title: "A", acceptance: "A" },

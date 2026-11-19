@@ -1,18 +1,63 @@
 import { addressedConstraints, buildStateSnapshot, buildGoalDetails, acceptanceStatus, dagApprovalStatus } from "./goal-run.mjs";
-import { readyTasks, taskAssessmentIsCurrent } from "./dag-core.mjs";
+import { readyTasks, taskAssessmentIsCurrent, taskDependencies, unmetTaskPrerequisites } from "./dag-core.mjs";
+import { delegationCandidates } from "./execution-orchestrator.mjs";
+import { nodeInputResolver } from "./node-inputs.mjs";
 import { approvalPrompt } from "./dag-approval.mjs";
 import { agentGoalDetails, humanSourceRef, latestHumanSource } from "./goal-sources.mjs";
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 
-export function planView(state) {
+export function planApproval(state) {
+  const { status, approved } = dagApprovalStatus(state);
+  if (state.plan.stopped) return { approval: status, stopped: state.plan.stopped, next: "Patch the stopped DAG or discard it once all active work is settled." };
+  if (approved) return { approval: status };
+  let next;
+  if (state.goal.reviewedInputId !== state.latestHumanEntryId) next = "Review the latest Human input with compass_goal before continuing.";
+  else if (!state.goal.criteria.length) next = "Define Goal acceptance criteria with compass_goal before asking for approval.";
+  else if (status === "awaiting_questionnaire") return { approval: status, prompt: approvalPrompt(state.plan.approvalRequest), next: "No questionnaire has been sent. Call ask_user_question with this prompt unchanged." };
+  else if (status === "modified") next = "Review the Human's answer. Make any requested edits before asking for approval again.";
+  else if (status === "declined") next = "Do not execute the DAG. Review whether to revise it or discard it.";
+  else if (status === "presented") next = "The questionnaire was presented. If it ended without a result, use compass_plan request_approval to reissue it.";
+  else next = "If approval is still needed, call compass_plan request_approval, then present its prompt.";
+  return { approval: status, next };
+}
+
+export function planProgress(state, branch, context, preview) {
+  const approval = planApproval(state);
+  if (approval.approval !== "approved") return approval;
+  if (state.plan.stopped) return approval;
+  const plan = state.plan;
+  const graphReady = readyTasks(plan);
+  const resolveInputs = nodeInputResolver(plan, context, branch, preview);
+  const ready = {};
+  const waiting = [];
+  for (const task of graphReady) {
+    if (task.executor === "subagent") continue;
+    if (task.executor === "parent") {
+      try {
+        resolveInputs(task);
+      } catch (error) {
+        waiting.push({ taskId: task.id, reason: error.message });
+        continue;
+      }
+    }
+    ready[task.executor] ??= [];
+    ready[task.executor].push(task.id);
+  }
+  const eligible = delegationCandidates(plan, graphReady).map(({ id }) => id);
+  const prerequisites = new Set(plan.tasks.filter((task) => task.status === "pending").flatMap(taskDependencies));
+  const assess = plan.tasks.filter((task) => task.status === "done" && prerequisites.has(task.id)
+    && (!task.assessment || !taskAssessmentIsCurrent(plan, task)) && !unmetTaskPrerequisites(plan, task).length).map(({ id }) => id);
+  const unknown = plan.executions.some((batch) => batch.status === "unknown");
+  const dispatchIssue = unknown ? "Resolve unknown native attempts before new child dispatch. See compass_state(view=execution)."
+    : plan.executions.findLast((batch) => batch.status === "failed" && batch.taskIds.some((id) => eligible.includes(id)))?.error;
+  return { ...approval, ready, ...(eligible.length ? { dispatchEligible: eligible } : {}), ...(assess.length ? { assess } : {}),
+    ...(waiting.length ? { waiting } : {}), ...(dispatchIssue ? { dispatchIssue } : {}) };
+}
+
+function planView(state, branch, context, preview) {
   if (!state.plan.tasks.length) return { plan: null };
-  const approval = dagApprovalStatus(state);
-  const prompt = !approval.approved ? approvalPrompt(state.plan.approvalRequest) : null;
   return {
-    approval: approval.approved ? "approved" : approval.status,
-    ...(state.plan.stopped ? { stopped: state.plan.stopped } : {}),
-    ...(prompt ? { prompt } : {}),
-    ...(approval.approved ? { ready: readyTasks(state.plan).map((task) => task.id) } : {}),
+    ...planProgress(state, branch, context, preview),
     tasks: state.plan.tasks.map((task) => {
       const { id, title, dependsOn, acceptance, status, executor, agent, writeScope, output, dispatchReason, frameScope, reason, evidence, assessment } = task;
       return {
@@ -44,7 +89,7 @@ export function executionView(state) {
   })) };
 }
 
-export function agentState(state, branch, context, { view = "summary", cursor, limit = 12 } = {}) {
+export function agentState(state, branch, context, { view = "summary", cursor, limit = 12 } = {}, preview) {
   if (view !== "summary" && cursor !== undefined) throw new Error("cursor applies only to the summary view. No state changed.");
   const latest = latestHumanSource(branch);
   const input = latest ? { ref: humanSourceRef(branch, latest), ...(state.goal.current ? { reviewed: state.goal.reviewedInputId === latest } : {}) } : undefined;
@@ -73,7 +118,7 @@ export function agentState(state, branch, context, { view = "summary", cursor, l
       ...(state.checkpoints.length ? { checkpoints: state.checkpoints.filter((item) => item.goalVersion === state.goal.version).map(({ id, summary, ref }) => ({ id, summary, ref })) } : {}),
     };
   }
-  if (view === "plan") return planView(state);
+  if (view === "plan") return planView(state, branch, context, preview);
   if (view === "acceptance") return acceptanceView(state);
   if (view === "execution") return executionView(state);
   if (view === "history") {

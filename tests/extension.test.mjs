@@ -216,6 +216,10 @@ test("a DAG is a draft, requires Goal criteria, and rejects unsafe or unexplaine
   await call(pi, "compass_plan", { action: "define", tasks });
   const plan = await view(pi, { view: "plan" });
   assert.equal(plan.approval, "awaiting_questionnaire", "define alone never authorizes execution");
+  assert.match(plan.next, /No questionnaire has been sent.*ask_user_question/);
+  const replay = receipt(await call(pi, "compass_plan", { action: "request_approval" }));
+  assert.equal(replay.unchanged, true);
+  assert.deepEqual(replay.prompt, plan.prompt, "request_approval reuses a valid unpresented proposal");
   assert.equal(plan.ready, undefined, "nothing is ready before Human approval");
   assert.ok(plan.prompt, "the native prompt carries only an opaque proposal ref");
   assert.equal(JSON.stringify(plan.prompt).includes("Tasks (DAG revision"), false, "the exact proposal is not duplicated into the model transcript");
@@ -229,7 +233,9 @@ test("incremental Goal and DAG edits preserve unrelated evidence and require fre
   await call(pi, "compass_acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "API observation retained" }] });
   const { goal: original } = await view(pi, { view: "goal" });
   const updated = receipt(await call(pi, "compass_goal", { action: "update", constraintEdits: [{ text: "Follow AGENTS.md#toolresult-design" }], criterionEdits: [{ id: "AC2", text: "UI route includes error handling" }] }));
-  assert.equal(updated.approval, "required");
+  assert.equal(updated.approval, "awaiting_questionnaire");
+  assert.ok(updated.prompt, "Goal definition changes return the new proposal, not a generic approval requirement");
+  assert.equal((await present(pi, "updated-goal")).patch, undefined, "a revised Goal proposal can be presented before changing the DAG");
   assert.equal((await view(pi, { view: "goal" })).goal.current, original.current);
   assert.equal((await view(pi, { view: "acceptance" })).criteria[0].status, "reported_pass");
   assert.deepEqual(updated.criteria.map((item) => item.id), ["AC1", "AC3"]);
@@ -430,7 +436,7 @@ test("a delegated throw freezes progression and cancellation targets one exact s
   try {
     await waitFor(() => stateOf(pi).plan.tasks[0].status === "blocked", "the stop report is consumed");
     const plan = await view(pi, { view: "plan" });
-    assert.deepEqual(plan.ready, []);
+    assert.equal(plan.ready, undefined);
     assert.equal(plan.stopped.taskId, "api");
     assert.equal(plan.stopped.sideEffects, "No writes observed.");
     assert.equal((await view(pi)).plan.stoppedBy, "api");
@@ -511,19 +517,54 @@ test("dependent Subagent work waits for a current semantic assessment, and Code 
   assert.deepEqual(done.affected, ["impl"]);
 });
 
-test("native launch admission fails closed for absent or write-capable profiles", async () => {
-  for (const [launchPreflight, reason] of [
-    [null, /Cannot resolve.*launch preflight/],
-    [(request) => launchProjection(request, ["read", "write"]), /outside the read-only role: write/],
-  ]) {
-    const pi = fakePi({ launchPreflight });
-    await plannedGoal(pi);
-    await approve(pi);
-    await waitFor(() => stateOf(pi).plan.executions[0]?.status === "failed", "preflight refusal is visible");
-    assert.match(stateOf(pi).plan.executions[0].error, reason);
-    assert.equal(pi.delegation.length, 0);
-    assert.ok(stateOf(pi).plan.tasks.every((task) => task.status === "pending"));
+test("unavailable launch preflight leaves all candidates pending with a plan-visible reason", async () => {
+  const pi = fakePi({ launchPreflight: null });
+  await plannedGoal(pi);
+  await approve(pi);
+  await waitFor(() => stateOf(pi).plan.executions[0]?.status === "failed", "preflight refusal is visible");
+  const plan = await view(pi, { view: "plan" });
+  assert.match(plan.dispatchIssue, /Cannot resolve.*launch preflight/);
+  assert.equal(pi.delegation.length, 0);
+  assert.ok(plan.tasks.every((task) => task.status === "pending"));
+});
+
+test("an unsafe child is blocked without consuming a slot or delaying an independent safe child", async () => {
+  const pi = fakePi({ launchPreflight: (request) => launchProjection(request, request.agent === "scout" ? ["write"] : ["read"]) });
+  const unsafe = Array.from({ length: 7 }, (_, idx) => ({ ...tasks[0], id: `unsafe${idx}` }));
+  await plannedGoal(pi, [...unsafe, { ...tasks[1], agent: "delegate" }, { ...tasks[1], id: "dependent", dependsOn: [unsafe[0].id] }]);
+  await approve(pi);
+  await waitFor(() => stateOf(pi).plan.tasks.find((task) => task.id === "ui").status === "done", "the safe child completes");
+  const plan = await view(pi, { view: "plan" });
+  assert.deepEqual(pi.delegation.map(({ nodeId }) => nodeId), ["ui"]);
+  assert.equal(plan.tasks.find(({ id }) => id === "dependent").status, "pending");
+  for (const task of plan.tasks.slice(0, unsafe.length)) {
+    assert.equal(task.status, "blocked");
+    assert.match(task.reason, /outside the read-only role: write.*No child was dispatched.*reopen/);
   }
+});
+
+test("preflight does not hold Goal state open or launch an obsolete plan", { timeout: 2000 }, async () => {
+  const entered = Promise.withResolvers();
+  const gate = Promise.withResolvers();
+  let held = true;
+  const pi = fakePi({ launchPreflight: async (request) => {
+    if (held) { entered.resolve(); await gate.promise; }
+    return launchProjection(request);
+  } });
+  await plannedGoal(pi);
+  await approve(pi);
+  await entered.promise;
+  try {
+    const discarded = receipt(await call(pi, "compass_plan", { action: "discard" }));
+    assert.equal(discarded.plan, null);
+    await call(pi, "compass_plan", { action: "define", tasks: tasks.map((task) => ({ ...task, id: `new-${task.id}` })) });
+    await approve(pi);
+  } finally {
+    held = false;
+    gate.resolve();
+  }
+  await waitFor(() => stateOf(pi).plan.tasks.every((task) => task.status === "done"), "the newly approved plan runs", 1000);
+  assert.deepEqual(pi.delegation.map(({ nodeId }) => nodeId), ["new-api", "new-ui"]);
 });
 
 test("a fallback is refused when its launch no longer proves a read-only profile", async () => {

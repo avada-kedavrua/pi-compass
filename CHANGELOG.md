@@ -2,6 +2,8 @@
 
 ## 0.10.0 — seven-tool candidate
 
+- Make unapproved DAGs non-blocking for the Goal and let the Agent discard inactive plans. Carry the next approval or execution step in receipts. Validate artifact producers at definition and check exact inputs before reporting parent readiness. Admit read-only native nodes independently without holding the state queue during preflight.
+
 - Use Pi’s native `tui` mode for exact DAG approval and canonicalize preview line endings before the native questionnaire echoes them. Pass the session’s scoped models to child preflight. Report optional DAG transport and bridge readiness in `/compass-preflight`.
 
 - Remove `compass_route`, its state view, and the underlying strategy competition state and approval bindings. An approved DAG covers one strategy. GoalRun API/schema is now 10; v9 snapshots fail visibly without migration. DAG approval and task acceptance still apply.

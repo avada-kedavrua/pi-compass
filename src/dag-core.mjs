@@ -136,7 +136,9 @@ function assertAcyclic(tasks) {
   for (const task of tasks) {
     for (const dep of taskDependencies(task)) {
       if (dep === task.id) throw new Error(`Task "${task.id}" cannot depend on itself.`);
-      if (!byId.has(dep)) throw new Error(`Task "${task.id}" depends on unknown task "${dep}".`);
+      const upstream = byId.get(dep);
+      if (!upstream) throw new Error(`Task "${task.id}" depends on unknown task "${dep}".`);
+      if (task.fromTasks?.includes(dep) && upstream.executor !== "parent") throw new Error(`Task "${task.id}" cannot import artifacts from "${dep}": only parent node frames export artifacts. Use dependsOn for ordering only.`);
       indegree.set(task.id, indegree.get(task.id) + 1);
       children.get(dep).push(task.id);
     }
@@ -294,7 +296,7 @@ export function taskAssessmentIsCurrent(plan, task) {
   return task?.assessment?.binding === taskAssessmentBinding(plan, task);
 }
 
-export function unmetTaskPrerequisites(plan, task, byId = new Map(plan.tasks.map((item) => [item.id, item]))) {
+function prerequisiteCheck(plan, byId = new Map(plan.tasks.map((item) => [item.id, item]))) {
   const checks = new Map();
   const passed = (id) => {
     if (checks.has(id)) return checks.get(id);
@@ -305,7 +307,11 @@ export function unmetTaskPrerequisites(plan, task, byId = new Map(plan.tasks.map
     checks.set(id, current);
     return current;
   };
-  return taskDependencies(task).filter((id) => !passed(id));
+  return (task) => taskDependencies(task).filter((id) => !passed(id));
+}
+
+export function unmetTaskPrerequisites(plan, task, byId) {
+  return prerequisiteCheck(plan, byId)(task);
 }
 
 export function dependentTaskIds(tasks, roots) {
@@ -318,8 +324,8 @@ export function dependentTaskIds(tasks, roots) {
 
 export function readyTasks(state) {
   if (!state?.tasks || state.stopped) return [];
-  const byId = new Map(state.tasks.map((task) => [task.id, task]));
-  return state.tasks.filter((task) => task.status === "pending" && !unmetTaskPrerequisites(state, task, byId).length);
+  const unmet = prerequisiteCheck(state);
+  return state.tasks.filter((task) => task.status === "pending" && !unmet(task).length);
 }
 
 export function updateTasks(state, updates, { terminalEvidence = false } = {}) {

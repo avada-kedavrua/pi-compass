@@ -67,7 +67,7 @@ try {
     });
     assert.equal(committed.valid, true);
     append(manager, committed.entries);
-    const receipt = JSON.parse(committed.entries.findLast((entry) => entry.customType === "pi-compass-v2.context-message").content);
+    const receipt = JSON.parse(committed.entries.find((entry) => entry.customType === "pi-compass-v2.context-message" && entry.details?.callId === id).content);
     assert.equal(receipt.resultStatus, "applied");
     return receipt;
   }
@@ -93,7 +93,7 @@ try {
   const planTool = tools.get("compass_plan").definition;
   const draft = await planTool.execute("plan", { action: "define", tasks: [
     { id: "audit", title: "Inspect the permissions fixture", executor: "parent", acceptance: "Inspect success\r\nInspect refusal" },
-    { id: "report", title: "Summarize the observations", executor: "parent", dependsOn: ["audit"], acceptance: "Explain both paths" },
+    { id: "report", title: "Summarize the observations", executor: "code", dependsOn: ["audit"], acceptance: "Explain both paths" },
   ] }, undefined, undefined, context);
   const prompt = JSON.parse(draft.content[0].text).prompt;
   const callId = "native-approval";
@@ -124,8 +124,26 @@ try {
       questionIndex: 0, question: question.question, kind: "option", answer: option.label,
       preview: option.preview.replace(/\r\n/g, "\n").replace(/\r/g, ""),
     }] } });
-  assert.equal(JSON.parse(result.content[0].text).plan, "approved");
+  const approval = JSON.parse(result.content[0].text);
+  assert.equal(approval.approval, "approved");
+  assert.deepEqual(approval.ready, { parent: ["audit"] });
   assert.equal(manager.getBranch().findLast((entry) => entry.customType === "pi-compass-v2.goalrun").data.plan.approval.sourceCallId, callId);
+
+  const runPlan = async (args) => JSON.parse((await planTool.execute(args.action, args, undefined, undefined, context)).content[0].text);
+  await assert.rejects(() => runPlan({ action: "start", taskIds: ["audit"] }), /Parent tasks use compass_context/);
+  assert.equal((await mutate({ action: "call", taskId: "audit" })).taskId, "audit");
+  await runner.emitContext(manager.buildSessionProjection().messages);
+  assert.equal((await mutate({ action: "return", outcome: { status: "done", evidence: "Observed allow and deny" } })).outcome, "done");
+  await runner.emitContext(manager.buildSessionProjection().messages);
+  const plan = await tools.get("compass_state").definition.execute("plan", { view: "plan" }, undefined, undefined, context);
+  assert.deepEqual(JSON.parse(plan.content[0].text).assess, ["audit"]);
+  const assessed = await runPlan({ action: "assess", taskId: "audit", status: "pass", evidence: "Both permission paths match the approved criterion" });
+  assert.deepEqual(assessed.ready, { code: ["report"] });
+  await runPlan({ action: "start", taskIds: ["report"] });
+  await runPlan({ action: "done", tasks: [{ id: "report", evidence: "Both paths summarized" }] });
+  assert.equal((await readState()).outcome, "incomplete");
+  await tools.get("compass_acceptance").definition.execute("acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "Both permission paths documented" }] }, undefined, undefined, context);
+  assert.equal((await readState()).outcome, "agent_reported_satisfied");
 
   const control = async (operation) => {
     const result = await tools.get("runtime_guard").definition.execute("guard", { operation }, undefined, undefined, context);

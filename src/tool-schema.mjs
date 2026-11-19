@@ -43,8 +43,8 @@ export function contextToolSchema() {
     operation("unpin", { sources }, ["sources"]),
     operation("remember", { text: string(4000, { minLength: 1, description: "Your compact working memory, not a new tool observation or Human instruction." }), sources: array(ref, 32), caveats, lifetime }, ["text"]),
 
-    operation("call", { taskId, task: string(4000, { minLength: 1, description: "Same-session attention frame, not a child Agent or filesystem rollback." }), capture: { ...array(object({ ref, mode: { ...choice("ref", "copy"), description: "ref borrows read-only; copy is private and editable using its returned ref." } }, ["ref", "mode"]), 64), description: "Default none. Applied receipt sources correspond to this order; copies have new refs." } }),
-    operation("return", { outcome: { ...object({ status: choice("done", "blocked", "throw"), evidence: string(1600, { minLength: 1 }), reason: string(600, { minLength: 1 }), sideEffects: string(800, { minLength: 1 }) }, ["status"]), description: "Only for a parent DAG node frame opened with taskId. Omit for an ordinary frame opened with task." }, result: string(8000), exportSources: { ...array(ref, 64), description: "Only selected values export; retained values keep their lifetime in the parent. Other local work releases." } }),
+    operation("call", { taskId: { ...taskId, description: "Start an approved, ready parent node from the root frame. Use taskId instead of task; finish with return(outcome)." }, task: string(4000, { minLength: 1, description: "Ordinary attention frame. Use task instead of taskId; return without an outcome." }), capture: { ...array(object({ ref, mode: { ...choice("ref", "copy"), description: "ref borrows read-only; copy is private and editable using its returned ref." } }, ["ref", "mode"]), 64), description: "Default none. Applied receipt sources correspond to this order; copies have new refs." } }),
+    operation("return", { outcome: { ...object({ status: choice("done", "blocked", "throw"), evidence: string(1600, { minLength: 1 }), reason: string(600, { minLength: 1 }), sideEffects: string(800, { minLength: 1 }) }, ["status"]), description: "Required for an active parent DAG node: done with evidence, blocked with reason, or throw with both. Never use for ordinary attention frames." }, result: string(8000), exportSources: { ...array(ref, 64), description: "Only selected values export; retained values keep their lifetime in the parent. Other local work releases." } }),
     operation("load", { source: ref, range }, ["source"]),
     operation("replace", { source: ref, text: string(8000, { minLength: 1, description: "Agent-derived replacement. Human originals and executed calls require a private copy. Edit retained memory directly; unpin originals before editing eligible working values. Use the applied receipt's updated ref for subsequent operations." }), caveats }, ["source", "text"]),
     operation("drop", { sources }, ["sources"]),
@@ -61,10 +61,10 @@ const reason = string(600, { minLength: 1 });
 const criterion = string(24, { minLength: 1 });
 const task = object({
   id: taskId, title: string(200, { minLength: 1 }), dependsOn: array(taskId, 24), acceptance: string(400, { minLength: 1 }),
-  executor: { ...choice("parent", "code", "subagent"), description: "Default parent. code means deterministic parent Code Mode; subagent must be read-only." },
+  executor: { ...choice("parent", "code", "subagent"), description: "Default parent: use compass_context call/return. code: compass_plan start/done. subagent: automatic native read-only dispatch after approval." },
   agent: choice("scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"),
   output: string(400), writeScope: string(200), dispatchReason: string(400, { minLength: 12, description: "Required for subagent: why another semantic context is worth its cost." }),
-  fromTasks: array(taskId, 8), inputRefs: array(ref, 8),
+  fromTasks: { ...array(taskId, 8), description: "Parent-node artifact producers only. This also creates dependencies; use dependsOn for ordering without exports." }, inputRefs: { ...array(ref, 8), description: "Parent nodes only: exact refs of existing frame exports." },
   frameScope: string(64),
 }, ["id", "title", "acceptance"]);
 const taskPatch = object(task.properties, ["id"]);
@@ -74,8 +74,8 @@ const assessment = { status: choice("pass", "fail", "inconclusive"), evidence, c
 export const toolSchemas = {
   compass_goal: actions([
     operation("set", {
-      current: string(4000, { minLength: 1 }), constraints: array(string(600, { minLength: 1 }), 24), sources: array(ref, 16, 1),
-      criteria: { ...array(string(300, { minLength: 1 }), 12), description: "Only definition owner. Complete list when supplied; omission preserves current criteria, [] clears. Human refs define the actual objective/constraints, not merely the latest follow-up." },
+      current: string(4000, { minLength: 1 }), constraints: array(string(600, { minLength: 1 }), 24), sources: { ...array(ref, 16, 1), description: "Only original Human message refs defining the Goal (e.g. compass_state input.ref). Never include tool observations or derived values." },
+      criteria: { ...array(string(300, { minLength: 1 }), 12), description: "Complete acceptance list when supplied; omission preserves criteria, [] clears." },
     }, ["current", "constraints", "sources"]),
     operation("update", { constraintEdits: array(definitionEdit(600), 24, 1), criterionEdits: array(definitionEdit(300), 12, 1) }),
     operation("decide", { summary: string(320, { minLength: 1 }), rationale: string(500), evidence: string(900), supersedes: array(string(32, { minLength: 1 }), 8), taskIds: array(taskId, 24) }, ["summary"]),
@@ -92,8 +92,9 @@ export const toolSchemas = {
     operation("define", { tasks: array(task, 24, 2), reason }, ["tasks"]),
     operation("patch", { upsertTasks: array(taskPatch, 24, 1), removeTasks: array(taskId, 24, 1), reason }),
     operation("request_approval"),
-    operation("start", { taskIds: array(taskId, 24, 1) }, ["taskIds"]),
-    operation("done", { tasks: array(object({ id: taskId, evidence }, ["id", "evidence"]), 24, 1) }, ["tasks"]),
+    operation("discard"),
+    operation("start", { taskIds: { ...array(taskId, 24, 1), description: "Only approved, ready executor=code tasks. For parent, use compass_context call(taskId); for subagent, wait for native dispatch." } }, ["taskIds"]),
+    operation("done", { tasks: { ...array(object({ id: taskId, evidence }, ["id", "evidence"]), 24, 1), description: "Only executor=code. Parent nodes finish with compass_context return(outcome)." } }, ["tasks"]),
     operation("block", { tasks: array(object({ id: taskId, reason }, ["id", "reason"]), 24, 1) }, ["tasks"]),
     operation("reopen", { tasks: array(object({ id: taskId, reason }, ["id", "reason"]), 24, 1) }, ["tasks"]),
     operation("assess", { taskId, ...assessment }, ["taskId", "status", "evidence"]),

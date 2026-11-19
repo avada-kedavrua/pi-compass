@@ -465,6 +465,14 @@ test("planner and frame worker can produce, assess, consume, throw and replan wi
   await call("compass_goal", { action: "set", current: "Document an observed route", constraints: [], criteria: ["Route is documented"], sources: [humanSourceRef(manager.getBranch(), latestHumanSource(manager.getBranch()))] });
   await call("compass_plan", { action: "define", tasks: [node("a", "Produce observation"), node("b", "Consume observation", { fromTasks: ["a"] }), node("c", "Record output", { dependsOn: ["b"] })] });
   await approve();
+  await host.turn({ action: "call", taskId: "a" });
+  await host.turn({ action: "return", outcome: { status: "done", evidence: "Observation recorded without exporting the value" } });
+  const missing = await call("compass_plan", { action: "assess", taskId: "a", status: "pass", evidence: "The recorded observation is correct" });
+  assert.deepEqual(missing.ready, {});
+  assert.equal(missing.waiting[0].taskId, "b");
+  assert.match(missing.waiting[0].reason, /Artifact input from a is missing/);
+  await assert.rejects(() => call("compass_context", { action: "call", taskId: "b" }), /Artifact input from a is missing.*No state changed/);
+  await call("compass_plan", { action: "reopen", tasks: [{ id: "a", reason: "Export the observation for its declared consumer" }] });
   const claim = await host.turn({ action: "call", taskId: "a" }, { apply: false });
   assert.equal((await view()).tasks[0].status, "pending", "a queued frame does not claim the node");
   appendDrafts(manager, claim.entries);
@@ -481,7 +489,7 @@ test("planner and frame worker can produce, assess, consume, throw and replan wi
   const produced = (await view()).tasks[0];
   assert.equal(produced.status, "done");
   assert.equal(produced.artifacts.length, 1);
-  assert.ok(!(await view()).ready.includes("b"), "a returned artifact is not a semantic pass");
+  assert.deepEqual((await view()).ready, {}, "a returned artifact is not a semantic pass");
   await call("compass_plan", { action: "assess", taskId: "a", status: "pass", evidence: "Compared the route against the approved definition", caveats: ["No provider check."] });
   await host.turn({ action: "call", taskId: "b" });
   assert.equal((await view()).tasks[1].status, "in_progress");
@@ -492,7 +500,7 @@ test("planner and frame worker can produce, assess, consume, throw and replan wi
   const stopped = await view();
   assert.equal(stopped.stopped.taskId, "b");
   assert.equal(stopped.tasks[2].status, "pending");
-  assert.deepEqual(stopped.ready, []);
+  assert.equal(stopped.ready, undefined);
   await call("compass_plan", { action: "patch", upsertTasks: [{ id: "b", title: "Use the corrected local consumer", fromTasks: [], inputRefs: produced.artifacts }] });
   await approve();
   await host.turn({ action: "call", taskId: "b" });
