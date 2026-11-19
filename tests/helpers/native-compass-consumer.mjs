@@ -29,7 +29,7 @@ try {
   await runner.emit({ type: "before_agent_start", prompt: "Fix the settings permission mismatch." });
   const readState = async () => JSON.parse((await tools.get("compass_state").definition.execute("state", {}, undefined, undefined, context)).content[0].text);
   const observed = await readState();
-  const goal = await tools.get("compass_goal").definition.execute("goal", { action: "set", current: "Fix settings permissions", constraints: ["Do not change unrelated pages"], sources: [observed.input.ref] }, undefined, undefined, context);
+  const goal = await tools.get("compass_goal").definition.execute("goal", { action: "set", current: "Fix settings permissions", constraints: ["Do not change unrelated pages"], criteria: ["Permission behavior is evidenced"], sources: [observed.input.ref] }, undefined, undefined, context);
   assert.equal(JSON.parse(goal.content[0].text).cursor.startsWith("R"), true);
   assert.equal(JSON.parse(goal.content[0].text).sourceIds, undefined);
   manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: "observed-read", name: "read", arguments: { path: "settings.ts" } }], timestamp: Date.now() });
@@ -90,6 +90,43 @@ try {
   assert.match(restored, /Not runtime-verified/);
   assert.doesNotMatch(restored, /large original body/);
   assert.doesNotMatch(restored, /binding|payloadVersion|readStatus/);
+  const planTool = tools.get("compass_plan").definition;
+  const draft = await planTool.execute("plan", { action: "define", tasks: [
+    { id: "audit", title: "Inspect the permissions fixture", executor: "parent", acceptance: "Inspect success\r\nInspect refusal" },
+    { id: "report", title: "Summarize the observations", executor: "parent", dependsOn: ["audit"], acceptance: "Explain both paths" },
+  ] }, undefined, undefined, context);
+  const prompt = JSON.parse(draft.content[0].text).prompt;
+  const callId = "native-approval";
+  manager.appendMessage({ role: "assistant", content: [{ type: "toolCall", id: callId, name: "ask_user_question", arguments: prompt }], timestamp: Date.now() });
+  let notice;
+  const ui = { custom: async () => undefined, notify: (message) => { notice = message; } };
+  const preflight = () => runner.getCommand("compass-preflight").handler("", runner.createCommandContext());
+  const proposal = () => ({ type: "tool_call", toolName: "ask_user_question", toolCallId: callId, input: structuredClone(prompt) });
+  runner.setUIContext(ui, "rpc");
+  assert.equal(context.hasUI, true);
+  await preflight();
+  assert.match(notice, /UNAVAILABLE DAG approval: .*mode=rpc, hasUI=true/);
+  assert.match(notice, /UNAVAILABLE Native DAG delegation: pi-subagents is not registered/);
+  const beforeApproval = manager.getBranch().length;
+  assert.equal((await runner.emitToolCall(proposal())).block, true, "RPC dialogs do not prove full presentation");
+  assert.equal(manager.getBranch().length, beforeApproval);
+  runner.setUIContext(ui, "tui");
+  await preflight();
+  assert.match(notice, /UNAVAILABLE DAG approval: enable the native ask_user_question tool/);
+  const event = proposal();
+  const block = await runner.emitToolCall(event);
+  assert.equal(block, undefined, block?.reason);
+  const [question] = event.input.questions;
+  const [option] = question.options;
+  assert.match(option.preview, /Inspect success\nInspect refusal/);
+  const result = await runner.emitToolResult({ type: "tool_result", toolName: "ask_user_question", toolCallId: callId, input: event.input,
+    isError: false, content: [{ type: "text", text: option.label }], details: { cancelled: false, answers: [{
+      questionIndex: 0, question: question.question, kind: "option", answer: option.label,
+      preview: option.preview.replace(/\r\n/g, "\n").replace(/\r/g, ""),
+    }] } });
+  assert.equal(JSON.parse(result.content[0].text).plan, "approved");
+  assert.equal(manager.getBranch().findLast((entry) => entry.customType === "pi-compass-v2.goalrun").data.plan.approval.sourceCallId, callId);
+
   const control = async (operation) => {
     const result = await tools.get("runtime_guard").definition.execute("guard", { operation }, undefined, undefined, context);
     assert.notEqual(result.isError, true, JSON.stringify(result));
@@ -103,5 +140,5 @@ try {
   assert.equal((await runner.emitToolCall({ type: "tool_call", toolName: "bash", toolCallId: "blocked", input: { command: "blocked" } })).block, true);
   assert.equal(await runner.emitToolCall({ type: "tool_call", toolName: "bash", toolCallId: "allowed", input: { command: "allowed" } }), undefined);
   assert.deepEqual(errors, []);
-  console.log("native factory, empty-policy read, owned VM and profile storage passed");
+  console.log("native factory, TUI approval/RPC refusal, empty-policy read, owned VM and profile storage passed");
 } finally { await runner.emit({ type: "session_shutdown" }); }

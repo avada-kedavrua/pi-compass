@@ -2,6 +2,8 @@
 
 ## 0.10.0 — seven-tool candidate
 
+- Use Pi’s native `tui` mode for exact DAG approval and canonicalize preview line endings before the native questionnaire echoes them. Pass the session’s scoped models to child preflight. Report optional DAG transport and bridge readiness in `/compass-preflight`.
+
 - Remove `compass_route`, its state view, and the underlying strategy competition state and approval bindings. An approved DAG covers one strategy. GoalRun API/schema is now 10; v9 snapshots fail visibly without migration. DAG approval and task acceptance still apply.
 
 - Add incremental Goal/DAG edits, approved parent-node frames with committed outcomes and exact artifact handoff, and scoped memory with native Skill auto-pin and exact repeated-read deduplication.

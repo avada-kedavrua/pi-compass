@@ -137,8 +137,8 @@ if (staticOnly) {
   if (entryCheck.ok) add("PASS", "Extension entry import", "src/index.ts resolves TypeBox through Pi's host package and exports the extension factory");
   else add("FAIL", "Extension entry import", entryCheck.text || "Host-mapped extension entry import failed");
   const hostCheck = run(process.execPath, ["--test", path.join(packageRoot, "tests/runtime-guard-host.test.mjs")], 30000);
-  if (hostCheck.ok) add("PASS", "Native runtime guard factory", "Unpatched Pi loader, empty-policy state read, owned Worker predicate and temporary profile SQLite passed; no provider request");
-  else add("FAIL", "Native runtime guard factory", hostCheck.text || "Native guard factory smoke test failed");
+  if (hostCheck.ok) add("PASS", "Native extension runner", "Unpatched Pi loader, TUI approval/RPC refusal, context boundaries, Worker and temporary profile SQLite passed; no provider request");
+  else add("FAIL", "Native extension runner", hostCheck.text || "Native extension smoke test failed");
 }
 
 if (!fs.existsSync(targetRoot) || !fs.statSync(targetRoot).isDirectory()) {

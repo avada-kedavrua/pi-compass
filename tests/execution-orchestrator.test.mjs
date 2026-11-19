@@ -19,6 +19,7 @@ import {
 import { emptyDagState, createOrRevisePlan, taskAssessmentBinding, updateTasks } from "../src/dag-core.mjs";
 import { bindDagApprovalQuestionnaire, captureHumanDecision } from "../src/goal-run.mjs";
 import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
+import { launchPreflightInput } from "../src/delegation-preflight.mjs";
 import { normalizeGoalRunState, recordExecutionDrift, recordExecutionEvent, transitionTasks, revisePlanState } from "../src/goal-run.mjs";
 import { createGoalState } from "./helpers/goal-state.mjs";
 
@@ -35,6 +36,13 @@ const task = (id, overrides = {}) => ({
   ...overrides,
 });
 
+
+test("launch preflight forwards Pi’s scoped model snapshot as provider/model IDs", () => {
+  const ctx = { scopedModels: [{ model: { provider: "first", id: "model/a" } }, { model: { provider: "second", id: "model-b" } }] };
+  const request = { result: { schema: {} } };
+  assert.deepEqual(launchPreflightInput({}, ctx, request).scopedModelIds, ["first/model/a", "second/model-b"]);
+  assert.deepEqual(launchPreflightInput({}, { scopedModels: [] }, request).scopedModelIds, []);
+});
 
 test("effective pi-subagents model identity allows documented thinking suffix, never arbitrary models", () => {
   for (const model of [PRIMARY_MODEL, REVIEW_MODEL, FALLBACK_MODEL]) {

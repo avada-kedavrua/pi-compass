@@ -48,7 +48,7 @@ text(result);
 
 Mutations remain direct standalone calls; copy source refs unchanged, without binding/version/revision plumbing. Prefer `remember` for short qualified conclusions; `pin` retains full originals. Do not batch mutations in Code Mode. The old argument forms are not accepted. See the [consumer contract](docs/tool-contract.md#context-find-remember-then-optionally-edit).
 
-Full preflight additionally exercises the real native loader/factory and guard Worker/SQLite in a disposable profile without test SDK aliases. `/compass-preflight` checks readable guard state in the running session, not just controller registration. Neither requests a provider turn.
+Full preflight also exercises the native loader and runner in a disposable profile, including the TUI approval boundary and guard storage. `/compass-preflight` checks guard state and reports optional DAG dependencies separately: Pi must be in terminal TUI mode with `ask_user_question` enabled for approvals; native child dispatch also needs the pi-subagents bridge and launch preflight. Open Pi directly in a terminal for DAG acceptance, not through an RPC frontend. A delegation `PASS` confirms wiring, not an individual child profile or provider. Neither preflight requests a provider turn.
 
 ## Runtime guards
 

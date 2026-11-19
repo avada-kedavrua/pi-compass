@@ -59,6 +59,7 @@ export function createDagApprovalRequest(state) {
     ...(state.decisions ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => `${item.id}: ${item.summary}${item.supersededBy ? ` (superseded by ${item.supersededBy})` : ""}`),
   ].filter(Boolean);
   const question = DAG_APPROVAL_QUESTION;
+  // The native questionnaire normalizes line endings before display and echo.
   const preview = [
     `Approval request ${id}. This authorizes execution only; it does not establish task success or final Goal acceptance.`,
     `Current Goal v${state.goal.version ?? 1}: ${state.goal.current}`,
@@ -66,7 +67,7 @@ export function createDagApprovalRequest(state) {
     `Tasks (DAG revision ${state.plan.revision}):\n${tasks}`,
     `Human constraints:\n${(state.goal.constraints ?? []).map((item) => `- ${item}`).join("\n") || "- none recorded"}`,
     `Relevant Human decisions:\n${decisions.map((item) => `- ${item}`).join("\n") || "- none recorded"}`,
-  ].join("\n\n");
+  ].join("\n\n").replace(/\r\n/g, "\n").replace(/\r/g, "");
   const questionnaire = {
     question,
     header: DAG_APPROVAL_HEADER,

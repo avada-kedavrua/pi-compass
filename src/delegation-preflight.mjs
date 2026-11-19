@@ -27,6 +27,7 @@ export function launchPreflightInput(pi, ctx, request) {
     outputSchema: request.result.schema,
     projectTrusted: ctx.isProjectTrusted?.(),
     parentModel: ctx.model,
+    scopedModelIds: ctx.scopedModels?.map(({ model }) => `${model.provider}/${model.id}`) ?? [],
     availableModels: ctx.modelRegistry?.getAvailable(),
     knownProviders: () => ctx.modelRegistry?.getAll().map(({ provider }) => provider) ?? [],
     parentSessionId: ctx.sessionManager?.getSessionId?.(),

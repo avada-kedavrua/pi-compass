@@ -70,7 +70,7 @@ function fakePi(options = {}) {
 
 const ctx = (pi, overrides = {}) => ({
   cwd: "/tmp/compass-project",
-  mode: "interactive",
+  mode: "tui",
   hasUI: true,
   ui: { notify() {}, custom: async () => undefined },
   sessionManager: { getBranch: () => pi.branch() },
@@ -264,7 +264,7 @@ test("approval fails closed without interactive full-preview TUI", async () => {
   const callId = "approval-rpc";
   const prompt = (await view(pi, { view: "plan" })).prompt;
   persistAssistantCall(pi, callId, "ask_user_question", prompt);
-  for (const context of [ctx(pi, { mode: "rpc", hasUI: true, ui: { notify() {} } }), ctx(pi, { mode: "print" }), ctx(pi, { mode: undefined, hasUI: false })]) {
+  for (const context of [ctx(pi, { mode: "rpc", hasUI: true, ui: { notify() {} } }), ctx(pi, { mode: "print" }), ctx(pi, { mode: "json" }), ctx(pi, { hasUI: false }), ctx(pi, { ui: { notify() {} } })]) {
     const patch = await pi.hooks.get("tool_call")[0]({ toolName: "ask_user_question", toolCallId: callId, input: structuredClone(prompt) }, context);
     assert.equal(patch?.block, true);
     assert.match(patch.reason, /interactive Pi with full-preview TUI/);

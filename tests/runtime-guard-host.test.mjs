@@ -11,13 +11,13 @@ import { piRoot } from "../scripts/register-pi-host-typebox.mjs";
 const run = promisify(execFile);
 const entry = fileURLToPath(new URL("../src/index.ts", import.meta.url));
 
-test("unpatched Pi loader admits state reads and executes guard VM/storage through the production factory", async () => {
+test("unpatched Pi runner enforces approval transport and exercises Compass state, context and guard storage", async () => {
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "compass-host-"));
   try {
     const { stdout } = await run(process.execPath, [fileURLToPath(new URL("./helpers/native-compass-consumer.mjs", import.meta.url)), pathToFileURL(path.join(piRoot, "dist/index.js")).href, entry, cwd], {
       env: { ...process.env, NODE_OPTIONS: "", PI_CODING_AGENT_DIR: path.join(cwd, "profile") },
       timeout: 15000,
     });
-    assert.match(stdout, /profile storage passed/);
+    assert.ok(stdout.includes("TUI approval/RPC refusal"), stdout);
   } finally { await fs.rm(cwd, { recursive: true, force: true }); }
 });

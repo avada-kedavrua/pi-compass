@@ -1,4 +1,4 @@
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionCommandContext, type ExtensionContext, type ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -859,6 +859,10 @@ function errorSummary(event: any): string {
   return clip(event?.error || content || result?.error || "Tool execution failed without a text error.", 260);
 }
 
+function canPresentApproval(ctx: ExtensionContext): boolean {
+  return ctx.mode === "tui" && ctx.hasUI && typeof ctx.ui?.custom === "function";
+}
+
 function contextCwd(ctx: any) { return typeof ctx?.cwd === "string" && ctx.cwd.trim() ? ctx.cwd : process.cwd(); }
 function afterMutation(pi: any, cwd: string) { state.projectRoot = cwd; persistState(pi); }
 function stateResult(data: any = {}, unchanged = false) {
@@ -1278,7 +1282,7 @@ pi.on("session_shutdown", async (_event: any, ctx: any) => {
   }));
 
 
-pi.on("tool_call", async (event: any, ctx: any) => serialized(async () => {
+pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => serialized(async () => {
   if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
   if (event.toolName === "ask_user_question") {
     let questions: ReturnType<typeof expandApprovalProposal>;
@@ -1288,8 +1292,8 @@ pi.on("tool_call", async (event: any, ctx: any) => serialized(async () => {
       return { block: true, reason: (error instanceof Error ? error.message : String(error)) + " Request a fresh proposal; no approval changed." };
     }
     if (questions) {
-      if (ctx?.mode !== "interactive" || ctx?.hasUI !== true || typeof ctx?.ui?.custom !== "function") return { block: true, reason: "Compass approval requires interactive Pi with full-preview TUI. RPC/unknown/no-UI cannot establish complete presentation; no approval or state changed." };
-      event.input.questions = questions;
+      if (!canPresentApproval(ctx)) return { block: true, reason: `Compass approval requires interactive Pi with full-preview TUI (mode=${ctx.mode}, hasUI=${ctx.hasUI}). No approval or state changed.` };
+      Object.assign(event.input, { questions });
       const callId = String(event.toolCallId ?? "");
       const sourceId = persistedAssistantEntryId(ctx, callId);
       const result = bindDagApprovalQuestionnaire(state, event.input, sourceId, callId);
@@ -1353,7 +1357,7 @@ pi.on("tool_call", async (event: any, ctx: any) => serialized(async () => {
 
 
 const runtimeGuards = registerRuntimeGuards(pi, { profileDir: getAgentDir });
-pi.registerCommand("compass-preflight", { description: "Check Compass fixed tool registry and native host/scope health", handler: async (_args: string, ctx: any) => {
+pi.registerCommand("compass-preflight", { description: "Check Compass tools, native host/scope health and optional DAG dependencies", handler: async (_args: string, ctx: ExtensionCommandContext) => {
   const all = namesFrom(pi.getAllTools?.() ?? []);
   let guardError = "";
   try { await runtimeGuards.control({ action: "get" }, ctx); } catch (error) { guardError = String(error instanceof Error ? error.message : error); }
@@ -1363,7 +1367,15 @@ pi.registerCommand("compass-preflight", { description: "Check Compass fixed tool
     { name: "Fixed tool registry", ok: COMPASS_TOOL_NAMES.every((name) => all.includes(name)) && !all.some((name) => name.startsWith("compass_") && !COMPASS_TOOL_NAMES.includes(name)), detail: COMPASS_TOOL_NAMES.join(", ") },
     { name: "Runtime guard host/scope read", ok: !guardError, detail: guardError || "ready; observed-input boundary only" },
   ];
-  const body = checks.map((check) => (check.ok ? "PASS" : "BLOCKER") + " " + check.name + ": " + check.detail).join("\n");
-  ctx.ui?.notify?.(body, checks.every((check) => check.ok) ? "info" : "error");
+  const approvalIssue = !canPresentApproval(ctx)
+    ? `need Pi full-preview TUI (mode=${ctx.mode}, hasUI=${ctx.hasUI})`
+    : !namesFrom(pi.getActiveTools?.()).includes("ask_user_question") && "enable the native ask_user_question tool";
+  const delegation = await executionAvailability(pi, ctx.cwd);
+  const body = [
+    ...checks.map((check) => `${check.ok ? "PASS" : "BLOCKER"} ${check.name}: ${check.detail}`),
+    approvalIssue ? `UNAVAILABLE DAG approval: ${approvalIssue}` : "PASS DAG approval transport: Pi TUI and active questionnaire",
+    delegation.ok ? "PASS Native DAG delegation: bridge and launch preflight available; individual child profiles are checked at dispatch" : `UNAVAILABLE Native DAG delegation: ${delegation.reason}`,
+  ].join("\n");
+  ctx.ui.notify(body, checks.every((check) => check.ok) ? "info" : "error");
 } });
 }
