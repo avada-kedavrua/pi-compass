@@ -2,6 +2,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { launchPreflightInput, loadDelegationPreflight } from "./delegation-preflight.mjs";
 import { executionDriftReason } from "./write-scope.mjs";
 import { questionnaireFailureResultPatch, normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 import { latestHumanSource, resolveGoalSources } from "./goal-sources.mjs";
@@ -12,7 +13,7 @@ import { approvalPrompt } from "./dag-approval.mjs";
 import { agentSearch, agentContextOperation, retainedContext } from "./context-agent.mjs";
 import { contextSelection, currentValue, RESERVED_CUSTOM_TYPES } from "./context-values.mjs";
 import { registerRuntimeGuards } from "./runtime-guard.mjs";
-import { DELEGATION_EVENTS, FALLBACK_MODEL, PRIMARY_MODEL, REVIEW_MODEL, DEFAULT_TIMEOUT_MS, MAX_WAVE_TASKS, START_ACK_TIMEOUT_MS, assessWavePolicy, hasCompleteUsageMetrics, buildSubagentDelegationRequest, selectReadySubagentTasks, parseSubagentDelegationResponse, normalizeProviderDiagnostics, providerFallbackReason } from "./execution-orchestrator.mjs";
+import { DELEGATION_EVENTS, FALLBACK_MODEL, PRIMARY_MODEL, REVIEW_MODEL, DEFAULT_TIMEOUT_MS, MAX_WAVE_TASKS, START_ACK_TIMEOUT_MS, assessWavePolicy, hasCompleteUsageMetrics, buildSubagentDelegationRequest, selectReadySubagentTasks, parseSubagentDelegationResponse, normalizeProviderDiagnostics, providerFallbackReason, readOnlyLaunchRefusal } from "./execution-orchestrator.mjs";
 import { executionUnresolved, readyTasks, retainExecutions, taskDependencies, updateTasks } from "./dag-core.mjs";
 import { setGoal, updateGoal, patchPlanState, addressedConstraints, observeHumanInput, stateCursor, GOAL_RUN_API_VERSION, GOAL_RUN_RELEASE, recordAcceptanceResult, bindDagApprovalQuestionnaire, captureHumanDecision, dagApprovalStatus, recordTaskAssessment, renewDagApprovalRequest, emptyGoalRunState, mergeTrace, normalizeGoalRunState, recordCheckpoint, recordDecision, recordFailure, recordHumanQuestionnaireFailure, recordExecutionDrift, recordExecutionEvent, recordWriteTarget, revisePlanState, stopPlan, transitionTasks, reconcileUnknownExecutionTasks, expandApprovalProposal } from "./goal-run.mjs";
 import { CONTEXT_MESSAGE_TYPE, CONTEXT_STATE_TYPE, emptyContextState, normalizeContextState, pinnedContextOverlay, planContextBoundary, planRetentionBoundary, planObservationBoundary, planWatchBoundary, prepareContextOperation, validateContextOperation, releaseWatchMessages, restoreContextState, sourceIndex } from "./context-core.mjs";
@@ -24,7 +25,7 @@ const MAX_TRACE_ENTRIES = 24;
 const LATE_RESULT_RETENTION_MS = 10 * 60_000;
 const PACKAGE_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
-export default function (pi: any) {
+export default function (pi: any, resolvePreflight = (tool: unknown) => loadDelegationPreflight(tool, (url: string) => import(url))) {
 let state: any = emptyGoalRunState();
 let contextState: any = emptyContextState();
 let needsRestore = true;
@@ -201,16 +202,23 @@ function ensureDelegationRuntime(pi: any) {
   subscribe(DELEGATION_EVENTS.response, (payload) => {
     const pending = matchingPending(runtime, payload);
     if (!pending) return;
+    const response = { ...payload, __compassProgress: pending.progress ?? null };
+    const parsed = parseSubagentDelegationResponse(response, pending.request);
+    if (!parsed) {
+      pending.finishUnknown("Terminal response failed model/shape validation; awaiting valid correlated evidence. No retry was attempted.");
+      return;
+    }
     if (pending.ackTimer) clearTimeout(pending.ackTimer);
     if (pending.responseTimer) clearTimeout(pending.responseTimer);
     if (pending.retainTimer) clearTimeout(pending.retainTimer);
     runtime.pending.delete(pending.request.requestId);
-    const value = payload && typeof payload === "object" ? { ...payload, __compassProgress: pending.progress ?? null } : payload;
-    // UNKNOWN forbids a second dispatch, never observation. A late correlated
-    // terminal result is still evidence for this exact request.
-    if (pending.settled) { applyLateDelegationOutcome(pi, pending, value); return; }
+    if (pending.settled) {
+      void consumeDelegationResponse(pi, pending.generation, pending.request, { response, parsed }, pending.ctx, runtime, false)
+        .catch((error) => reportDispatchError(pending.ctx, error));
+      return;
+    }
     pending.settled = true;
-    pending.resolve(value);
+    pending.resolve({ response, parsed });
   });
   subscribe(DELEGATION_EVENTS.response, (payload) => {
     const probe = runtime.probeWaiters.get(payload?.requestId);
@@ -224,12 +232,13 @@ function ensureDelegationRuntime(pi: any) {
   delegationRuntimes.set(pi, runtime);
   return runtime;
 }
-function dispatchOneDelegation(pi: any, generation: number, runtime: any, request: any): Promise<any> {
+function dispatchOneDelegation(pi: any, generation: number, runtime: any, request: any, ctx: any): Promise<any> {
   if (!inCurrentBranch(pi, generation)) return Promise.resolve({ __compassUnknown: true, reason: "Delegation scope changed before dispatch; no request emitted." });
   return new Promise((resolve) => {
     const pending: any = {
       request,
       generation,
+      ctx,
       resolve,
       settled: false,
       started: false,
@@ -253,6 +262,7 @@ function dispatchOneDelegation(pi: any, generation: number, runtime: any, reques
       pending.retainTimer.unref?.();
       resolve({ __compassUnknown: true, requestId: request.requestId, ownerRunId: request.ownerRunId, nodeId: request.nodeId, model: request.model, reason });
     };
+    pending.finishUnknown = finishUnknown;
     runtime.pending.set(request.requestId, pending);
     pending.ackTimer = setTimeout(() => {
       finishUnknown(`No correlated Subagent start acknowledgement arrived within ${START_ACK_TIMEOUT_MS / 1000}s. Dispatch outcome is unknown; do not retry automatically.`);
@@ -317,18 +327,31 @@ async function probeDelegationBridge(pi: any, runtime: any, cwd: string) {
 }
 async function executionAvailability(pi: any, cwd: string) {
   const runtime = ensureDelegationRuntime(pi);
-  const allNames = (() => {
-    try { return typeof pi.getAllTools === "function" ? namesFrom(pi.getAllTools()) : []; }
-    catch { return []; }
-  })();
-  const registered = allNames.some((name: string) => /^(?:subagent|subagents)$/i.test(name));
-  if (!registered) return { ok: false, runtime, reason: "pi-subagents is not registered in this Pi session; no task was dispatched." };
+  const tool = pi.getAllTools?.().find((item: any) => item.name === "subagent");
+  if (!tool) return { ok: false, runtime, reason: "pi-subagents is not registered in this Pi session; no task was dispatched." };
   // Native activation remains Pi-owned. Structured execution requires exact
   // Human approval and an Agent interpretation of the latest Human input.
   if (!runtime?.installed) return { ok: false, runtime, reason: "The Pi event bus does not expose the structured-delegation contract; no task was dispatched." };
   const bridge = await probeDelegationBridge(pi, runtime, cwd);
   if (!bridge.ok) return { ok: false, runtime, reason: bridge.reason };
-  return { ok: true, runtime, reason: "" };
+  try {
+    if (runtime.preflightSource !== tool.sourceInfo?.path || !runtime.preflight) {
+      runtime.preflight = await resolvePreflight(tool);
+      runtime.preflightSource = tool.sourceInfo?.path;
+    }
+    if (runtime.preflight) return { ok: true, runtime, reason: "" };
+  } catch (error) {
+    return { ok: false, runtime, reason: `Native launch preflight could not load: ${clip(String(error), 280)}` };
+  }
+  return { ok: false, runtime, reason: "Cannot resolve the registered pi-subagents launch preflight; no child was dispatched." };
+}
+async function checkLaunch(pi: any, ctx: any, runtime: any, request: any) {
+  try {
+    const result = await runtime.preflight(launchPreflightInput(pi, ctx, request));
+    return readOnlyLaunchRefusal(request, result);
+  } catch (error) {
+    return `Cannot verify the native read-only profile: ${clip(String(error), 280)}`;
+  }
 }
 function primaryModelForTask(task: any): string {
   return ["reviewer", "evidence-auditor", "oracle"].includes(String(task?.agent ?? ""))
@@ -380,23 +403,7 @@ function parsedTaskEvidence(parsed: any): string {
 // Absorb a terminal result that arrived after the request was settled UNKNOWN.
 // Only an execution still awaiting this exact request may take it: a manually
 // reconciled or superseded batch is evidence too and must not be overwritten.
-function applyLateDelegationOutcome(pi: any, pending: any, value: any) {
-  const parsed = parseSubagentDelegationResponse(value, {
-    requestId: pending.request.requestId,
-    ownerRunId: pending.request.ownerRunId,
-    nodeId: pending.request.nodeId,
-    model: pending.request.model,
-  });
-  if (!parsed) return;
-  void serializedInBranch(pi, pending.generation, () => {
-    const execution = executionBatch(pending.request.ownerRunId);
-    if (!execution) return;
-    const index = executionResultIndex(execution, pending.request.nodeId);
-    const recorded = index < 0 ? null : execution.results[index];
-    if (!recorded || recorded.requestId !== pending.request.requestId || !executionUnresolved(recorded)) return;
-    applyDelegationOutcomeUnlocked(pi, pending.request.ownerRunId, { id: pending.request.nodeId }, parsed, recorded.fallbackAttempted === true, recorded.primaryError || "");
-  }).catch(() => {});
-}
+
 function applyDelegationOutcomeUnlocked(pi: any, waveId: string, task: any, parsed: any, fallbackAttempted: boolean, primaryError = "") {
   let execution = executionBatch(waveId);
   if (!execution) return;
@@ -410,7 +417,7 @@ function applyDelegationOutcomeUnlocked(pi: any, waveId: string, task: any, pars
     } else if (parsed.status === "done") {
       // A correlated terminal response is a fact, not approval for further work.
       // Preserve it even if new Human input has paused semantic progression.
-      state.plan = updateTasks(state.plan, [{ id: task.id, status: "done", evidence: parsedTaskEvidence(parsed) }]);
+      state.plan = updateTasks(state.plan, [{ id: task.id, status: "done", evidence: parsedTaskEvidence(parsed) }], { terminalEvidence: true });
     } else {
       const reason = clip(`${parsed?.terminalStatus ? `Subagent ${parsed.terminalStatus}: ` : ""}${parsed?.reason || parsed?.summary || "Subagent returned no valid task evidence."}`, 600);
       state.plan = updateTasks(state.plan, [{ id: task.id, status: "blocked", reason }]);
@@ -447,8 +454,12 @@ function settleDelegationWave(waveId: string, confirmation = "") {
   const execution = executionBatch(waveId);
   if (!executionUnresolved(execution)) return;
   const unresolved = execution.results.some(executionUnresolved);
-  if (unresolved && (!execution.results.some((row: any) => row.status === "unknown") || execution.status === "unknown")) return;
-  const hasUnknown = unresolved;
+  const hasUnknown = execution.results.some((row: any) => row.status === "unknown");
+  if (unresolved && !hasUnknown) {
+    if (execution.status === "unknown") { execution.status = "running"; execution.error = null; }
+    return;
+  }
+  if (hasUnknown && execution.status === "unknown") return;
   execution.status = hasUnknown ? "unknown" : "completed";
   execution.completedAt = hasUnknown ? null : now();
   execution.error = hasUnknown
@@ -510,25 +521,24 @@ function settleDelegationWave(waveId: string, confirmation = "") {
   return true;
 }
 async function runDelegatedNode(pi: any, generation: number, ctx: any, runtime: any, request: any) {
-  const response = await dispatchOneDelegation(pi, generation, runtime, request);
+  const response = await dispatchOneDelegation(pi, generation, runtime, request, ctx);
   const result = await consumeDelegationResponse(pi, generation, request, response, ctx, runtime, true);
   if (!result) return;
   const terminal = await result.response;
   await consumeDelegationResponse(pi, generation, result.request, terminal, ctx, runtime, false);
 }
 
-function consumeDelegationResponse(pi: any, generation: number, request: any, response: any, ctx: any, runtime: any, allowFallback: boolean) {
-  return serializedInBranch(pi, generation, () => {
+function consumeDelegationResponse(pi: any, generation: number, request: any, outcome: any, ctx: any, runtime: any, allowFallback: boolean) {
+  return serializedInBranch(pi, generation, async () => {
     const { ownerRunId: waveId, nodeId, requestId } = request;
     const execution = executionBatch(waveId);
     if (!execution) return;
     const index = executionResultIndex(execution, nodeId);
     const row = execution.results[index];
     if (row?.requestId !== requestId || !executionUnresolved(row)) return;
-    const parsed = parseSubagentDelegationResponse(response, request);
+    const { parsed, response } = outcome;
     if (!parsed) {
-      execution.results[index] = { ...row, status: "unknown", error: response?.__compassUnknown
-        ? response.reason : "Terminal response failed correlation/shape validation; no automatic retry was attempted." };
+      execution.results[index] = { ...row, status: "unknown", error: outcome.reason };
       settleDelegationWave(waveId);
       persistState(pi);
       return;
@@ -537,21 +547,27 @@ function consumeDelegationResponse(pi: any, generation: number, request: any, re
       && !state.plan.executions.some((batch: any) => batch.status === "unknown") && providerFallbackReason(response);
     if (fallbackReason && dagApprovalStatus(state).approved && goalInputIsCurrent(ctx)) {
       const fallback = { ...request, model: FALLBACK_MODEL, requestId: randomUUID() };
-      execution.results[index] = { ...row,
-        status: "dispatching", requestId: fallback.requestId, model: FALLBACK_MODEL,
-        fallbackAttempted: true, fallbackReason, primaryError: clip(parsed.reason, 400),
-        primaryUsage: parsed.usage, primaryProviderDiagnostics: parsed.providerDiagnostics,
-        runId: null, error: "", observedToolCount: null, observedTools: [],
-      };
-      persistState(pi);
+      const refusal = await checkLaunch(pi, ctx, runtime, fallback);
       if (!inCurrentBranch(pi, generation)) return;
-      if (!state.plan.stopped && dagApprovalStatus(state).approved && goalInputIsCurrent(ctx)) {
-        // Return the promise boxed to release the state queue before waiting.
-        return { request: fallback, response: dispatchOneDelegation(pi, generation, runtime, fallback) };
+      if (refusal) parsed.reason += ` Fallback refused: ${refusal}`;
+      if (!refusal && dagApprovalStatus(state).approved && goalInputIsCurrent(ctx)) {
+        execution.results[index] = { ...row,
+          status: "dispatching", requestId: fallback.requestId, model: FALLBACK_MODEL,
+          fallbackAttempted: true, fallbackReason, primaryError: clip(parsed.reason, 400),
+          primaryUsage: parsed.usage, primaryProviderDiagnostics: parsed.providerDiagnostics,
+          runId: null, error: "", observedToolCount: null, observedTools: [],
+        };
+        persistState(pi);
+        if (!inCurrentBranch(pi, generation)) return;
+        if (!state.plan.stopped && dagApprovalStatus(state).approved && goalInputIsCurrent(ctx)) {
+          // Return the promise boxed to release the state queue before waiting.
+          return { request: fallback, response: dispatchOneDelegation(pi, generation, runtime, fallback, ctx) };
+        }
+        execution.results[index] = row;
       }
-      execution.results[index] = row;
     }
     applyDelegationOutcomeUnlocked(pi, waveId, { id: nodeId }, parsed, row.fallbackAttempted, row.primaryError);
+    if (inCurrentBranch(pi, generation)) scheduleReadySubagentWaves(pi, ctx);
   });
 }
 function readyForDispatch(ctx: any) {
@@ -585,7 +601,7 @@ async function admitReadySubagents(pi: any, generation: number, ctx: any) {
   if (!inCurrentBranch(pi, generation) || !readyForDispatch(ctx).length) return;
   const cwd = contextCwd(ctx);
   const availability = await executionAvailability(pi, cwd);
-  await serializedInBranch(pi, generation, () => {
+  await serializedInBranch(pi, generation, async () => {
     const candidates = readyForDispatch(ctx);
     if (!candidates.length) return;
     const policy = assessWavePolicy(candidates, state.plan.executionHistory, candidates.length);
@@ -607,6 +623,13 @@ async function admitReadySubagents(pi: any, generation: number, ctx: any) {
       recordDispatchFailure(pi, ready, error instanceof Error ? error.message : String(error));
       return;
     }
+    const refusals = await Promise.all(requests.map((request: any) => checkLaunch(pi, ctx, availability.runtime, request)));
+    if (!inCurrentBranch(pi, generation) || !goalInputIsCurrent(ctx)) return;
+    const denied = refusals.findIndex(Boolean);
+    if (denied >= 0) {
+      recordDispatchFailure(pi, ready, `${ready[denied].id}: ${refusals[denied]} No child was dispatched.`);
+      return;
+    }
     state = transitionTasks(state, "start", ready.map((task: any) => ({ id: task.id })), updateTasks).state;
     const batch = executionRecordForWave(waveId, ready, state.plan.revision, state.plan.stateVersion, requests.map((request: any) => request.requestId), policy, frameScope);
     state.plan.executions.push(batch);
@@ -626,9 +649,7 @@ async function admitReadySubagents(pi: any, generation: number, ctx: any) {
         persistState(pi);
         return;
       }
-      void runDelegatedNode(pi, generation, ctx, availability.runtime, request).then(() => {
-        if (inCurrentBranch(pi, generation)) scheduleReadySubagentWaves(pi, ctx);
-      }).catch((error) => reportDispatchError(ctx, error));
+      void runDelegatedNode(pi, generation, ctx, availability.runtime, request).catch((error) => reportDispatchError(ctx, error));
     }
   });
 }
@@ -767,7 +788,7 @@ function reconcileNodeFrame(ctx: any) {
     }
   } else if (task.status === "in_progress") {
     if (outcome.status === "throw") state = stopPlan(state, { taskId: task.id, ...outcome }, updateTasks);
-    else state.plan = updateTasks(state.plan, [{ id: task.id, ...outcome }]);
+    else state.plan = updateTasks(state.plan, [{ id: task.id, ...outcome }], { terminalEvidence: true });
     if (outcome.status === "done" && artifacts.length) state.plan.tasks.find((item: any) => item.id === task.id).artifacts = artifacts;
     state = recordExecutionEvent(state, { status: outcome.status, summary: `Node ${task.id} frame returned: ${outcome.status}.`, ref: task.id, text: outcome.evidence || outcome.reason });
   }

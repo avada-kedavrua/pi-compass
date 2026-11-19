@@ -259,6 +259,22 @@ test("reopening a prerequisite resets downstream dependents but preserves unrela
   assert.equal(byId.get("docs").status, "done");
 });
 
+test("a withdrawn upstream pass invalidates transitive assessments, not terminal facts", () => {
+  const chain = [tasks[0], { ...tasks[1], dependsOn: ["api"] }, { ...tasks[2], dependsOn: ["ui"] }, { id: "docs", title: "Write docs", acceptance: "Docs exist" }];
+  let state = approvePlan(revisePlanState(plannedGoal(), { tasks: chain }).state);
+  state = completeAndAssess(state, "api", "API evidence");
+  state = completeAndAssess(state, "ui", "UI evidence");
+  assert.ok(readyTasks(state.plan).some(({ id }) => id === "smoke"));
+  state = recordTaskAssessment(state, { taskId: "api", status: "fail", evidence: "Test refuted the API contract" }).state;
+  assert.deepEqual(readyTasks(state.plan).map(({ id }) => id), ["docs"]);
+  assert.equal(state.plan.tasks[1].status, "done");
+  assert.equal(state.plan.tasks[1].evidence, "UI evidence");
+  assert.throws(() => recordTaskAssessment(state, { taskId: "ui", status: "pass", evidence: "UI alone looked good" }), /prerequisite|dependencies/);
+  state = completeAndAssess(state, "docs", "README is present");
+  state = recordTaskAssessment(state, { taskId: "api", status: "pass", evidence: "New API contract verified" }).state;
+  assert.ok(!readyTasks(state.plan).some(({ id }) => id === "smoke"), "B needs a fresh check even after A passes again");
+});
+
 test("DAG is optional for Goal continuity", () => {
   const state = withGoal();
   assert.equal(state.plan.tasks.length, 0);

@@ -67,6 +67,19 @@ const ROLE_TOOLS = Object.freeze({
   "evidence-auditor": ["web_search", "web_fetch"],
 });
 
+export function readOnlyLaunchRefusal(request, result) {
+  if (result?.ok !== true) return result?.message || "Native launch contract could not be resolved.";
+  const contract = result.contract;
+  const tools = contract?.tools;
+  if (contract?.agent?.name !== request.agent || contract.context !== request.context
+    || tools?.explicitAllowlist !== true || !Array.isArray(tools.effectiveAllowlist)
+    || tools.fanoutAuthorized !== false || !Array.isArray(tools.effectiveMcpTools) || tools.effectiveMcpTools.length
+    || contract.intercomBridge?.active !== false) return "Native launch did not prove an explicit read-only leaf tool set.";
+  const allowed = ROLE_TOOLS[request.agent];
+  const denied = tools.effectiveAllowlist.filter((name) => !allowed?.includes(name) && name !== "structured_output");
+  return denied.length ? `Native profile exposes tools outside the read-only role: ${denied.join(", ")}.` : null;
+}
+
 export function selectReadySubagentTasks(plan, maxTasks = MAX_WAVE_TASKS) {
   if (!plan || !Array.isArray(plan.tasks) || !plan.tasks.length) return [];
   if (!Number.isInteger(maxTasks) || maxTasks < 1) throw new Error("maxTasks must be a positive integer.");
@@ -206,6 +219,7 @@ export function buildSubagentDelegationRequest({
     agent: task.agent || "scout",
     task: buildTaskPrompt({ goal, task, constraints }),
     context: "fresh",
+    intercomBridge: { mode: "off" },
     cwd,
     model: normalizedModel,
     thinking,
@@ -276,7 +290,7 @@ export function parseSubagentDelegationResponse(value, expected = {}) {
   const error = boundedString(value.error, 600);
   const reportedModel = boundedString(value.model, 160);
   const expectedModel = boundedString(expected.model, 160);
-  if ((reportedModel && !modelMatchesExpected(reportedModel, expectedModel))
+  if ((value.model !== undefined && !reportedModel) || (reportedModel && !modelMatchesExpected(reportedModel, expectedModel))
     || (expectedModel && !isSupportedDelegatedModel(expectedModel))) return null;
   const model = reportedModel || expectedModel || "unknown";
   const progress = value.__compassProgress && typeof value.__compassProgress === "object" ? value.__compassProgress : null;

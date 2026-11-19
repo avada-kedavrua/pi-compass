@@ -7,6 +7,8 @@
 - Add incremental Goal/DAG edits, approved parent-node frames with committed outcomes and exact artifact handoff, and scoped memory with native Skill auto-pin and exact repeated-read deduplication.
 - Record each correlated child result as it arrives; the final late terminal result closes an unknown batch exactly once without redispatch. `throw` stops new DAG work and fallback without discarding sibling results. `cancel` targets a single exact attempt, and does not settle it.
 
+- Refuse primary and fallback child launches without a verified native read-only leaf profile. Invalidate stale downstream assessments and preserve already-started outcomes. Keep correlation across invalid terminal events and recheck readiness after late recovery.
+
 ## 0.10.0 — R2 eight-tool convergence (live Pi/provider acceptance pending)
 
 - **Breaking Agent contract:** replace the loader/capability surface with eight fixed tools — `compass_goal`, `compass_state`, `compass_context_search`, `compass_context`, `compass_plan`, `compass_acceptance`, `compass_route`, `runtime_guard`. Remove `compass_open`, `compass_goal_read`, the split plan/task/execution/history/triage tools and all loadout/capability state; no aliases, migration or compatibility adapter. GoalRun API/schema is 9 and current-only.

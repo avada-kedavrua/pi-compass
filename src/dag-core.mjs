@@ -294,18 +294,35 @@ export function taskAssessmentIsCurrent(plan, task) {
   return task?.assessment?.binding === taskAssessmentBinding(plan, task);
 }
 
-export function readyTasks(state) {
-  if (state?.stopped) return [];
-  const byId = new Map((state?.tasks ?? []).map((task) => [task.id, task]));
-  return (state?.tasks ?? []).filter((task) => task.status === "pending"
-    && taskDependencies(task).every((dep) => {
-      const prerequisite = byId.get(dep);
-      return prerequisite?.status === "done" && prerequisite.assessment?.status === "pass"
-        && taskAssessmentIsCurrent(state, prerequisite);
-    }));
+export function unmetTaskPrerequisites(plan, task, byId = new Map(plan.tasks.map((item) => [item.id, item]))) {
+  const checks = new Map();
+  const passed = (id) => {
+    if (checks.has(id)) return checks.get(id);
+    checks.set(id, false); // Fail closed on a cyclic restored record.
+    const dependency = byId.get(id);
+    const current = dependency?.status === "done" && dependency.assessment?.status === "pass"
+      && taskAssessmentIsCurrent(plan, dependency) && taskDependencies(dependency).every(passed);
+    checks.set(id, current);
+    return current;
+  };
+  return taskDependencies(task).filter((id) => !passed(id));
 }
 
-export function updateTasks(state, updates) {
+export function dependentTaskIds(tasks, roots) {
+  const affected = new Set(roots);
+  for (const id of affected) {
+    for (const task of tasks) if (taskDependencies(task).includes(id)) affected.add(task.id);
+  }
+  return affected;
+}
+
+export function readyTasks(state) {
+  if (!state?.tasks || state.stopped) return [];
+  const byId = new Map(state.tasks.map((task) => [task.id, task]));
+  return state.tasks.filter((task) => task.status === "pending" && !unmetTaskPrerequisites(state, task, byId).length);
+}
+
+export function updateTasks(state, updates, { terminalEvidence = false } = {}) {
   if (!Array.isArray(updates) || updates.length === 0) {
     throw new Error("updates must contain at least one task update.");
   }
@@ -358,12 +375,8 @@ export function updateTasks(state, updates) {
   }
 
   for (const task of next.tasks) {
-    if (task.status === "done" || task.status === "in_progress") {
-      const unfinished = taskDependencies(task).filter((dep) => {
-        const prerequisite = byId.get(dep);
-        return prerequisite?.status !== "done" || prerequisite.assessment?.status !== "pass"
-          || !taskAssessmentIsCurrent(next, prerequisite);
-      });
+    if (seen.has(task.id) && (task.status === "in_progress" || (task.status === "done" && !terminalEvidence))) {
+      const unfinished = unmetTaskPrerequisites(next, task, byId);
       if (unfinished.length > 0) {
         throw new Error(`Task "${task.id}" cannot be ${task.status} until dependencies are done: ${unfinished.join(", ")}. Revise the DAG if this dependency is no longer valid.`);
       }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { emptyDagState, createOrRevisePlan, executionUnresolved, retainExecutions, taskDependencies, taskAssessmentBinding, taskAssessmentIsCurrent } from "./dag-core.mjs";
+import { emptyDagState, createOrRevisePlan, executionUnresolved, retainExecutions, dependentTaskIds, taskAssessmentBinding, unmetTaskPrerequisites } from "./dag-core.mjs";
 import { approvalIsCurrent, clearDagApprovalAnswer, createDagApprovalRequest, dagApprovalBinding, matchesDagApprovalQuestion } from "./dag-approval.mjs";
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 import { normalizeProviderDiagnostics } from "./execution-orchestrator.mjs";
@@ -1007,6 +1007,8 @@ export function recordTaskAssessment(stateValue, input) {
   if (!Array.isArray(input.unresolvedCaveats ?? []) || (input.unresolvedCaveats ?? []).some((item) => typeof item !== "string" || !item.trim())) throw new Error("unresolvedCaveats must be an array of non-empty strings. No assessment was recorded.");
   const unresolvedCaveats = [...new Set((input.unresolvedCaveats ?? []).map((item) => nonEmpty(item, "unresolvedCaveat", 400)))];
   if (input.status === "pass" && unresolvedCaveats.length) throw new Error(`Task "${id}" cannot pass with unresolved caveats. Record fail or inconclusive, or resolve the caveats first. No assessment was recorded.`);
+  if (input.status === "pass" && unmetTaskPrerequisites(state.plan, task).length) throw new Error(`Task "${id}" cannot pass while a prerequisite lacks a current pass. No assessment was recorded.`);
+  const previous = task.assessment;
   task.assessment = {
     status: input.status,
     criteria: task.acceptance,
@@ -1019,6 +1021,11 @@ export function recordTaskAssessment(stateValue, input) {
     binding: taskAssessmentBinding(state.plan, task),
     assessedAt: timestamp(),
   };
+  const semanticFields = ({ status, evidence, caveats, unresolvedCaveats }) => JSON.stringify([status, evidence, caveats, unresolvedCaveats]);
+  if (!previous || semanticFields(previous) !== semanticFields(task.assessment)) {
+    const affected = dependentTaskIds(state.plan.tasks, [id]);
+    for (const other of state.plan.tasks) if (other.id !== id && affected.has(other.id)) other.assessment = null;
+  }
   state.plan.stateVersion = (state.plan.stateVersion ?? 0) + 1;
   appendEvent(state, "task_assessed", {
     summary: `Task ${id} assessment: ${input.status}.`,
@@ -1053,7 +1060,7 @@ export function reconcileUnknownExecutionTasks(stateValue, requestId, items, upd
     if (item.status === "blocked" && item.evidence === undefined) return { id, status: "blocked", reason: nonEmpty(item.reason, "reason", 600) };
     throw new Error(`Invalid terminal result for ${id}: use done with evidence or blocked with a reason.`);
   });
-  state.plan = updateTasksFn(state.plan, updates);
+  state.plan = updateTasksFn(state.plan, updates, { terminalEvidence: true });
   state.plan.executionDrift = null;
   return { state, affected: updates.map(({ id }) => id) };
 }
@@ -1091,21 +1098,13 @@ export function transitionTasks(stateValue, action, items, updateTasksFn) {
     if (!task) throw new Error(`Unknown or stale task ID "${id}". No state changed; read current DAG status before retrying.`);
     if (action === "start") {
       if (task.status !== "pending") throw new Error(`Task "${id}" is ${task.status}; only pending tasks can start.`);
-      const unfinished = task.dependsOn.filter((dep) => {
-        const prerequisite = byId.get(dep);
-        return prerequisite?.status !== "done" || prerequisite.assessment?.status !== "pass"
-          || !taskAssessmentIsCurrent(state.plan, prerequisite);
-      });
+      const unfinished = unmetTaskPrerequisites(state.plan, task, byId);
       if (unfinished.length) throw new Error(`Task "${id}" is not ready; dependencies unfinished or not semantically checked: ${unfinished.join(", ")}.`);
       updates.push({ id, status: "in_progress" });
     } else if (action === "done") {
       if (task.status === "pending") {
         if (state.plan.stopped) throw new Error("The DAG was stopped; a pending task cannot complete. No state changed.");
-        const unfinished = task.dependsOn.filter((dep) => {
-          const prerequisite = byId.get(dep);
-          return prerequisite?.status !== "done" || prerequisite.assessment?.status !== "pass"
-            || !taskAssessmentIsCurrent(state.plan, prerequisite);
-        });
+        const unfinished = unmetTaskPrerequisites(state.plan, task, byId);
         if (unfinished.length) throw new Error(`Task "${id}" is pending and not ready; dependencies unfinished or not semantically checked: ${unfinished.join(", ")}.`);
         completedWithoutStart.push(id);
       } else if (task.status !== "in_progress") {
@@ -1124,17 +1123,7 @@ export function transitionTasks(stateValue, action, items, updateTasksFn) {
   if (action === "reopen") {
     state.plan.executionDrift = null;
     const roots = new Set(items.map((item) => item.id));
-    const invalidate = new Set(roots);
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const task of tasks) {
-        if (!invalidate.has(task.id) && taskDependencies(task).some((dep) => invalidate.has(dep))) {
-          invalidate.add(task.id);
-          changed = true;
-        }
-      }
-    }
+    const invalidate = dependentTaskIds(tasks, roots);
     const inFlight = tasks.find((task) => invalidate.has(task.id) && task.status === "in_progress");
     if (inFlight) throw new Error(`Task ${inFlight.id} is still active; confirm its terminal result before reopening a prerequisite. No state changed.`);
     const reasons = new Map(items.map((item) => [item.id, nonEmpty(item.reason, `reason for ${item.id}`, 600)]));
@@ -1147,7 +1136,7 @@ export function transitionTasks(stateValue, action, items, updateTasksFn) {
     appendEvent(state, "task_reopen", { summary: `Reopened ${[...roots].join(", ")}; invalidated ${[...invalidate].join(", ")}.`, text: [...roots].map((id) => `${id}: ${reasons.get(id)}`).join("\n") });
     return { state, affected: [...invalidate] };
   }
-  state.plan = updateTasksFn(state.plan, updates);
+  state.plan = updateTasksFn(state.plan, updates, { terminalEvidence: action === "done" });
   state.plan.executionDrift = null;
   appendEvent(state, `task_${action}`, {
     summary: `${action} task(s): ${updates.map((item) => item.id).join(", ")}.`,

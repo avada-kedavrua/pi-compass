@@ -9,6 +9,11 @@ import { humanSourceRef, latestHumanSource } from "../src/goal-sources.mjs";
 // interactive-only proposal expansion and structured-delegation consumption.
 // These are installed-host adapters, not live AgentSession/provider acceptance.
 
+function launchProjection({ agent, context }, tools = ["read"]) {
+  return { ok: true, contract: { agent: { name: agent }, context, intercomBridge: { active: false },
+    tools: { explicitAllowlist: true, effectiveAllowlist: tools, effectiveMcpTools: [], fanoutAuthorized: false } } };
+}
+
 function fakePi(options = {}) {
   const bus = new Map();
   const hooks = new Map();
@@ -34,7 +39,7 @@ function fakePi(options = {}) {
     delegation.push(structuredClone(request));
     // Model a bridge that accepts the request and then faults before acknowledging
     // it: the caller must fail closed without losing the correlation.
-    if (options.faultDispatch) throw new Error("delegation bridge faulted after accepting the request");
+    if (options.faultDispatch === true || options.faultDispatch?.(request)) throw new Error("delegation bridge faulted after accepting the request");
     queueMicrotask(() => {
       emit("prompt-template:subagent:started", { requestId: request.requestId, ownerRunId: request.ownerRunId, nodeId: request.nodeId });
       const response = options.respondDelegation
@@ -59,7 +64,7 @@ function fakePi(options = {}) {
     activeNames() { return [...active]; },
     branch() { return entries; },
   };
-  extensionFactory(pi);
+  extensionFactory(pi, async () => (Object.hasOwn(options, "launchPreflight") ? options.launchPreflight : (request) => launchProjection(request)));
   return pi;
 }
 
@@ -344,6 +349,32 @@ test("an uncertain dispatch keeps its correlation and absorbs the late terminal 
   assert.equal(pi.delegation.length, 2, "an unknown outcome never triggers a second dispatch");
 });
 
+test("an invalid terminal retains correlation; valid late evidence releases independent ready work", async () => {
+  const valid = { status: "completed", result: { kind: "structured", value: {
+    status: "done", summary: "Inspected route", evidence: ["src/route.ts:1"], reason: "",
+  } } };
+  const pi = fakePi({ respondDelegation: (request) => {
+    if (request.nodeId === "api") return { ...valid, model: "other/model" };
+    return request.nodeId === "follow" ? valid : null;
+  } });
+  await plannedGoal(pi, [...tasks, ...["two", "three", "follow"].map((id) => ({ ...tasks[1], id }))]);
+  await approve(pi);
+  const terminal = (request, value) => pi.events.emit("prompt-template:subagent:response", { requestId: request.requestId, ownerRunId: request.ownerRunId, nodeId: request.nodeId, ...value });
+  try {
+    await waitFor(() => stateOf(pi).plan.executions[0]?.status === "unknown", "the malformed response enters recovery");
+    assert.equal(pi.delegation.length, 4, "capacity and unknown both prevent another dispatch");
+    terminal(pi.delegation[1], valid);
+    assert.equal(pi.delegation.length, 4, "unknown still blocks despite available capacity");
+    terminal(pi.delegation[0], valid);
+    await waitFor(() => stateOf(pi).plan.tasks[0].status === "done", "the later valid response settles the original attempt", 500);
+    await waitFor(() => stateOf(pi).plan.tasks[4].status === "done", "the independent ready node starts without another tool call", 500);
+    assert.equal(pi.delegation.filter((request) => request.nodeId === "api").length, 1);
+  } finally {
+    for (const request of pi.delegation) terminal(request, valid);
+    await pi.hooks.get("session_shutdown")[0]({}, ctx(pi));
+  }
+});
+
 test("a terminal result is recorded while an unrelated sibling is still running", async () => {
   const sibling = Promise.withResolvers();
   const done = { status: "completed", result: { kind: "structured", value: {
@@ -478,6 +509,36 @@ test("dependent Subagent work waits for a current semantic assessment, and Code 
   assert.equal(pi.delegation.length, 1, "Code Mode execution stays with the parent Agent");
   const done = receipt(await call(pi, "compass_plan", { action: "done", tasks: [{ id: "impl", evidence: "Navigation exercises /api/health through the real router." }] }));
   assert.deepEqual(done.affected, ["impl"]);
+});
+
+test("native launch admission fails closed for absent or write-capable profiles", async () => {
+  for (const [launchPreflight, reason] of [
+    [null, /Cannot resolve.*launch preflight/],
+    [(request) => launchProjection(request, ["read", "write"]), /outside the read-only role: write/],
+  ]) {
+    const pi = fakePi({ launchPreflight });
+    await plannedGoal(pi);
+    await approve(pi);
+    await waitFor(() => stateOf(pi).plan.executions[0]?.status === "failed", "preflight refusal is visible");
+    assert.match(stateOf(pi).plan.executions[0].error, reason);
+    assert.equal(pi.delegation.length, 0);
+    assert.ok(stateOf(pi).plan.tasks.every((task) => task.status === "pending"));
+  }
+});
+
+test("a fallback is refused when its launch no longer proves a read-only profile", async () => {
+  const checked = [];
+  const pi = fakePi({
+    launchPreflight: (request) => launchProjection(request, checked.push(request.agent) === 1 ? ["read"] : ["read", "write"]),
+    respondDelegation: () => ({ status: "failed", error: "503 provider unavailable" }),
+  });
+  await plannedGoal(pi, [tasks[0], { ...tasks[1], executor: "parent" }]);
+  await approve(pi);
+  await waitFor(() => stateOf(pi).plan.executions[0]?.status === "completed", "the primary terminal result is preserved");
+  assert.equal(checked.length, 2, "fallback uses a fresh launch check");
+  assert.equal(pi.delegation.length, 1);
+  assert.equal(stateOf(pi).plan.tasks[0].status, "blocked");
+  assert.match(stateOf(pi).plan.tasks[0].reason, /Fallback refused:.*outside the read-only role: write/);
 });
 
 test("a missing structured-delegation handler fails closed without launching a child", async () => {
