@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { EventEmitter } from "node:events";
+import { DELEGATION_EVENTS } from "../src/execution-orchestrator.mjs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { piRoot } from "../scripts/register-pi-host-typebox.mjs";
 import extensionFactory from "../src/index.ts";
-import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
-import { bindDagApprovalQuestionnaire, captureHumanDecision } from "../src/goal-run.mjs";
-import { humanSourceRef, latestHumanSource } from "../src/goal-sources.mjs";
+import { approveDefinitions } from "./helpers/goal-state.mjs";
 import { emptyContextState, planWatchBoundary, restoreContextState, searchContext } from "../src/context-core.mjs";
 import { contextRef, contextSelection } from "../src/context-values.mjs";
 import { SessionManager, appendDrafts, assertPaired, contextPreview, modelText, sourceVersion, user } from "./helpers/context-host.mjs";
@@ -20,7 +20,7 @@ let nextCall = 0;
 
 // Real installed boundary chaining and session projection; tool registry/lifecycle
 // actions are adapters. This is not a live AgentSession/provider acceptance test.
-async function setup(laterHandler, earlierContextHandler, cwd = "/context-integration") {
+async function setup(laterHandler, earlierContextHandler, cwd = "/context-integration", delegates) {
   const manager = SessionManager.inMemory(cwd);
   const handlers = new Map();
   const tools = new Map();
@@ -30,11 +30,27 @@ async function setup(laterHandler, earlierContextHandler, cwd = "/context-integr
     registerTool(definition) { tools.set(definition.name, definition); },
     registerCommand() {},
     getActiveTools() { return [...active]; },
-    getAllTools() { return [...new Set([...active, ...tools.keys()])].map((name) => ({ name })); },
+    getAllTools() { return [...new Set([...active, ...tools.keys(), ...(delegates ? ["subagent"] : [])])].map((name) => ({ name })); },
     setActiveTools(names) { active = [...names]; },
-    appendEntry(type, data) { return manager.appendCustomEntry(type, structuredClone(data)); },
+    appendEntry(type, data) {
+      const id = manager.appendCustomEntry(type, structuredClone(data));
+      if (type === "pi-compass-v2.goalrun") delegates?.observe(data);
+      return id;
+    },
   };
-  extensionFactory(api);
+  if (delegates) {
+    const bus = new EventEmitter();
+    api.events = { on: (name, handler) => { bus.on(name, handler); return () => bus.off(name, handler); }, emit: (name, payload) => bus.emit(name, payload) };
+    bus.on(DELEGATION_EVENTS.request, (request) => {
+      const { requestId, ownerRunId, nodeId, model } = request;
+      const ids = { requestId, ownerRunId, nodeId };
+      if (!request.task) { bus.emit(DELEGATION_EVENTS.response, { ...ids, status: "invalid_request" }); return; }
+      delegates.requests.push(nodeId);
+      bus.emit(DELEGATION_EVENTS.started, ids);
+      bus.emit(DELEGATION_EVENTS.response, { ...ids, status: "completed", model, runId: `fixture-${nodeId}`, result: { kind: "structured", value: { status: "done", summary: "Read-only fixture observation", evidence: ["route.ts:4"], reason: "" } } });
+    });
+    extensionFactory(api, async () => ({ agent, context }) => ({ ok: true, contract: { agent: { name: agent }, context, intercomBridge: { active: false }, tools: { explicitAllowlist: true, effectiveAllowlist: ["read"], effectiveMcpTools: [], fanoutAuthorized: false } } }));
+  } else extensionFactory(api);
   const extensions = [{ path: "compass", handlers }];
   if (earlierContextHandler) extensions.unshift({ path: "earlier-extension", handlers: new Map([["context", [earlierContextHandler]]]) });
   if (laterHandler) extensions.push({ path: "later-extension", handlers: new Map([["turn_end", [laterHandler]]]) });
@@ -55,7 +71,7 @@ async function setup(laterHandler, earlierContextHandler, cwd = "/context-integr
     return contextRef({ binding: binding ?? hit.binding, version: version ?? hit.version });
   }
   function intent(parameters) {
-    const { expectedRevision, ids, version, versions, binding, scope, capture, exportIds, kind, verifiedAgainst, watchScope, content, ...input } = parameters;
+    const { expectedRevision: _expectedRevision, ids, version, versions, binding, scope: _scope, capture, exportIds, kind, verifiedAgainst, watchScope, content, ...input } = parameters;
     if (ids?.length) {
       const refs = ids.map((id) => ref(id, version ?? versions?.find((item) => item.id === id)?.version, binding));
       if (["load", "replace", "mark", "spill"].includes(input.action)) input.source = refs[0];
@@ -96,12 +112,12 @@ async function setup(laterHandler, earlierContextHandler, cwd = "/context-integr
     }
     return proposal;
   }
-  async function finish(outcome = "completed") {
+  async function finish(outcome = "completed", { apply = true } = {}) {
     const message = { role: "assistant", content: [{ type: "text", text: "Done with this turn." }], api: "test", provider: "test", model: "test", usage: {}, stopReason: outcome === "aborted" ? "aborted" : "stop", timestamp: Date.now() };
     const messageEntryId = manager.appendMessage(message);
     const proposal = await runner.emitBoundary({ type: "turn_end", turnIndex: 0, outcome, message, toolResults: [], messageEntryId, toolResultEntryIds: [] }, (drafts) => contextPreview(manager, drafts));
     assert.equal(proposal.valid, true);
-    appendDrafts(manager, proposal.entries);
+    if (apply) appendDrafts(manager, proposal.entries);
     return proposal;
   }
   return { manager, runner, tools, turn, finish, ref, intent, errors, aborted: () => aborted };
@@ -121,7 +137,7 @@ test("installed runner chains frame entry and return; only committed metadata be
   const proposal = await host.turn({ action: "call", expectedRevision: 0, task: "LOCAL PROCEDURE" }, { apply: false });
   assert.deepEqual(restoreContextState(manager.getBranch()), emptyContextState(), "returning drafts is not committing them");
   const beforeCommit = await tools.get("compass_context_search").execute("read-state", {}, undefined, undefined, runner.createContext());
-  assert.equal(JSON.parse(beforeCommit.content[0].text).frame, "root");
+  assert.equal(JSON.parse(beforeCommit.content[0].text).frame, "main");
   assert.equal((await readState(rootState.cursor)).unchanged, true, "queued entry is not a committed frame");
   appendDrafts(manager, proposal.entries);
   await runner.emitContext(manager.buildSessionProjection().messages);
@@ -136,8 +152,8 @@ test("installed runner chains frame entry and return; only committed metadata be
   const returned = await host.turn({ action: "return", expectedRevision: 1, result: "SELECTED RESULT" });
   assert.equal(returned.continue, true);
   const restored = await readState(entered.cursor);
-  assert.equal(restored.frame, "root");
-  assert.equal(statuses.at(-1).text, "frame: root");
+  assert.equal(restored.frame, "main");
+  assert.equal(statuses.at(-1).text, "frame: main");
   assert.match(modelText(manager), /PARENT ONLY/);
   assert.match(modelText(manager), /SELECTED RESULT/);
   assert.doesNotMatch(modelText(manager), /LOCAL PROCEDURE/);
@@ -437,6 +453,33 @@ async function appendNativeRead(host, args, text, details) {
   return id;
 }
 
+test("a committed frame attestation releases an independent native delegation without interrupting serial handoff", { timeout: 2_000 }, async () => {
+  const { promise, resolve } = Promise.withResolvers();
+  const delegates = { requests: [], observe: (value) => {
+    const status = value.plan.tasks.find(({ id }) => id === "inspect")?.status;
+    if (["done", "blocked"].includes(status) || value.plan.executions.some(({ status }) => status === "failed")) resolve(value);
+  } };
+  const { manager, runner, tools, finish, turn } = await setup(undefined, undefined, undefined, delegates);
+  const run = (name, args) => tools.get(name).execute(`mixed-${++nextCall}`, args, undefined, undefined, runner.createContext());
+  await run("compass_goal", { action: "set", current: "Gather route evidence", constraints: [], criteria: ["Route evidence exists"] });
+  await run("compass_plan", { action: "define", tasks: [
+    { id: "prepare", title: "Establish the route", acceptance: "Route identified", executor: "parent" },
+    { id: "report", title: "Summarize the route", acceptance: "Route summarized", dependsOn: ["prepare"], executor: "parent" },
+    { id: "inspect", title: "Inspect the implementation", acceptance: "Point to the route", dependsOn: ["prepare"], executor: "subagent", agent: "scout", writeScope: "read-only", dispatchReason: "Independent route inspection is useful in an isolated read-only context." },
+  ] });
+  const snapshot = manager.getBranch().findLast((entry) => entry.customType === "pi-compass-v2.goalrun");
+  manager.appendCustomEntry(snapshot.customType, approveDefinitions(snapshot.data));
+  await runner.emit({ type: "session_start" });
+  await finish();
+  await runner.emitContext(manager.buildSessionProjection().messages);
+  assert.deepEqual(delegates.requests, [], "child cannot start before the prerequisite frame returns");
+  await turn({ action: "return", outcome: { status: "done", evidence: "Observed the route in the fixture" } });
+  const settled = await promise;
+  assert.deepEqual(delegates.requests, ["inspect"]);
+  assert.deepEqual(settled.plan.tasks.map(({ status }) => status), ["done", "in_progress", "done"]);
+  assert.equal(restoreContextState(manager.getBranch()).frames.at(-1).node.taskId, "report");
+});
+
 test("planner and frame worker can produce, assess, consume, throw and replan with an exact artifact", async () => {
   const host = await setup();
   const { manager, runner, tools } = host;
@@ -448,32 +491,25 @@ test("planner and frame worker can produce, assess, consume, throw and replan wi
   };
   const branchState = () => manager.getBranch().findLast((entry) => entry.customType === "pi-compass-v2.goalrun").data;
   const approve = async () => {
-    const candidate = branchState();
-    const { id, question, questionnaire } = candidate.plan.approvalRequest;
-    const bound = bindDagApprovalQuestionnaire(candidate, { questions: [questionnaire] }, `question-${id}`, `call-${id}`);
-    assert.equal(bound.bound, true);
-    const { state } = captureHumanDecision(bound.state, {
-      source: "ask_user_question", sourceEntryId: `question-${id}`, sourceCallId: `call-${id}`,
-      details: { answers: [{ questionIndex: 0, question, kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION], preview: questionnaire.options[0].preview }] },
-    });
+    const state = approveDefinitions(branchState());
     assert.ok(state.plan.approval);
     manager.appendCustomEntry("pi-compass-v2.goalrun", state);
     await runner.emit({ type: "session_start" });
   };
   const view = () => call("compass_state", { view: "plan" });
   const node = (id, title, extra = {}) => ({ id, title, acceptance: "Observable evidence", ...extra });
-  await call("compass_goal", { action: "set", current: "Document an observed route", constraints: [], criteria: ["Route is documented"], sources: [humanSourceRef(manager.getBranch(), latestHumanSource(manager.getBranch()))] });
+  await call("compass_goal", { action: "set", current: "Document an observed route", constraints: [], criteria: ["Route is documented"] });
   await call("compass_plan", { action: "define", tasks: [node("a", "Produce observation"), node("b", "Consume observation", { fromTasks: ["a"] }), node("c", "Record output", { dependsOn: ["b"] })] });
   await approve();
-  await host.turn({ action: "call", taskId: "a" });
+  await host.finish();
+  await runner.emitContext(manager.buildSessionProjection().messages);
   await host.turn({ action: "return", outcome: { status: "done", evidence: "Observation recorded without exporting the value" } });
   const missing = await call("compass_plan", { action: "assess", taskId: "a", status: "pass", evidence: "The recorded observation is correct" });
   assert.deepEqual(missing.ready, {});
   assert.equal(missing.waiting[0].taskId, "b");
   assert.match(missing.waiting[0].reason, /Artifact input from a is missing/);
-  await assert.rejects(() => call("compass_context", { action: "call", taskId: "b" }), /Artifact input from a is missing.*No state changed/);
   await call("compass_plan", { action: "reopen", tasks: [{ id: "a", reason: "Export the observation for its declared consumer" }] });
-  const claim = await host.turn({ action: "call", taskId: "a" }, { apply: false });
+  const claim = await host.finish("completed", { apply: false });
   assert.equal((await view()).tasks[0].status, "pending", "a queued frame does not claim the node");
   appendDrafts(manager, claim.entries);
   await runner.emitContext(manager.buildSessionProjection().messages);
@@ -482,17 +518,15 @@ test("planner and frame worker can produce, assess, consume, throw and replan wi
   const list = await call("compass_state", { view: "retained" });
   const memory = list.retained.find((hit) => hit.text === "ROUTE_OBSERVATION");
   assert.ok(memory);
-  const returned = await host.turn({ action: "return", outcome: { status: "done", evidence: "Observed route from local fixture" }, exportSources: [memory.ref] }, { apply: false });
+  const returned = await host.turn({ action: "return", outcome: { status: "done", evidence: "Observed route from local fixture", caveats: ["No provider check."] }, exportSources: [memory.ref] }, { apply: false });
   assert.equal((await view()).tasks[0].status, "in_progress", "queued return does not settle the node");
   appendDrafts(manager, returned.entries);
   await runner.emitContext(manager.buildSessionProjection().messages);
   const produced = (await view()).tasks[0];
   assert.equal(produced.status, "done");
   assert.equal(produced.artifacts.length, 1);
-  assert.deepEqual((await view()).ready, {}, "a returned artifact is not a semantic pass");
-  await call("compass_plan", { action: "assess", taskId: "a", status: "pass", evidence: "Compared the route against the approved definition", caveats: ["No provider check."] });
-  await host.turn({ action: "call", taskId: "b" });
-  assert.equal((await view()).tasks[1].status, "in_progress");
+  assert.equal(produced.assessment.status, "pass", "the executing frame attests acceptance together with its outcome");
+  assert.equal((await view()).tasks[1].status, "in_progress", "the successor starts as part of the same handoff");
   assert.match(modelText(manager), /ROUTE_OBSERVATION/);
   assert.match(modelText(manager), /Local evidence only/);
   assert.match(modelText(manager), /No provider check/);
@@ -503,7 +537,8 @@ test("planner and frame worker can produce, assess, consume, throw and replan wi
   assert.equal(stopped.ready, undefined);
   await call("compass_plan", { action: "patch", upsertTasks: [{ id: "b", title: "Use the corrected local consumer", fromTasks: [], inputRefs: produced.artifacts }] });
   await approve();
-  await host.turn({ action: "call", taskId: "b" });
+  await host.finish();
+  await runner.emitContext(manager.buildSessionProjection().messages);
   assert.equal((await view()).tasks[1].status, "in_progress");
   assert.match(modelText(manager), /ROUTE_OBSERVATION/);
   await host.turn({ action: "return", outcome: { status: "done", evidence: "Correct consumer used the original artifact" } });

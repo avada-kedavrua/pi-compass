@@ -56,7 +56,7 @@ const overlay = sample(() => pinnedContextOverlay(manager.getBranch(), retained,
 const nativeBytes = Buffer.byteLength(JSON.stringify(compacted), "utf8");
 const outgoingBytes = Buffer.byteLength(JSON.stringify([...compacted, ...overlay.result]), "utf8");
 const goalState = setGoal(observeHumanInput(emptyGoalRunState(), source.id).state, {
-  expectedVersion: 0, current: "Measure bounded Compass context operations", sourceIds: [source.id], constraints: [],
+  expectedVersion: 0, current: "Measure bounded Compass context operations", constraints: [],
 }).state;
 const goalRead = sample(() => buildStateSnapshot(goalState));
 const unchangedRead = sample(() => buildStateSnapshot(goalState, goalRead.result.cursor));

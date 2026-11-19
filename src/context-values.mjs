@@ -193,7 +193,12 @@ export function currentValue(state, index, id, { allowHidden = false, key: selec
   let item = index.valueViews.get(key) ?? index.active.get(copy?.viewId ?? index.byId.get(sourceId)?.id);
   if (state.values[key]?.pointerVersion && item?.messages?.length && contentVersion(item.messages[0].content) === state.values[key].pointerVersion) item = undefined;
   if (!allowHidden && !item?.messages.length) fail(`Value ${sourceId} is omitted; load it before this operation.`);
-  const head = state.values[key] ?? (item?.messages.length ? defaultHead(index, sourceId, item) : null);
+  const entry = index.byId.get(sourceId);
+  const persistedExport = allowHidden && entry?.customType === VALUE_MESSAGE_TYPE && entry.details?.action === "export" && entry.details.key === key;
+  if (persistedExport && !item?.messages.length && !state.values[key] && index.branch.findLast((candidate) => candidate.type === "context_edit" && candidate.targetId === entry.id)?.replacement === null) fail(`Export ${sourceId} was dropped or is not available in this projection.`);
+  let head = state.values[key];
+  if (!head && item?.messages.length) head = defaultHead(index, sourceId, item);
+  if (!head && persistedExport) head = snapshotHead(entry);
   if (!head) fail(`Value ${sourceId} has no recoverable version.`);
   const content = valueContent(index, head, sourceId);
   const viewKey = item?.sourceEntry.customType === VALUE_MESSAGE_TYPE ? item.sourceEntry.details.key : copy?.viewKey ?? key;

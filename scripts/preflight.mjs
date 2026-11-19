@@ -86,7 +86,7 @@ if (manifest?.pi?.extensions?.includes("./src/index.ts") && fs.existsSync(path.j
 let release = null;
 try { release = JSON.parse(fs.readFileSync(path.join(packageRoot, "RELEASE-MANIFEST.json"), "utf8")); } catch { /* reported below */ }
 const minimumPi = parseVersion(release?.minimumPiVersion);
-if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 10 && release?.contextSchemaVersion === CONTEXT_SCHEMA_VERSION && minimumPi) {
+if (release?.name === manifest?.name && release?.version === manifest?.version && release?.goalRunSchemaVersion === 11 && release?.contextSchemaVersion === CONTEXT_SCHEMA_VERSION && minimumPi) {
   add("PASS", "Release identity", `Package/manifest ${release.version}; GoalRun v${release.goalRunSchemaVersion}; context v${CONTEXT_SCHEMA_VERSION}; Pi minimum ${release.minimumPiVersion}`);
 } else add("FAIL", "Release identity", "RELEASE-MANIFEST.json must match the package and current GoalRun/context schemas and declare a valid Pi minimum");
 const goalRunPath = path.join(packageRoot, "src", "goal-run.mjs");
@@ -99,17 +99,17 @@ try {
   const goalRun = await import(pathToFileURL(goalRunPath).href);
   const { COMPASS_TOOL_NAMES } = await import(pathToFileURL(toolSchemaPath).href);
   const registryMatches = COMPASS_TOOL_NAMES.length === fixedToolNames.length && fixedToolNames.every((name, index) => COMPASS_TOOL_NAMES[index] === name);
-  if (goalRun.GOAL_RUN_API_VERSION !== 10 || goalRun.GOAL_RUN_RELEASE !== manifest?.version || !registryMatches) {
-    add("FAIL", "GoalRun module contract", `Expected API v10 / release ${manifest?.version} / tools ${fixedToolNames.join(", ")}; module reports API ${String(goalRun.GOAL_RUN_API_VERSION)} / release ${String(goalRun.GOAL_RUN_RELEASE)} / tools ${COMPASS_TOOL_NAMES.join(", ")}`);
+  if (goalRun.GOAL_RUN_API_VERSION !== 11 || goalRun.GOAL_RUN_RELEASE !== manifest?.version || !registryMatches) {
+    add("FAIL", "GoalRun module contract", `Expected API v11 / release ${manifest?.version} / tools ${fixedToolNames.join(", ")}; module reports API ${String(goalRun.GOAL_RUN_API_VERSION)} / release ${String(goalRun.GOAL_RUN_RELEASE)} / tools ${COMPASS_TOOL_NAMES.join(", ")}`);
   } else {
     const observed = goalRun.observeHumanInput(goalRun.emptyGoalRunState(), "preflight-human").state;
-    const initial = goalRun.setGoal(observed, { expectedVersion: 0, current: "Verify cursor mechanics", sourceIds: ["preflight-human"], constraints: [] }).state;
+    const initial = goalRun.setGoal(observed, { expectedVersion: 0, current: "Verify cursor mechanics", constraints: [] }).state;
     const snapshot = goalRun.buildStateSnapshot(initial);
     const unchanged = goalRun.buildStateSnapshot(initial, snapshot.cursor);
-    if (!/^R\d+-E\d+-C\d+$/.test(snapshot.cursor) || unchanged.unchanged !== true || JSON.stringify(unchanged).length > 220) {
+    if (!/^R\d+-E\d+-C\d+-I[a-f0-9]{12}$/.test(snapshot.cursor) || unchanged.unchanged !== true || JSON.stringify(unchanged).length > 220) {
       add("FAIL", "State cursor contract", "Composite cursor or compact unchanged response failed the GoalRun smoke test");
     } else {
-      add("PASS", "State cursor contract", "Composite Goal/event/frame cursor and compact unchanged response work");
+      add("PASS", "State cursor contract", "Composite Goal/event/frame/input cursor and compact unchanged response work");
     }
     add("PASS", "GoalRun module contract", `API v${goalRun.GOAL_RUN_API_VERSION}, release ${goalRun.GOAL_RUN_RELEASE}; fixed ${fixedToolNames.length}-tool registry`);
   }
@@ -137,7 +137,7 @@ if (staticOnly) {
   if (entryCheck.ok) add("PASS", "Extension entry import", "src/index.ts resolves TypeBox through Pi's host package and exports the extension factory");
   else add("FAIL", "Extension entry import", entryCheck.text || "Host-mapped extension entry import failed");
   const hostCheck = run(process.execPath, ["--test", path.join(packageRoot, "tests/runtime-guard-host.test.mjs")], 30000);
-  if (hostCheck.ok) add("PASS", "Native extension runner", "Unpatched Pi loader, TUI approval/RPC refusal, parent-to-code DAG and Goal acceptance, context boundaries, Worker and temporary profile SQLite passed; no provider request");
+  if (hostCheck.ok) add("PASS", "Native extension runner", "Unpatched Pi loader, dual TUI approvals/RPC refusal, automatic serial handoff, throw and Goal acceptance, context boundaries, Worker and temporary profile SQLite passed; no provider request");
   else add("FAIL", "Native extension runner", hostCheck.text || "Native extension smoke test failed");
 }
 

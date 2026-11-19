@@ -51,6 +51,20 @@ test("near-budget control state stays restorable after the commit receipt is att
   assert.equal(restoreContextState(manager.getBranch()).watches.large.prompt.length, state.watches.large.prompt.length);
 });
 
+test("a child can mask an inherited pin without changing its main-frame value or pin", () => {
+  const manager = host();
+  const pinnedId = user(manager, "SCOPED_PARENT_PIN");
+  applyOperation(manager, { action: "pin", ids: [pinnedId] });
+  applyOperation(manager, { action: "call", task: "Child work" });
+  assert.match(JSON.stringify(pinnedContextOverlay(manager.getBranch(), restoreContextState(manager.getBranch()), [])), /SCOPED_PARENT_PIN/);
+  applyOperation(manager, { action: "unpin", ids: [pinnedId] });
+  applyOperation(manager, { action: "call", task: "Nested child work" });
+  assert.doesNotMatch(JSON.stringify(pinnedContextOverlay(manager.getBranch(), restoreContextState(manager.getBranch()), [])), /SCOPED_PARENT_PIN/);
+  applyOperation(manager, { action: "return" });
+  applyOperation(manager, { action: "return" });
+  assert.match(JSON.stringify(pinnedContextOverlay(manager.getBranch(), restoreContextState(manager.getBranch()), [])), /SCOPED_PARENT_PIN/);
+});
+
 test("context normalization rejects malformed and non-canonical bindings", () => {
   const missing = emptyContextState();
   missing.frames = [{ id: "frame-1", parent: "root", boundaryId: "boundary", summaryId: null, saved: [], refs: [{ id: "source", version: "a".repeat(24) }], copies: [] }];

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import extensionFactory from "../src/index.ts";
-import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
+import { exactAnswers } from "./helpers/goal-state.mjs";
 import { dagApprovalStatus, normalizeGoalRunState } from "../src/goal-run.mjs";
 import { humanSourceRef, latestHumanSource } from "../src/goal-sources.mjs";
 
@@ -110,7 +110,6 @@ async function setGoal(pi, current, { constraints = [], criteria = ["Goal result
   await sendHuman(pi, current);
   return receipt(await call(pi, "compass_goal", {
     action: "set", current, constraints, criteria,
-    sources: [humanSourceRef(pi.branch(), latestHumanSource(pi.branch()))],
   }));
 }
 function persistAssistantCall(pi, callId, name, args) {
@@ -124,10 +123,10 @@ async function present(pi, callId, context = ctx(pi)) {
   const patch = await pi.hooks.get("tool_call")[0](event, context);
   return { event, patch };
 }
-async function answer(pi, callId, canonical, { preview, option = DAG_APPROVAL_OPTION, context = ctx(pi) } = {}) {
-  const details = { answers: [{ questionIndex: 0, question: canonical.question.slice(0, 400), kind: "option", answer: option, selected: [option], ...(preview === undefined ? {} : { preview }) }] };
+async function answer(pi, callId, questions, { transform = (answers) => answers, context = ctx(pi) } = {}) {
+  const details = { answers: transform(exactAnswers(questions)) };
   for (const handler of pi.hooks.get("tool_result") ?? []) {
-    await handler({ toolName: "ask_user_question", toolCallId: callId, isError: false, content: [{ type: "text", text: `Human answered: ${option}` }], details }, context);
+    await handler({ toolName: "ask_user_question", toolCallId: callId, isError: false, content: [{ type: "text", text: "Human answered the proposal" }], details }, context);
   }
   return details;
 }
@@ -143,14 +142,11 @@ async function plannedGoal(pi, goalTasks = tasks) {
   return stateOf(pi);
 }
 async function approve(pi, context = ctx(pi)) {
-  const callId = `approval-${stateOf(pi).plan.approvalRequest.id}`;
+  const callId = `approval-${++sequence}`;
   const { event, patch } = await present(pi, callId, context);
   assert.equal(patch, undefined, "supported interactive UI expands the proposal in place");
-  const canonical = event.input.questions[0];
-  assert.equal(canonical.options[0].label, DAG_APPROVAL_OPTION);
-  await answer(pi, callId, canonical, { preview: canonical.options[0].preview, context });
-  assert.equal(dagApprovalStatus(stateOf(pi)).approved, true, "exact correlated answer authorizes this DAG");
-  return canonical;
+  await answer(pi, callId, event.input.questions, { context });
+  assert.equal(dagApprovalStatus(stateOf(pi)).approved, true, "both exact approvals authorize this DAG");
 }
 
 test("registers exactly the seven fixed tools and never rewrites native activation", async () => {
@@ -189,14 +185,13 @@ test("Goal alone defines criteria; decisions and checkpoints stay Goal-scoped", 
   assert.equal(acceptance.independentlyVerified, false);
 });
 
-test("Goal sources must be original native Human refs and failed writes leave state untouched", async () => {
+test("Goal drafts need no refs and invalid criteria leave state untouched", async () => {
   const pi = fakePi();
   await boot(pi);
   await setGoal(pi, "Keep the current behaviour intact");
   const before = structuredClone(stateOf(pi));
-  await assert.rejects(() => call(pi, "compass_goal", { action: "set", current: "Keep the current behaviour intact", constraints: [], sources: ["S.not-a-human-ref.000000"] }), /No state changed/);
-  assert.deepEqual(stateOf(pi), before);
-  await assert.rejects(() => call(pi, "compass_goal", { action: "set", current: "Different objective", constraints: [], sources: [humanSourceRef(pi.branch(), latestHumanSource(pi.branch()))], criteria: ["", "duplicate", "duplicate"] }), /No state changed/);
+  assert.ok(before.goal.approvalRequest, "semantic Goal produces an approval proposal without provenance arguments");
+  await assert.rejects(() => call(pi, "compass_goal", { action: "set", current: "Different objective", constraints: [], criteria: ["", "duplicate", "duplicate"] }), /No state changed/);
   assert.deepEqual(stateOf(pi), before);
 });
 
@@ -204,11 +199,10 @@ test("a DAG is a draft, requires Goal criteria, and rejects unsafe or unexplaine
   const pi = fakePi();
   await boot(pi);
   await sendHuman(pi, "Map both layers");
-  const sources = [humanSourceRef(pi.branch(), latestHumanSource(pi.branch()))];
-  await call(pi, "compass_goal", { action: "set", current: "Map both layers", constraints: [], sources });
+  await call(pi, "compass_goal", { action: "set", current: "Map both layers", constraints: [] });
   const revision = stateOf(pi).stateRevision;
   await assert.rejects(() => call(pi, "compass_plan", { action: "define", tasks }), /Define Goal acceptance criteria/);
-  await call(pi, "compass_goal", { action: "set", current: "Map both layers", constraints: [], sources, criteria });
+  await call(pi, "compass_goal", { action: "set", current: "Map both layers", constraints: [], criteria });
   await assert.rejects(() => call(pi, "compass_plan", { action: "define", tasks: [{ ...tasks[0], writeScope: "src/api" }, tasks[1]] }), /read-only/);
   await assert.rejects(() => call(pi, "compass_plan", { action: "define", tasks: [{ ...tasks[0], dispatchReason: "useful" }, tasks[1]] }), /dispatchReason/);
   await assert.rejects(() => call(pi, "compass_plan", { action: "define", tasks: [tasks[0]] }), /at least two|2/);
@@ -233,9 +227,10 @@ test("incremental Goal and DAG edits preserve unrelated evidence and require fre
   await call(pi, "compass_acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "API observation retained" }] });
   const { goal: original } = await view(pi, { view: "goal" });
   const updated = receipt(await call(pi, "compass_goal", { action: "update", constraintEdits: [{ text: "Follow AGENTS.md#toolresult-design" }], criterionEdits: [{ id: "AC2", text: "UI route includes error handling" }] }));
-  assert.equal(updated.approval, "awaiting_questionnaire");
-  assert.ok(updated.prompt, "Goal definition changes return the new proposal, not a generic approval requirement");
-  assert.equal((await present(pi, "updated-goal")).patch, undefined, "a revised Goal proposal can be presented before changing the DAG");
+  assert.equal(updated.goalApproval, "awaiting_questionnaire");
+  assert.equal(updated.approval, "approved");
+  assert.deepEqual(updated.prompt.questions.map(({ header }) => header), ["Goal"]);
+  await approve(pi);
   assert.equal((await view(pi, { view: "goal" })).goal.current, original.current);
   assert.equal((await view(pi, { view: "acceptance" })).criteria[0].status, "reported_pass");
   assert.deepEqual(updated.criteria.map((item) => item.id), ["AC1", "AC3"]);
@@ -276,7 +271,7 @@ test("approval fails closed without interactive full-preview TUI", async () => {
     assert.match(patch.reason, /interactive Pi with full-preview TUI/);
   }
   const state = stateOf(pi);
-  assert.equal(state.plan.approvalRequest.toolCallId, "", "a blocked presentation cannot bind the request");
+  assert.equal(state.plan.approvalRequest.toolCallId, undefined, "a blocked presentation cannot bind the request");
   assert.equal(state.plan.approval, null);
 });
 
@@ -285,8 +280,7 @@ test("a shortened preview echo cannot authorize the exact DAG", async () => {
   await plannedGoal(pi);
   const callId = "approval-short";
   const { event } = await present(pi, callId);
-  const canonical = event.input.questions[0];
-  await answer(pi, callId, canonical, { preview: canonical.options[0].preview.slice(0, 600) });
+  await answer(pi, callId, event.input.questions, { transform: (answers) => answers.map((answer) => ({ ...answer, preview: answer.preview.slice(0, 60) })) });
   const state = stateOf(pi);
   assert.equal(dagApprovalStatus(state).approved, false);
   assert.equal(state.plan.approval, null);
@@ -492,7 +486,7 @@ test("new Human input pauses approved dispatch until the Agent reaffirms the Goa
   assert.equal(dagApprovalStatus(stateOf(pi)).approved, false, "unreviewed Human input withdraws authorization");
   const plan = await view(pi, { view: "plan" });
   assert.equal(plan.approval, "stale", "an answered-but-withdrawn approval is reported as stale");
-  await assert.rejects(() => call(pi, "compass_plan", { action: "assess", taskId: "api", status: "pass", evidence: "Verified route order.", caveats: [], unresolvedCaveats: [] }), /no current correlated Human approval/);
+  await assert.rejects(() => call(pi, "compass_plan", { action: "assess", taskId: "api", status: "pass", evidence: "Verified route order.", caveats: [], unresolvedCaveats: [] }), /Review the latest Human input.*compass_goal/);
   await waitFor(() => stateOf(pi).plan.executions[0]?.status === "completed", "the already-started child terminal result is still consumed");
   assert.equal(stateOf(pi).plan.tasks.find((task) => task.id === "api").status, "done", "a correlated fact is preserved without reopening progression");
   assert.equal(pi.delegation.length, 2);
@@ -588,9 +582,8 @@ test("a missing structured-delegation handler fails closed without launching a c
   // Approve through the module binding path: this test isolates the dispatch bridge.
   const callId = "approval-no-bus";
   const { event } = await present(pi, callId);
-  const canonical = event.input.questions[0];
   // Without a bus the hook still binds; the questionnaire answer is correlated normally.
-  await answer(pi, callId, canonical, { preview: canonical.options[0].preview });
+  await answer(pi, callId, event.input.questions);
   await waitFor(() => stateOf(pi).plan.executions[0]?.status === "failed", "dispatch fails visibly");
   const state = stateOf(pi);
   assert.match(state.plan.executions[0].error, /No correlated invalid_request response|does not expose the structured-delegation contract/);
@@ -694,7 +687,6 @@ test("failed native persistence never reports a mutation as committed", async ()
   pi.failAppend = true;
   await assert.rejects(() => call(pi, "compass_goal", {
     action: "set", current: "Persist a Goal", constraints: [], criteria,
-    sources: [humanSourceRef(pi.branch(), latestHumanSource(pi.branch()))],
   }), /persistence failed/);
   assert.equal(pi.entries.filter((entry) => entry.customType === "pi-compass-v2.goalrun").length, persisted, "no candidate state is activated or persisted");
 });

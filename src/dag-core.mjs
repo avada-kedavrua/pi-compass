@@ -180,20 +180,23 @@ function planDelta(previous, goal, definitionKey, tasks) {
   const changed = tasks.filter((task) => oldById.has(task.id) && taskSignature(oldById.get(task.id)) !== taskSignature(task)).map((task) => task.id);
   const goalChanged = Boolean(previous?.goal) && previous.goal !== goal;
   const acceptanceChanged = Boolean(previous?.goal) && previous?.definitionKey !== definitionKey;
+  const orderChanged = !added.length && !removed.length && tasks.some(({ id }, index) => previous.tasks[index]?.id !== id);
   return {
     goalChanged,
     acceptanceChanged,
+    orderChanged,
     added,
     removed,
     changed,
-    material: !previous?.goal || goalChanged || acceptanceChanged || added.length > 0 || removed.length > 0 || changed.length > 0,
+    material: !previous?.goal || goalChanged || acceptanceChanged || orderChanged || added.length > 0 || removed.length > 0 || changed.length > 0,
   };
 }
 
 function planDeltaSummary(delta) {
   const parts = [];
   if (delta.goalChanged) parts.push("Goal changed");
-  if (delta.acceptanceChanged) parts.push("acceptance criteria changed");
+  if (delta.acceptanceChanged) parts.push("Goal identity changed");
+  if (delta.orderChanged) parts.push("task order changed");
   if (delta.added.length) parts.push(`added ${delta.added.join(", ")}`);
   if (delta.changed.length) parts.push(`changed ${delta.changed.join(", ")}`);
   if (delta.removed.length) parts.push(`removed ${delta.removed.join(", ")}`);
@@ -268,6 +271,7 @@ export function createOrRevisePlan(currentState, input) {
       removed: delta.removed.slice(0, 12),
       acceptanceChanged: delta.acceptanceChanged,
       goalChanged: delta.goalChanged,
+      orderChanged: delta.orderChanged,
     }].slice(-MAX_PLAN_HISTORY);
   }
 

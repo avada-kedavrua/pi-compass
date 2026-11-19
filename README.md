@@ -4,12 +4,12 @@ Pi Compass is an agent-only Pi extension for reducing the total cost of completi
 
 ## What 0.10.0 provides
 
-- Agent-owned semantic Goals through explicit `compass_goal`: native Human source references, versioned updates, declared constraints and optional acceptance. No prose classifier, Goal-change candidate registry or duplicate transcript.
+- Semantic Goals drafted with `compass_goal` and approved by the Human: versioned outcomes, constraints and final criteria, with no mandatory source refs or prose classifier.
 - Same-session attention frames with explicit `ref`/`copy` capture, scoped values, copy-on-write, versioned source IDs and protocol-safe return/drop/edit operations.
 - Qualified retention through native compaction boundaries. Pinned data is user-context data, not system authority; original Human messages and executed calls remain read-only.
 - On-demand active/parent/history lexical recovery, source-verified Agent ranking, exact range loads and moves, and verified project-relative artifact spill/reload.
 - Explicit Skill retention and `active|handled|retired` handling with Goal/session lifetimes. Failed or truncated reads cannot be activated as complete Skills.
-- Human-approved DAGs: exact structured questionnaire correlation, material-change invalidation, evidence-bearing assessments, dependency gating, unknown-run fail-closed behavior, and native structured delegation.
+- Optional DAGs with separate Goal and DAG tabs in one questionnaire. Approved serial nodes advance through same-session frames; a semantic `throw` returns to main. Ready read-only children use native delegation.
 - Native watch ownership by arm identity, repeating/lost/terminal lifecycle handling, branch reconciliation, and explicit frame-to-parent transfer.
 - Optional `runtime_guard`: Agent-written pure JS checks with scoped IDs/CAS revisions, session branch recovery, shared global/local definitions, result-preserving warnings and pre-execution blocks at the native tool_call observation point.
 
@@ -33,7 +33,7 @@ The [field-use audit and resolved TODOs](docs/agent-usage-audit-v0.10.0.md) reco
 
 ## Install
 
-From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v10/context v5 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
+From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v11/context v6 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
 
 ### Tool missing?
 
@@ -46,9 +46,9 @@ const result = JSON.parse(await tools.compass_context_search({query:"material co
 text(result);
 ```
 
-Mutations remain direct standalone calls; copy source refs unchanged, without binding/version/revision plumbing. Prefer `remember` for short qualified conclusions; `pin` retains full originals. Do not batch mutations in Code Mode. The old argument forms are not accepted. See the [consumer contract](docs/tool-contract.md#context-find-remember-then-optionally-edit).
+Mutations remain direct standalone calls; copy source refs unchanged, without binding/version/revision plumbing. Prefer `remember` for short qualified conclusions; `pin` retains full originals. Do not batch mutations in Code Mode. The old argument forms are not accepted. See the [consumer contract](docs/tool-contract.md#compass_context--memory-frames-values).
 
-Full preflight also exercises the native loader and runner in a disposable profile, including the TUI approval boundary and guard storage. `/compass-preflight` checks guard state and reports optional DAG dependencies separately: Pi must be in terminal TUI mode with `ask_user_question` enabled for approvals; native child dispatch also needs the pi-subagents bridge and launch preflight. Open Pi directly in a terminal for DAG acceptance, not through an RPC frontend. A delegation `PASS` confirms wiring, not an individual child profile or provider. Neither preflight requests a provider turn.
+Full preflight also exercises the native loader and runner in a disposable profile, including the two-tab approval boundary, automatic serial handoff, throw recovery and guard storage. `/compass-preflight` checks guard state and reports optional DAG dependencies separately: Pi must be in terminal TUI mode with `ask_user_question` enabled for approvals; native child dispatch also needs the pi-subagents bridge and launch preflight. Open Pi directly in a terminal for DAG acceptance, not through an RPC frontend. A delegation `PASS` confirms wiring, not an individual child profile or provider. Neither preflight requests a provider turn.
 
 ## Runtime guards
 

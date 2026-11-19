@@ -1,29 +1,31 @@
-import { addressedConstraints, buildStateSnapshot, buildGoalDetails, acceptanceStatus, dagApprovalStatus } from "./goal-run.mjs";
+import { addressedConstraints, buildStateSnapshot, buildGoalDetails, acceptanceStatus, dagApprovalStatus, HUMAN_INPUT_REVIEW } from "./goal-run.mjs";
 import { readyTasks, taskAssessmentIsCurrent, taskDependencies, unmetTaskPrerequisites } from "./dag-core.mjs";
 import { delegationCandidates } from "./execution-orchestrator.mjs";
 import { nodeInputResolver } from "./node-inputs.mjs";
 import { approvalPrompt } from "./dag-approval.mjs";
-import { agentGoalDetails, humanSourceRef, latestHumanSource } from "./goal-sources.mjs";
+import { humanSourceRef, latestHumanSource } from "./goal-sources.mjs";
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 
 export function planApproval(state) {
-  const { status, approved } = dagApprovalStatus(state);
-  if (state.plan.stopped) return { approval: status, stopped: state.plan.stopped, next: "Patch the stopped DAG or discard it once all active work is settled." };
-  if (approved) return { approval: status };
+  const { status, goalStatus, approved, reason } = dagApprovalStatus(state);
+  const approval = { goalApproval: goalStatus, approval: status, ...(reason ? { approvalReason: reason } : {}) };
+  if (state.plan.stopped) return { ...approval, stopped: state.plan.stopped, next: "Patch the stopped DAG or discard it once all active work is settled." };
+  if (approved) return approval;
   let next;
-  if (state.goal.reviewedInputId !== state.latestHumanEntryId) next = "Review the latest Human input with compass_goal before continuing.";
-  else if (!state.goal.criteria.length) next = "Define Goal acceptance criteria with compass_goal before asking for approval.";
-  else if (status === "awaiting_questionnaire") return { approval: status, prompt: approvalPrompt(state.plan.approvalRequest), next: "No questionnaire has been sent. Call ask_user_question with this prompt unchanged." };
-  else if (status === "modified") next = "Review the Human's answer. Make any requested edits before asking for approval again.";
-  else if (status === "declined") next = "Do not execute the DAG. Review whether to revise it or discard it.";
-  else if (status === "presented") next = "The questionnaire was presented. If it ended without a result, use compass_plan request_approval to reissue it.";
+  const prompt = approvalPrompt(state);
+  if (reason === "human_input_unreviewed") next = HUMAN_INPUT_REVIEW;
+  else if (reason === "goal_criteria_missing") next = "Define final Goal criteria with compass_goal before running the DAG.";
+  else if (prompt) return { ...approval, prompt, next: "No questionnaire has been sent. Call ask_user_question with this prompt unchanged." };
+  else if ([status, goalStatus].includes("modified")) next = "Review the Human's answer. Make any requested edits before asking for approval again.";
+  else if ([status, goalStatus].includes("declined")) next = "Do not execute the DAG. Review whether to revise it or discard it.";
+  else if ([status, goalStatus].includes("presented")) next = "The questionnaire was presented. If it ended without a result, use compass_plan request_approval to reissue it.";
   else next = "If approval is still needed, call compass_plan request_approval, then present its prompt.";
-  return { approval: status, next };
+  return { ...approval, next };
 }
 
 export function planProgress(state, branch, context, preview) {
   const approval = planApproval(state);
-  if (approval.approval !== "approved") return approval;
+  if (approval.approval !== "approved" || approval.goalApproval !== "approved" || approval.approvalReason) return approval;
   if (state.plan.stopped) return approval;
   const plan = state.plan;
   const graphReady = readyTasks(plan);
@@ -55,7 +57,7 @@ export function planProgress(state, branch, context, preview) {
 }
 
 function planView(state, branch, context, preview) {
-  if (!state.plan.tasks.length) return { plan: null };
+  if (!state.plan.tasks.length) return { plan: null, ...(state.goal.current ? planApproval(state) : {}) };
   return {
     ...planProgress(state, branch, context, preview),
     tasks: state.plan.tasks.map((task) => {
@@ -98,21 +100,24 @@ export function agentState(state, branch, context, { view = "summary", cursor, l
     if (result.goal) { const { version: _version, ...goal } = result.goal; result.goal = goal; }
     if (result.plan) { const { revision: _revision, ...plan } = result.plan; result.plan = plan; }
     if (result.input) result.input = input;
+    if (result.frame === "root") result.frame = "main";
     const frame = context.frames.at(-1);
     if (frame && !result.unchanged) result.returnMode = frame.node ? "node-outcome" : "ordinary";
     return result;
   }
   if (view === "goal") {
-    const details = agentGoalDetails(branch, buildGoalDetails(state));
+    const details = buildGoalDetails(state);
     const replies = state.humanDecisions.filter((item) => item.goalVersion === state.goal.version).map((item) => {
       const raw = branch.findLast((entry) => entry.message?.role === "toolResult" && entry.message.toolCallId === item.sourceCallId);
-      return { id: item.id, ...(raw?.message.details ? { questionnaire: normalizeQuestionnaireRecord(raw.message.details, { preserveFullText: true }) } : item.questionnaire ? { questionnaire: item.questionnaire } : { text: item.text }) };
+      const questionnaire = raw?.message.details ? normalizeQuestionnaireRecord(raw.message.details, { preserveFullText: true }) : item.questionnaire;
+      return { id: item.id, ...(questionnaire ? { questionnaire } : { text: item.text }) };
     });
     if (details.goal) {
       delete details.goal.version;
+      if (details.goal.current === details.goal.original) delete details.goal.original;
       details.goal.constraints = addressedConstraints(details.goal.constraints);
     }
-    return { goal: details.goal, ...(details.criteria?.length ? { criteria: details.criteria.map(({ id, text }) => ({ id, text })) } : {}), ...(input ? { input } : {}),
+    return { goal: details.goal, ...(details.goal ? planApproval(state) : {}), ...(details.criteria?.length ? { criteria: details.criteria.map(({ id, text }) => ({ id, text })) } : {}), ...(input ? { input } : {}),
       ...(replies.length ? { humanAnswers: replies } : {}),
       ...(state.decisions.length ? { decisions: state.decisions.filter((item) => item.goalVersion === state.goal.version).map(({ id, summary, rationale, evidence, supersededBy }) => ({ id, summary, ...(rationale ? { rationale } : {}), ...(evidence ? { evidence } : {}), ...(supersededBy ? { supersededBy } : {}) })) } : {}),
       ...(state.checkpoints.length ? { checkpoints: state.checkpoints.filter((item) => item.goalVersion === state.goal.version).map(({ id, summary, ref }) => ({ id, summary, ref })) } : {}),

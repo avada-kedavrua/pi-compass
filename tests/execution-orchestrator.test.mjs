@@ -17,11 +17,9 @@ import {
   delegationCandidates,
 } from "../src/execution-orchestrator.mjs";
 import { emptyDagState, createOrRevisePlan, taskAssessmentBinding, updateTasks } from "../src/dag-core.mjs";
-import { bindDagApprovalQuestionnaire, captureHumanDecision } from "../src/goal-run.mjs";
-import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
 import { launchPreflightInput } from "../src/delegation-preflight.mjs";
 import { normalizeGoalRunState, recordExecutionDrift, recordExecutionEvent, transitionTasks, revisePlanState } from "../src/goal-run.mjs";
-import { createGoalState } from "./helpers/goal-state.mjs";
+import { approveDefinitions, createGoalState } from "./helpers/goal-state.mjs";
 
 const task = (id, overrides = {}) => ({
   id,
@@ -328,19 +326,7 @@ test("GoalRun normalization preserves unknown usage/cost fields as null", () => 
   assert.equal(normalized.plan.executionHistory[0].estimatedParallelSavingsMs, null);
 });
 
-function approvePlan(state) {
-  const request = state.plan.approvalRequest;
-  const callId = `approval-${request.id}`;
-  const sourceEntryId = `entry-${request.id}`;
-  const bound = bindDagApprovalQuestionnaire(state, { questions: [structuredClone(request.questionnaire)] }, sourceEntryId, callId);
-  assert.equal(bound.bound, true);
-  return captureHumanDecision(bound.state, {
-    source: "ask_user_question",
-    sourceEntryId,
-    sourceCallId: callId,
-    details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION], preview: request.questionnaire.options[0].preview }] },
-  }).state;
-}
+const approvePlan = approveDefinitions;
 
 test("runtime drift records a compact warning once and the next Goal anchor explains recovery", () => {
   let state = createGoalState("Goal: implement two related changes");

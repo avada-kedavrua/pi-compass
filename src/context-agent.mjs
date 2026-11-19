@@ -38,7 +38,7 @@ export function agentSearch(branch, boundary, state, params = {}) {
     }
     return item;
   });
-  return { frame: result.frame, hits, ...(result.truncated ? { incomplete: true } : {}) };
+  return { frame: result.frame === "root" ? "main" : result.frame, hits, ...(result.truncated ? { incomplete: true } : {}) };
 }
 
 export function retainedContext(branch, boundary, state, goalVersion, limit) {

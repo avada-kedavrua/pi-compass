@@ -1,157 +1,92 @@
 import { createHash, randomUUID } from "node:crypto";
 
-export const DAG_APPROVAL_QUESTION = "Approve this exact Goal DAG for execution?";
-export const DAG_APPROVAL_HEADER = "DAG approval";
+export const DAG_APPROVAL_QUESTION = "Approve this exact DAG for execution?";
 export const DAG_APPROVAL_OPTION = "Approve this exact DAG";
-export const DAG_REVISION_OPTION = "Revise the DAG";
-const DAG_APPROVAL_DESCRIPTION = "Authorize execution exactly as shown in the preview.";
-const DAG_REVISION_DESCRIPTION = "Withhold approval and revise the Goal DAG.";
+export const APPROVAL_TARGETS = ["goal", "plan"];
 
-function taskDefinition(task) {
-  return {
-    id: task.id,
-    title: task.title,
-    dependsOn: [...(task.dependsOn ?? [])].sort(),
-    fromTasks: task.fromTasks ?? [], inputRefs: task.inputRefs ?? [],
-    acceptance: task.acceptance,
-    output: task.output ?? "",
-    writeScope: task.writeScope ?? "",
-    executor: task.executor ?? "parent",
-    frameScope: task.frameScope ?? null,
-    agent: task.agent ?? "",
-    dispatchReason: task.dispatchReason ?? "",
-  };
+function taskDefinition({ id, title, dependsOn, fromTasks, inputRefs, acceptance, output, executor, writeScope, agent, dispatchReason, frameScope }) {
+  return { id, title, dependsOn: [...dependsOn].sort(), fromTasks, inputRefs, acceptance, output, executor, writeScope, agent: executor === "subagent" ? agent : undefined, dispatchReason, frameScope };
 }
 
-export function dagApprovalBinding(state) {
-  const version = state?.goal?.version ?? 1;
-  const definition = {
-    goalVersion: version,
-    goal: state?.goal?.current ?? null,
-    planGoal: state?.plan?.goal ?? null,
-    definitionKey: state?.plan?.definitionKey ?? null,
-    criteria: (state?.goal?.criteria ?? [])
-      .filter((item) => item.goalVersion === version)
-      .map((item) => ({ id: item.id, text: item.text })),
-    tasks: (state?.plan?.tasks ?? []).map(taskDefinition),
-    constraints: [...(state?.goal?.constraints ?? [])],
-    decisions: {
-      human: (state?.humanDecisions ?? [])
-        .filter((item) => item.goalVersion === version
-          && !(item.sourceEntryId === state?.plan?.approvalRequest?.sourceEntryId
-            && item.sourceCallId === state?.plan?.approvalRequest?.toolCallId))
-        .map((item) => ({ id: item.id, sourceEntryId: item.sourceEntryId ?? "", sourceCallId: item.sourceCallId ?? "", text: item.text, questionnaire: item.questionnaire ?? null })),
-      goal: (state?.decisions ?? [])
-        .filter((item) => item.goalVersion === version)
-        .map((item) => ({ id: item.id, summary: item.summary, rationale: item.rationale, evidence: item.evidence, affectedTaskIds: item.affectedTaskIds ?? [], supersededBy: item.supersededBy ?? null })),
-    },
-  };
-  return createHash("sha256").update(JSON.stringify(definition)).digest("hex");
+function definition(state, target) {
+  const { version, current, constraints, criteria } = state.goal;
+  if (target === "goal") return { version, current, constraints, criteria: criteria.map(({ id, text }) => ({ id, text })) };
+  return { version, current, revision: state.plan.revision, tasks: state.plan.tasks.map(taskDefinition) };
 }
 
-export function createDagApprovalRequest(state) {
-  if (!state?.goal?.current || !state?.plan?.tasks?.length) throw new Error("A current Goal DAG is required before requesting approval.");
+export function approvalBinding(state, target) {
+  return createHash("sha256").update(JSON.stringify(definition(state, target))).digest("hex");
+}
+
+export function createApprovalRequest(state, target) {
   const id = randomUUID();
-  const binding = dagApprovalBinding(state);
-  const tasks = state.plan.tasks.map((task) => `${task.id}: ${task.title}; depends on ${task.dependsOn.join(", ") || "none"}; executor=${task.executor ?? "parent"}; agent=${task.agent ?? ""}; dispatchReason=${task.dispatchReason ?? ""}; output=${task.output ?? ""}; writeScope=${task.writeScope ?? ""}; acceptance=${task.acceptance}${task.fromTasks?.length ? `; artifact inputs from ${task.fromTasks.join(", ")}` : ""}${task.inputRefs?.length ? `; input refs=${task.inputRefs.join(", ")}` : ""}`).join("\n");
-  const decisions = [
-    ...(state.humanDecisions ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => item.summary || item.text),
-    ...(state.decisions ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => `${item.id}: ${item.summary}${item.supersededBy ? ` (superseded by ${item.supersededBy})` : ""}`),
-  ].filter(Boolean);
-  const question = DAG_APPROVAL_QUESTION;
-  // The native questionnaire normalizes line endings before display and echo.
-  const preview = [
-    `Approval request ${id}. This authorizes execution only; it does not establish task success or final Goal acceptance.`,
-    `Current Goal v${state.goal.version ?? 1}: ${state.goal.current}`,
-    `Goal acceptance criteria:\n${(state.goal.criteria ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1)).map((item) => `- ${item.id}: ${item.text}`).join("\n") || "- none recorded"}`,
-    `Tasks (DAG revision ${state.plan.revision}):\n${tasks}`,
-    `Human constraints:\n${(state.goal.constraints ?? []).map((item) => `- ${item}`).join("\n") || "- none recorded"}`,
-    `Relevant Human decisions:\n${decisions.map((item) => `- ${item}`).join("\n") || "- none recorded"}`,
-  ].join("\n\n").replace(/\r\n/g, "\n").replace(/\r/g, "");
-  const questionnaire = {
-    question,
-    header: DAG_APPROVAL_HEADER,
-    multiSelect: false,
-    options: [
-      { label: DAG_APPROVAL_OPTION, description: DAG_APPROVAL_DESCRIPTION, preview },
-      { label: DAG_REVISION_OPTION, description: DAG_REVISION_DESCRIPTION },
-    ],
-  };
-  return {
-    id,
-    binding,
-    goalVersion: state.goal.version ?? 1,
-    planRevision: state.plan.revision,
-    question,
-    questionnaire,
-    createdAt: new Date().toISOString(),
-    toolCallId: "",
-    status: "awaiting_questionnaire",
-  };
+  const data = definition(state, target);
+  const isGoal = target === "goal";
+  const question = isGoal ? "Approve this exact Goal?" : DAG_APPROVAL_QUESTION;
+  const preview = (isGoal ? [
+    `Goal proposal ${id}`,
+    data.current,
+    `Constraints:\n${data.constraints.map((text) => `- ${text}`).join("\n") || "- none"}`,
+    `Final criteria:\n${data.criteria.map(({ id: criterion, text }) => `- ${criterion}: ${text}`).join("\n") || "- none"}`,
+  ] : [
+    `DAG proposal ${id} for Goal v${data.version}: ${data.current}`,
+    `Revision ${data.revision}. Ready parent nodes run serially in the listed order. This authorizes work, not its results.`,
+    ...data.tasks.map((task) => `${task.id}: ${Object.entries(task).filter(([key, value]) => key !== "id" && value != null && value !== "" && (!Array.isArray(value) || value.length)).map(([key, value]) => `${key}=${Array.isArray(value) ? value.join(", ") : value}`).join("; ")}`),
+  ]).join("\n\n").replace(/\r\n/g, "\n").replace(/\r/g, "");
+  const questionnaire = { question, header: isGoal ? "Goal" : "DAG", multiSelect: false, options: [
+    { label: isGoal ? "Approve this exact Goal" : DAG_APPROVAL_OPTION, description: "Approve exactly what is shown in the preview.", preview },
+    { label: isGoal ? "Revise the Goal" : "Revise the DAG", description: "Withhold approval and request changes." },
+  ] };
+  return { id, target, binding: approvalBinding(state, target), question, questionnaire, status: "awaiting_questionnaire" };
 }
 
-/** Native question arguments stay tiny; the supported tool_call boundary expands this ref. */
-export function approvalPrompt(request) {
-  if (!request || request.status !== "awaiting_questionnaire") return null;
-  return { questions: [{ question: "Review this Compass proposal?", header: "Compass", multiSelect: false, options: [
-    { label: "Review proposal", description: "Open the exact proposal for your decision.", preview: `P.${request.id}` },
-    { label: "Revise proposal", description: "Withhold approval and request changes." },
-  ] }] };
+export function definitionApproved(state, target) {
+  const { approvalRequest: request, approval } = state[target];
+  return Boolean(request && approval && request.status === "answered" && request.id === approval.requestId
+    && request.sourceEntryId && request.toolCallId && approval.sourceEntryId === request.sourceEntryId && approval.sourceCallId === request.toolCallId
+    && approval.binding === request.binding && request.binding === approvalBinding(state, target));
 }
 
 export function approvalIsCurrent(state) {
-  const request = state?.plan?.approvalRequest;
-  const approval = state?.plan?.approval;
-  return Boolean(request && approval
-    && request.status === "answered"
-    && request.id === approval.requestId
-    && request.sourceEntryId
-    && request.toolCallId
-    && approval.sourceEntryId === request.sourceEntryId
-    && approval.sourceCallId === request.toolCallId
-    && state.goal?.reviewedInputId === state.latestHumanEntryId
-    && request.binding === dagApprovalBinding(state)
-    && approval.binding === request.binding
-    && approval.goalVersion === (state.goal?.version ?? 1));
+  return state.goal.criteria.length > 0 && state.goal.reviewedInputId === state.latestHumanEntryId && definitionApproved(state, "goal") && definitionApproved(state, "plan");
 }
 
-export function matchesDagApprovalQuestion(request, input) {
-  const questions = Array.isArray(input?.questions) ? input.questions : [];
-  if (questions.length !== 1 || !request?.questionnaire) return false;
-  const question = questions[0];
+export function pendingApprovalRequests(state) {
+  if (state.goal.reviewedInputId !== state.latestHumanEntryId) return [];
+  return APPROVAL_TARGETS.map((target) => state[target].approvalRequest).filter((request) => request?.status === "awaiting_questionnaire"
+    && request.binding === approvalBinding(state, request.target));
+}
+
+export function approvalPrompt(state) {
+  const requests = pendingApprovalRequests(state);
+  if (!requests.length) return null;
+  return { questions: requests.map((request) => ({ question: `Review the ${request.questionnaire.header} proposal?`, header: request.questionnaire.header, multiSelect: false, options: [
+    { label: "Review proposal", description: "Open the exact proposal for your decision.", preview: `P.${request.id}` },
+    { label: "Request changes", description: "Do not approve this proposal." },
+  ] })) };
+}
+
+export function matchesApprovalQuestion(request, question) {
   const expected = request.questionnaire;
-  if (!question || typeof question !== "object" || Array.isArray(question)) return false;
   const exactKeys = (value, keys) => Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
-  if (!exactKeys(question, ["question", "header", "multiSelect", "options"])
-    || question.question !== expected.question
-    || question.header !== expected.header
-    || question.multiSelect !== expected.multiSelect
-    || !Array.isArray(question.options)
-    || question.options.length !== expected.options.length) return false;
+  if (!question || typeof question !== "object" || Array.isArray(question) || !exactKeys(question, ["question", "header", "multiSelect", "options"])
+    || question.question !== expected.question || question.header !== expected.header || question.multiSelect !== expected.multiSelect
+    || !Array.isArray(question.options) || question.options.length !== expected.options.length) return false;
   return question.options.every((option, index) => {
-    const expectedOption = expected.options[index];
-    const expectedKeys = expectedOption.preview === undefined ? ["label", "description"] : ["label", "description", "preview"];
-    return option && typeof option === "object" && !Array.isArray(option)
-      && exactKeys(option, expectedKeys)
-      && option.label === expectedOption.label
-      && option.description === expectedOption.description
-      && option.preview === expectedOption.preview;
+    const canonical = expected.options[index];
+    return option && typeof option === "object" && !Array.isArray(option) && exactKeys(option, Object.keys(canonical))
+      && option.label === canonical.label && option.description === canonical.description && option.preview === canonical.preview;
   });
 }
 
-export function clearDagApprovalAnswer(request, questionnaire, details) {
-  if (!request?.id || !request.sourceEntryId || !questionnaire || questionnaire.outcome !== "answered") return false;
-  if (questionnaire.answers?.length !== 1 || questionnaire.unanswered?.length) return false;
-  const answer = questionnaire.answers[0];
-  const expectedQuestion = request.question.trim();
-  const questionMatches = answer.question === expectedQuestion.slice(0, 400).trimEnd()
-    || answer.question === (expectedQuestion.length > 400 ? `${expectedQuestion.slice(0, 399).trimEnd()}…` : expectedQuestion);
-  return details?.answers?.[0]?.preview === request.questionnaire.options[0].preview
-    && answer.questionIndex === 0
-    && questionMatches
-    && answer.kind === "option"
-    && answer.answer === DAG_APPROVAL_OPTION
-    && !answer.notes?.trim()
-    && !questionnaire.globalNote?.trim()
-    && (!answer.selected || (answer.selected.length === 1 && answer.selected[0] === DAG_APPROVAL_OPTION));
+export function clearApprovalAnswer(request, questionnaire, details) {
+  if (!request.sourceEntryId || !questionnaire || !["answered", "partial"].includes(questionnaire.outcome) || questionnaire.globalNote?.trim()) return false;
+  const index = request.questionIndex;
+  if (questionnaire.unanswered?.includes(index)) return false;
+  const answers = questionnaire.answers.filter((answer) => answer.questionIndex === index);
+  const raw = Array.isArray(details?.answers) ? details.answers.filter((answer) => answer.questionIndex === index) : [];
+  const option = request.questionnaire.options[0];
+  return answers.length === 1 && raw.length === 1 && raw[0].preview === option.preview && answers[0].question === request.question
+    && answers[0].kind === "option" && answers[0].answer === option.label && !answers[0].notes?.trim()
+    && (!answers[0].selected || (answers[0].selected.length === 1 && answers[0].selected[0] === option.label));
 }

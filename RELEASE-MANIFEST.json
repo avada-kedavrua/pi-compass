@@ -1,8 +1,8 @@
 {
   "name": "pi-compass-v2",
   "version": "0.10.0",
-  "goalRunSchemaVersion": 10,
-  "contextSchemaVersion": 5,
+  "goalRunSchemaVersion": 11,
+  "contextSchemaVersion": 6,
   "runtimeGuardSchemaVersion": 1,
   "minimumPiVersion": "1.5.2",
   "testedPiRuntime": "Pi 1.5.2 installed projection/runner/import checks; not live provider acceptance",
@@ -12,7 +12,7 @@
   "liveEvidence": "Disposable Agent smoke and recovery on Pi 1.5.2 passed for static file evidence and context operations. Interactive Human approval and live Child/provider acceptance remain open.",
   "releaseCaveats": [
     "Stock-Pi post-compaction continuity uses qualified request overlays until an existing native boundary",
-    "Context schema v5 and the refs-based public contract are current-only; old v4 context snapshots require a fresh session or pre-context branch, with no migration/reset",
+    "GoalRun v11 and context v6 are current-only; older snapshots require a fresh session or supported branch, with no migration or reset",
     "Recursive child Compass is unsupported/fail-closed under the inspected launch contract",
     "Subset relocation without shared native file revision remains unknown; semantic selection is Agent-owned, not a runtime semantic score",
     "Race-safe artifact spill/reload requires Linux /proc/self/fd; filesystem effects are not rolled back",

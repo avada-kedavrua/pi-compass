@@ -22,12 +22,13 @@ import {
   reconcileUnknownExecutionTasks,
   revisePlanState,
   discardPlan,
-  bindDagApprovalQuestionnaire,
-  renewDagApprovalRequest,
+  bindApprovalQuestionnaire,
+  renewApprovalRequests,
   dagApprovalStatus,
   recordTaskAssessment,
 } from "../src/goal-run.mjs";
-import { DAG_APPROVAL_OPTION } from "../src/dag-approval.mjs";
+import { approveDefinitions, exactAnswers } from "./helpers/goal-state.mjs";
+import { DAG_APPROVAL_OPTION, pendingApprovalRequests } from "../src/dag-approval.mjs";
 import { emptyDagState, readyTasks, updateTasks, taskAssessmentIsCurrent } from "../src/dag-core.mjs";
 
 const criteria = ["API request returns expected data", "Started processes are cleaned up"];
@@ -41,29 +42,15 @@ let testHumanSequence = 0;
 function withGoal(prompt = "Create a reliable full-stack smoke test", goalCriteria = []) {
   const sourceEntryId = `fixture-goal-${++testHumanSequence}`;
   const state = observeHumanInput(emptyGoalRunState(), sourceEntryId).state;
-  return setGoal(state, { expectedVersion: 0, current: prompt, sourceIds: [sourceEntryId], constraints: [], criteria: goalCriteria }).state;
+  return setGoal(state, { expectedVersion: 0, current: prompt, constraints: [], criteria: goalCriteria }).state;
 }
 function withCriteria(state, criteria) {
-  const result = setGoal(state, { expectedVersion: state.goal.version, current: state.goal.current, constraints: state.goal.constraints, sourceIds: state.goal.sourceIds, criteria });
+  const result = setGoal(state, { expectedVersion: state.goal.version, current: state.goal.current, constraints: state.goal.constraints, criteria });
   return { ...result, criteria: result.state.goal.criteria };
 }
 function approvalInput(request) { return { questions: [structuredClone(request.questionnaire)] }; }
-function approvePlan(state) {
-  const request = state.plan.approvalRequest;
-  const callId = `approval-${request.id}`;
-  const sourceEntryId = `entry-${request.id}`;
-  const before = structuredClone(state);
-  const bound = bindDagApprovalQuestionnaire(state, approvalInput(request), sourceEntryId, callId);
-  assert.equal(bound.bound, true);
-  assert.deepEqual(state, before, "binding must not mutate prior or native persisted records");
-  return captureHumanDecision(bound.state, {
-    source: "ask_user_question",
-    sourceEntryId,
-    sourceCallId: callId,
-    details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION], preview: request.questionnaire.options[0].preview }] },
-  }).state;
-}
-function plannedGoal(prompt) { return withGoal(prompt, criteria); }
+const approvePlan = approveDefinitions;
+function plannedGoal(prompt) { return approveDefinitions(withGoal(prompt, criteria)); }
 function withPlan(state) {
   if (!state.goal.criteria.length) state = withCriteria(state, criteria).state;
   return approvePlan(revisePlanState(state, { tasks }).state);
@@ -72,18 +59,39 @@ function completeAndAssess(state, taskId, evidence) {
   state = transitionTasks(state, "done", [{ id: taskId, evidence }], updateTasks).state;
   return recordTaskAssessment(state, { taskId, status: "pass", evidence: `Assessment against approved criterion: ${evidence}`, caveats: [], unresolvedCaveats: [] }).state;
 }
+test("a partial two-tab answer preserves the clean DAG stamp but cannot start until Goal approval", () => {
+  const draft = revisePlanState(withGoal("Review smoke", criteria), { tasks }).state;
+  const questions = pendingApprovalRequests(draft).map(({ questionnaire }) => questionnaire);
+  assert.deepEqual(questions.map(({ header }) => header), ["Goal", "DAG"]);
+  const { state: bound, bound: ok } = bindApprovalQuestionnaire(draft, { questions }, "assistant-both", "call-both");
+  assert.equal(ok, true);
+  const answers = exactAnswers(questions);
+  const answer = (details) => captureHumanDecision(bound, { sourceEntryId: "assistant-both", sourceCallId: "call-both", details }).state;
+  const held = answer({ answers, globalNote: "Please change limits first" });
+  assert.equal(held.goal.approval, null);
+  assert.equal(held.plan.approval, null);
+  const partial = answer({ answers: [answers[1]], unanswered: [0] });
+  assert.equal(partial.goal.approval, null);
+  assert.ok(partial.plan.approval);
+  assert.deepEqual(pendingApprovalRequests(partial).map(({ target }) => target), ["goal"]);
+  assert.throws(() => transitionTasks(partial, "start", [{ id: "api" }], updateTasks), /Goal: awaiting_questionnaire, DAG: approved/);
+  const approved = approveDefinitions(partial);
+  assert.equal(approved.plan.approval.requestId, partial.plan.approval.requestId);
+  assert.equal(dagApprovalStatus(approved).approved, true);
+});
+
 test("approval correlation and questionnaire deduplication use both persisted identities", () => {
   let state = revisePlanState(plannedGoal(), { tasks }).state;
   const request = state.plan.approvalRequest;
   const entryId = "same-assistant-entry";
   const callId = "approval-call";
-  state = bindDagApprovalQuestionnaire(state, approvalInput(request), entryId, callId).state;
+  state = bindApprovalQuestionnaire(state, approvalInput(request), entryId, callId).state;
   const details = { answers: [{ questionIndex: 0, question: request.question, kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION] }] };
   const wrong = captureHumanDecision(state, { source: "ask_user_question", sourceEntryId: entryId, sourceCallId: "other-call", details });
   assert.equal(dagApprovalStatus(wrong.state).approved, false);
   const right = captureHumanDecision(wrong.state, { source: "ask_user_question", sourceEntryId: entryId, sourceCallId: callId, details });
-  assert.equal(dagApprovalStatus(right.state).approved, false, "a separate Human decision changes the exact approval binding");
-  const renewed = approvePlan(renewDagApprovalRequest(right.state).state);
+  assert.equal(dagApprovalStatus(right.state).approved, false, "the correlated answer still needs the exact preview echo");
+  const renewed = approvePlan(renewApprovalRequests(right.state).state);
   assert.equal(dagApprovalStatus(renewed).approved, true);
   assert.equal(captureHumanDecision(renewed, { source: "ask_user_question", sourceEntryId: renewed.plan.approvalRequest.sourceEntryId, sourceCallId: renewed.plan.approvalRequest.toolCallId, details }).captured, false);
   const failed = recordHumanQuestionnaireFailure(right.state, { sourceEntryId: entryId, sourceCallId: "failure-one", errorCode: "no_ui" });
@@ -96,7 +104,7 @@ test("questionnaire failures correlate and deduplicate by persisted entry and ca
   const request = state.plan.approvalRequest;
   const entryId = "same-entry";
   const callId = "bound-call";
-  const bound = bindDagApprovalQuestionnaire(state, approvalInput(request), entryId, callId).state;
+  const bound = bindApprovalQuestionnaire(state, approvalInput(request), entryId, callId).state;
   const unrelated = recordHumanQuestionnaireFailure(bound, { sourceEntryId: entryId, sourceCallId: "other-call", errorCode: "no_ui" });
   assert.equal(unrelated.state.plan.approvalRequest.status, "presented");
   const failure = recordHumanQuestionnaireFailure(unrelated.state, { sourceEntryId: entryId, sourceCallId: callId, errorCode: "no_ui" });
@@ -114,7 +122,7 @@ test("confirmed terminal execution facts reconcile despite stale approval withou
   const reconciled = reconcileUnknownExecutionTasks(state, "native-batch", [{ id: "api", status: "done", evidence: "native terminal result" }], updateTasks).state;
   assert.equal(reconciled.plan.tasks.find((task) => task.id === "api").status, "done");
   assert.equal(reconciled.plan.tasks.find((task) => task.id === "ui").status, "pending");
-  assert.throws(() => transitionTasks(reconciled, "start", [{ id: "ui" }], updateTasks), /current correlated Human approval/);
+  assert.throws(() => transitionTasks(reconciled, "start", [{ id: "ui" }], updateTasks), /Review the latest Human input.*compass_goal/);
 });
 
 test("ask-user-question choices are kept as authoritative decisions and retained as authoritative decisions", () => {
@@ -325,12 +333,12 @@ test("ready pending tasks can be completed directly, but dependency gates still 
 test("DAG progression requires a correlated exact approval; partial and custom answers do not approve", () => {
   let state = revisePlanState(plannedGoal(), { tasks }).state;
   const request = state.plan.approvalRequest;
-  assert.equal(request.question, "Approve this exact Goal DAG for execution?");
+  assert.equal(request.question, "Approve this exact DAG for execution?");
   const approvalPreview = request.questionnaire.options[0].preview;
   assert.match(approvalPreview, /executor=parent/);
-  assert.match(approvalPreview, /output=/);
+  assert.match(approvalPreview, /acceptance=/);
   assert.match(approvalPreview, /writeScope=src\/smoke/);
-  assert.match(approvalPreview, /API request returns expected data/);
+  assert.doesNotMatch(approvalPreview, /API request returns expected data/, "final criteria are approved separately");
   assert.equal(dagApprovalStatus(state).approved, false);
   assert.throws(() => transitionTasks(state, "start", [{ id: "api" }], updateTasks), /no current correlated Human approval/);
   assert.equal(state.plan.tasks[0].status, "pending", "rejected progression does not mutate state");
@@ -338,7 +346,7 @@ test("DAG progression requires a correlated exact approval; partial and custom a
   const callId = "questionnaire-call-1";
   const alteredQuestionnaire = approvalInput(request);
   alteredQuestionnaire.questions[0].options[0].description += " altered";
-  assert.equal(bindDagApprovalQuestionnaire(state, alteredQuestionnaire, "entry-questionnaire-call-1", callId).bound, false);
+  assert.equal(bindApprovalQuestionnaire(state, alteredQuestionnaire, "entry-questionnaire-call-1", callId).bound, false);
   for (const alter of [
     (input) => { input.questions[0].options[0].preview += " altered"; },
     (input) => { input.questions[0].multiSelect = true; },
@@ -346,27 +354,27 @@ test("DAG progression requires a correlated exact approval; partial and custom a
   ]) {
     const altered = approvalInput(request);
     alter(altered);
-    assert.equal(bindDagApprovalQuestionnaire(state, altered, "entry-questionnaire-call-1", callId).bound, false);
+    assert.equal(bindApprovalQuestionnaire(state, altered, "entry-questionnaire-call-1", callId).bound, false);
   }
-  const bound = bindDagApprovalQuestionnaire(state, approvalInput(request), "entry-questionnaire-call-1", callId);
+  const bound = bindApprovalQuestionnaire(state, approvalInput(request), "entry-questionnaire-call-1", callId);
   assert.equal(bound.bound, true);
   const unrelated = captureHumanDecision(bound.state, { sourceCallId: "wrong-call", details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION }] } }).state;
   assert.equal(dagApprovalStatus(unrelated).approved, false, "unrelated questionnaire cannot authorize the DAG");
 
-  const partialBound = bindDagApprovalQuestionnaire(state, approvalInput(request), "entry-questionnaire-call-1", callId);
+  const partialBound = bindApprovalQuestionnaire(state, approvalInput(request), "entry-questionnaire-call-1", callId);
   const partial = captureHumanDecision(partialBound.state, { sourceEntryId: "entry-questionnaire-call-1", sourceCallId: callId, details: { unanswered: [0], answers: [] } }).state;
   assert.equal(dagApprovalStatus(partial).approved, false, "partial response does not approve");
 
-  const qualifiedBound = bindDagApprovalQuestionnaire(state, approvalInput(request), "entry-qualified", "reused-provider-id");
+  const qualifiedBound = bindApprovalQuestionnaire(state, approvalInput(request), "entry-qualified", "reused-provider-id");
   const qualified = captureHumanDecision(qualifiedBound.state, { sourceEntryId: "entry-qualified", sourceCallId: "reused-provider-id", details: { answers: [{ questionIndex: 0, question: request.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, notes: "Only after removing task smoke." }], globalNote: "Do not execute until the API is reviewed." } }).state;
   assert.equal(dagApprovalStatus(qualified).approved, false, "conditional notes withhold authorization");
 
-  const renewed = renewDagApprovalRequest(partial).state;
+  const renewed = renewApprovalRequests(partial).state;
   const renewedRequest = renewed.plan.approvalRequest;
-  const fresh = bindDagApprovalQuestionnaire(renewed, approvalInput(renewedRequest), "entry-fresh", "reused-provider-id");
+  const fresh = bindApprovalQuestionnaire(renewed, approvalInput(renewedRequest), "entry-fresh", "reused-provider-id");
   const freshDecision = captureHumanDecision(fresh.state, { sourceEntryId: "entry-fresh", sourceCallId: "reused-provider-id", details: { answers: [{ questionIndex: 0, question: renewedRequest.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION, selected: [DAG_APPROVAL_OPTION], preview: renewedRequest.questionnaire.options[0].preview }] } });
   assert.equal(dagApprovalStatus(freshDecision.state).approved, true, "renewed exact approval remains current despite reused provider call ID");
-  assert.equal(freshDecision.state.humanDecisions.length, 2, "distinct persisted exchanges sharing a provider ID are both retained");
+  assert.equal(freshDecision.state.humanDecisions.length, 3, "both approval exchanges and the earlier Goal stamp are retained");
   const duplicate = captureHumanDecision(freshDecision.state, { sourceEntryId: "entry-fresh", sourceCallId: "different-provider-id", details: { answers: [{ questionIndex: 0, question: renewedRequest.question.slice(0, 400), kind: "option", answer: DAG_APPROVAL_OPTION }] } });
   assert.notEqual(duplicate.kind, "duplicate", "a second tool call in the same persisted entry remains a separate decision");
 
@@ -417,7 +425,9 @@ test("ordinary task status updates preserve approval while material Human constr
   assert.equal(dagApprovalStatus(state).approved, true);
   state = observeHumanInput(state, "read-only-human-entry").state;
   assert.equal(dagApprovalStatus(state).approved, false);
-  assert.throws(() => transitionTasks(state, "done", [{ id: "api", evidence: "API reviewed." }], updateTasks), /no current correlated Human approval/);
+  const settled = transitionTasks(state, "done", [{ id: "api", evidence: "API reviewed." }], updateTasks).state;
+  assert.equal(settled.plan.tasks.find(({ id }) => id === "api").status, "done");
+  assert.throws(() => transitionTasks(settled, "done", [{ id: "ui", evidence: "UI reviewed." }], updateTasks), /Review the latest Human input.*compass_goal/);
 });
 
 test("acceptance evidence accepts realistic bounded evidence and survives state normalization", () => {
@@ -522,7 +532,7 @@ test("composite state cursor detects revision changes even when event sequence d
 
 test("compact state reports a history gap and recovers with a bounded current snapshot", () => {
   let state = withGoal("Goal: preserve event history bounds");
-  const oldCursor = "R0-E0-C0";
+  const oldCursor = stateCursor(emptyGoalRunState());
   for (let i = 0; i < 100; i++) state = recordDecision(state, { summary: `Decision ${i}`, rationale: "test", evidence: `e${i}` }).state;
   const snapshot = buildStateSnapshot(state, oldCursor);
   assert.equal(snapshot.delta.historyGap, true);
@@ -535,7 +545,7 @@ test("state snapshot never leaks previous-Goal events into the active delta", ()
   state = recordDecision(state, { summary: "Use local parser", rationale: "initial scope" }).state;
   const beforeChange = buildStateSnapshot(state).cursor;
   state = observeHumanInput(state, "replacement-human").state;
-  state = setGoal(state, { expectedVersion: 1, current: "Goal: online visual editing instead", sourceIds: ["replacement-human"], constraints: [] }).state;
+  state = setGoal(state, { expectedVersion: 1, current: "Goal: online visual editing instead", constraints: [] }).state;
   const afterChange = buildStateSnapshot(state, beforeChange);
   assert.equal(afterChange.goal.version, 2);
   assert.ok(afterChange.delta.events.some((event) => event.kind === "goal_replaced"));
@@ -564,7 +574,7 @@ test("recovered trace entries become cursor-addressable events without duplicate
 test("state cursor ahead is explicit and still returns a bounded recovery snapshot", () => {
   let state = withGoal("Goal: cursor validation");
   state = recordDecision(state, { summary: "A material choice", rationale: "test" }).state;
-  const snapshot = buildStateSnapshot(state, "R999-E999-C999");
+  const snapshot = buildStateSnapshot(state, stateCursor({ ...state, stateRevision: state.stateRevision + 100 }, 999));
   assert.equal(snapshot.delta.cursorAhead, true);
   assert.ok(snapshot.delta.events.some((event) => event.kind === "decision_recorded"));
   assert.ok(snapshot.delta.events.length <= 4);
@@ -602,7 +612,7 @@ test("Human answers observed before Goal creation never acquire a fictitious fut
   state = normalizeGoalRunState(state);
   assert.equal(state.humanDecisions[0].goalVersion, 0);
   state = observeHumanInput(state, "human-goal").state;
-  state = setGoal(state, { expectedVersion: 0, current: "Investigate safely", sourceIds: ["human-goal"], constraints: [] }).state;
+  state = setGoal(state, { expectedVersion: 0, current: "Investigate safely", constraints: [] }).state;
   assert.equal(normalizeGoalRunState(state).humanDecisions[0].goalVersion, 0);
 });
 
@@ -618,7 +628,7 @@ test("stale acceptance identities cannot cross a Goal replacement", () => {
   let state = withCriteria(withGoal("Ship feature A"), ["A behaves correctly"]).state;
   const staleId = state.goal.criteria[0].id;
   state = observeHumanInput(state, "human-feature-b").state;
-  state = setGoal(state, { expectedVersion: 1, current: "Ship feature B", sourceIds: ["human-feature-b"], constraints: [], criteria: ["B behaves correctly"] }).state;
+  state = setGoal(state, { expectedVersion: 1, current: "Ship feature B", constraints: [], criteria: ["B behaves correctly"] }).state;
   const before = structuredClone(state);
   assert.notEqual(state.goal.criteria[0].id, staleId);
   assert.throws(() => recordAcceptanceResult(state, { criterionId: staleId, status: "reported_pass", evidence: "Old feature evidence" }), /Unknown or stale acceptance criterion/);
@@ -655,10 +665,10 @@ test("ordinary, quoted, and multilingual Human text only updates the latest nati
     assert.deepEqual(state.goal.constraints, []);
     assert.equal(state.events.length, 0);
   }
-  state = setGoal(state, { expectedVersion: 0, current: "Agent interpretation", sourceIds: ["entry-ordinary"], constraints: [] }).state;
+  state = setGoal(state, { expectedVersion: 0, current: "Agent interpretation", constraints: [] }).state;
   state = observeHumanInput(state, "follow-up").state;
-  state = setGoal(state, { expectedVersion: 1, current: "Agent interpretation", sourceIds: ["entry-ordinary"], constraints: [] }).state;
-  assert.equal(state.goal.originalSourceIds[0], "entry-ordinary");
+  state = setGoal(state, { expectedVersion: 1, current: "Agent interpretation", constraints: [] }).state;
+  assert.equal(state.goal.original, "Agent interpretation");
   assert.equal(state.goal.reviewedInputId, "follow-up");
 });
 
@@ -671,32 +681,44 @@ test("Human observation is bounded and repeated IDs are a state no-op", () => {
   assert.deepEqual(observeHumanInput(observed.state, "native-entry"), { state: observed.state, changed: false });
 });
 
-test("explicit setter rejects oversized Goal, duplicate sources/constraints, and invalid criteria atomically", () => {
+test("explicit setter rejects oversized Goal, duplicate constraints, and invalid criteria atomically", () => {
   const state = observeHumanInput(emptyGoalRunState(), "source").state;
   const before = structuredClone(state);
   for (const input of [
-    { current: "x".repeat(4001), sourceIds: ["source"], constraints: [] },
-    { current: "ok", sourceIds: ["source", "source"], constraints: [] },
-    { current: "ok", sourceIds: ["source"], constraints: ["same", "same"] },
-    { current: "ok", sourceIds: ["source"], constraints: [], criteria: ["pass", "pass"] },
-    { current: "ok", sourceIds: ["source"], constraints: [], criteria: [""] },
+    { current: "x".repeat(4001), constraints: [] },
+    { current: "ok", constraints: ["same", "same"] },
+    { current: "ok", constraints: [], criteria: ["pass", "pass"] },
+    { current: "ok", constraints: [], criteria: [""] },
   ]) {
     assert.throws(() => setGoal(state, { expectedVersion: 0, ...input }));
     assert.deepEqual(state, before);
   }
-  assert.throws(() => setGoal(state, { expectedVersion: 1, current: "ok", sourceIds: ["source"], constraints: [] }), /Stale Goal version/);
+  assert.throws(() => setGoal(state, { expectedVersion: 1, current: "ok", constraints: [] }), /Stale Goal version/);
 });
 
-test("Goal alone changes criteria and invalidates plan approval and semantic assessments", () => {
+test("reordering ready parent nodes changes the approved execution order", () => {
+  const before = withPlan(withGoal());
+  const reordered = revisePlanState(before, { tasks: [tasks[1], tasks[0], tasks[2]] });
+  assert.equal(reordered.changed, true);
+  assert.equal(reordered.state.plan.planHistory.at(-1).orderChanged, true);
+  assert.equal(dagApprovalStatus(reordered.state).goalStatus, "approved");
+  assert.equal(dagApprovalStatus(reordered.state).approved, false);
+});
+
+test("Goal criterion edits require only Goal approval and preserve task evidence and assessments", () => {
   let state = withPlan(withGoal());
   state = completeAndAssess(state, "api", "observed evidence");
   const priorKey = state.plan.definitionKey;
   const changed = withCriteria(state, ["Different criterion"]).state;
   assert.equal(changed.goal.criteria[0].text, "Different criterion");
-  assert.notEqual(changed.plan.definitionKey, priorKey);
+  assert.equal(changed.plan.definitionKey, priorKey);
   assert.equal(changed.plan.tasks[0].evidence, "observed evidence");
   assert.equal(dagApprovalStatus(changed).approved, false);
-  assert.equal(taskAssessmentIsCurrent(changed.plan, changed.plan.tasks[0]), false);
+  assert.equal(taskAssessmentIsCurrent(changed.plan, changed.plan.tasks[0]), true);
+  assert.deepEqual(pendingApprovalRequests(changed).map(({ target }) => target), ["goal"]);
+  const approved = approveDefinitions(changed);
+  assert.equal(dagApprovalStatus(approved).approved, true);
+  assert.equal(approved.plan.approval.requestId, state.plan.approval.requestId);
   assert.equal(Object.hasOwn(changed.plan, "criteria"), false);
 });
 
@@ -708,7 +730,7 @@ test("new Human input locks approval until explicitly acknowledged without rebin
   assert.equal(dagApprovalStatus(state).approved, false);
   assert.deepEqual(buildGoalDetails(state).input, { id: "newest-entry", reviewed: false });
   state = setGoal(state, { expectedVersion: 1, current: state.goal.current,
-    sourceIds: [...state.goal.sourceIds, "newest-entry"], constraints: [] }).state;
+    constraints: [] }).state;
   assert.equal(dagApprovalStatus(state).approved, true);
   assert.equal(state.plan.approvalRequest.id, requestId);
   assert.deepEqual(buildGoalDetails(state).input, { id: "newest-entry", reviewed: true });
@@ -719,21 +741,21 @@ test("same-text constraint changes preserve evidence but invalidate approval; re
   state.goal.criteria[0].status = "reported_pass";
   state.goal.criteria[0].evidence = "verified";
   const changed = setGoal(state, { expectedVersion: 1, current: state.goal.current,
-    sourceIds: state.goal.sourceIds, constraints: ["Preserve data"] }).state;
+    constraints: ["Preserve data"] }).state;
   assert.equal(changed.goal.criteria[0].status, "reported_pass");
   assert.equal(changed.goal.criteria[0].evidence, "verified");
   assert.equal(dagApprovalStatus(changed).approved, false);
   changed.plan.executions = [{ requestId: "native-unknown", status: "unknown", taskIds: ["api"] }];
   const before = structuredClone(changed);
   assert.throws(() => setGoal(changed, { expectedVersion: 1, current: "Replacement",
-    sourceIds: changed.goal.sourceIds, constraints: [] }), /work is active or unresolved/);
+    constraints: [] }), /work is active or unresolved/);
   assert.deepEqual(changed, before);
 });
 
 test("context-aware cursor and default snapshot stay compact", () => {
   const state = withGoal("An explicitly selected semantic Goal");
   const cursor = stateCursor(state, 7);
-  assert.match(cursor, /^R\d+-E\d+-C7$/);
+  assert.match(cursor, /^R\d+-E\d+-C7-I[a-f0-9]{12}$/);
   const frame = { active: true, depth: 2, id: "frame-x", secretContents: "must not leak" };
   const snapshot = buildStateSnapshot(state, null, { contextRevision: 7, contextFrame: frame });
   assert.equal(snapshot.frame, "frame-x");

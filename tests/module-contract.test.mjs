@@ -16,7 +16,7 @@ test("Agent JSON contains only the selected payload, never merged internal recei
 });
 
 test("GoalRun reports the current API and release identity", () => {
-  assert.equal(goalRun.GOAL_RUN_API_VERSION, 10);
+  assert.equal(goalRun.GOAL_RUN_API_VERSION, 11);
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
   assert.equal(goalRun.GOAL_RUN_RELEASE, manifest.version);

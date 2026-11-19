@@ -6,12 +6,12 @@ This is an Agent-only local Pi extension. Keep changes scoped, evidence-driven, 
 
 - Goal: lower total cost to complete arbitrary Goals without lowering delivery quality.
 - Use code for deterministic mechanics: state transitions, dependency readiness, schema validation, visibility gates, duplicate detection, path-scope checks, and measurement.
-- Keep `parent`, `code`, and `subagent` executor intent explicit on DAG tasks. A Subagent task must be read-only. GoalRun schema v10 and context schema v5 are current-only; unsupported snapshots fail visibly without migration or silent reset.
+- Keep `parent`, `code`, and `subagent` executor intent explicit on DAG tasks. A Subagent task must be read-only. GoalRun schema v11 and context schema v6 are current-only; unsupported snapshots fail visibly without migration or silent reset.
 - The model chooses decomposition and executor; code validates state and safety boundaries.
 - Compass automatically dispatches only exactly Human-approved, ready `executor=subagent` + `writeScope=read-only` tasks through the documented pi-subagents structured delegation API at the `tool_result` boundary. A `before_agent_start` sweep recovers a persisted ready DAG if that boundary was missed, after checking the latest Human instruction and exact Current Goal. It consumes structured results; it never ignores child feedback.
 - Do not call the model-visible `subagent` tool recursively from a `tool_call` hook. Use the documented structured-delegation event contract from a supported event callback/application step.
 - The Human is the router; each Human-managed session is a worker. Do not add a cross-session scheduler, a second Agent loop, or another watch system. Reuse Pi Code Mode, pi-subagents, and pi-await.
-- Parent tasks stay with the main Agent; Code Mode tasks stay with the main Agent and are used for deterministic batching. Neither executor is silently converted to Subagent.
+- Only the main frame owns Goal and DAG definitions, approval and replanning. Goal and DAG have independent exact Human stamps. After both are current, parent nodes advance automatically in same-session frames through Pi turn boundaries. Code Mode stays with the main Agent for deterministic batching; neither executor is silently converted to Subagent.
 - No automatic retry of unknown child runs. Persist request identity before dispatch; a missing terminal response or session restart becomes `unknown` until status is checked.
 - Fallback is one narrow retry for recognized provider quota/rate-limit or availability errors. Never retry semantic task failure, structured-output failure, child deadline or unknown dispatch outcome.
 - GoalRun is the single source of truth for current Goal state. Original Goal, Current Goal, Human constraints, decisions, plan, and acceptance must not drift into separate stores.
