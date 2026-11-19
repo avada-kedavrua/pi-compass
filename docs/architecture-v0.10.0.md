@@ -240,7 +240,9 @@ The earlier candidate tracked alternative strategies but never launched them aut
 
 ## Final local evidence
 
-Implementation `a426acc` ([release identity](../RELEASE-MANIFEST.json)), including semantic Goal foundation `63a14ff` and field-use corrections. The [consumer audit](agent-usage-audit-v0.10.0.md) records the latest frozen input/hash, five failed pin attempts, the redesigned consumption path, bounded reviews and measured interface/retention cost. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v5 reject unsupported snapshots without migration/reset; native raw history is unchanged.
+Current implementation `8436106`: full 229/229, core 64/64, non-extension 94/94, isolated preflight passed. The Pi 1.5.2 native-runner regression reproduced refusal in `tui` mode before the fix and now approves the canonical questionnaire while still rejecting RPC. A separate disposable loader probe used the installed questionnaire 2.15.0’s in-process answer interface and verified the pi-subagents 0.89.1 bridge and public preflight. It did not render a live terminal questionnaire, start a child, or call a provider.
+
+Earlier implementation `a426acc`, including semantic Goal foundation `63a14ff` and field-use corrections. The [consumer audit](agent-usage-audit-v0.10.0.md) records the latest frozen input/hash, five failed pin attempts, the redesigned consumption path, bounded reviews and measured interface/retention cost. Counts retain behavioral safety coverage and remove one redundant NLP-era mock-only assertion. Current-only GoalRun v8/context v5 reject unsupported snapshots without migration/reset; native raw history is unchanged.
 
 | Check | Observed result |
 |---|---:|
