@@ -12,15 +12,18 @@ export function planApproval(state) {
   if (state.plan.stopped) return { ...approval, stopped: state.plan.stopped, next: "Patch the stopped DAG or discard it once all active work is settled." };
   if (approved) return approval;
   let next;
-  const prompt = approvalPrompt(state);
   if (reason === "human_input_unreviewed") next = HUMAN_INPUT_REVIEW;
   else if (reason === "goal_criteria_missing") next = "Define final Goal criteria with compass_goal before running the DAG.";
-  else if (prompt) return { ...approval, prompt, next: "No questionnaire has been sent. Call ask_user_question with this prompt unchanged." };
-  else if ([status, goalStatus].includes("modified")) next = "Review the Human's answer. Make any requested edits before asking for approval again.";
-  else if ([status, goalStatus].includes("declined")) next = "Do not execute the DAG. Review whether to revise it or discard it.";
-  else if ([status, goalStatus].includes("presented")) next = "The questionnaire was presented. If it ended without a result, use compass_plan request_approval to reissue it.";
-  else next = "If approval is still needed, call compass_plan request_approval, then present its prompt.";
-  return { ...approval, next };
+  else if ([status, goalStatus].includes("declined")) next = "Approval was declined. Revise or discard the DAG; do not execute it.";
+  else if (goalStatus === "modified") next = "Goal is not approved. Apply requested changes with compass_goal update; if no edit is needed, use compass_plan request_approval. Then present the new prompt.";
+  else if (status === "modified") next = "DAG is not approved. Apply requested changes with compass_plan patch; if no edit is needed, use compass_plan request_approval. Then present the new prompt.";
+  else if ([status, goalStatus].includes("presented")) next = "If the presented questionnaire ended without a result, use compass_plan request_approval to reissue it.";
+  if (next) return { ...approval, next };
+  const prompt = approvalPrompt(state);
+  if (!prompt) return { ...approval, next: "If approval is still needed, call compass_plan request_approval, then present its prompt." };
+  return { ...approval, prompt, next: state.plan.tasks.length
+    ? "Call ask_user_question with this prompt unchanged."
+    : "If using a DAG, define the DAG first to ask once. Otherwise present this prompt unchanged with ask_user_question." };
 }
 
 export function planProgress(state, branch, context, preview) {

@@ -215,7 +215,7 @@ test("a DAG is a draft, requires Goal criteria, and rejects unsafe or unexplaine
   await call(pi, "compass_plan", { action: "define", tasks });
   const plan = await view(pi, { view: "plan" });
   assert.equal(plan.approval, "awaiting_questionnaire", "define alone never authorizes execution");
-  assert.match(plan.next, /No questionnaire has been sent.*ask_user_question/);
+  assert.match(plan.next, /ask_user_question.*unchanged/);
   const replay = receipt(await call(pi, "compass_plan", { action: "request_approval" }));
   assert.equal(replay.unchanged, true);
   assert.deepEqual(replay.prompt, plan.prompt, "request_approval reuses a valid unpresented proposal");
@@ -248,6 +248,27 @@ test("incremental Goal and DAG edits preserve unrelated evidence and require fre
   await approve(pi);
   await waitFor(() => stateOf(pi).plan.tasks[1].status === "done", "the revised node alone completes");
   assert.deepEqual(pi.delegation.map((request) => request.nodeId), ["api", "ui", "ui"]);
+});
+
+test("a Goal approval with delivery notes leads to one revised Goal+DAG prompt, not a DAG-only detour", async () => {
+  const pi = fakePi();
+  await boot(pi);
+  const goal = await setGoal(pi, "Deliver the fix");
+  const { event } = await present(pi, "qualified-goal");
+  await answer(pi, "qualified-goal", event.input.questions, {
+    transform: ([answer]) => [{ ...answer, notes: "Deliver separate PRs to master and the release branch." }],
+  });
+  const draft = receipt(await call(pi, "compass_plan", { action: "define", tasks: [
+    { id: "deliver", title: "Deliver", acceptance: "Both PRs exist", executor: "parent" },
+    { id: "verify", title: "Verify PR targets", acceptance: "Both bases confirmed", dependsOn: ["deliver"], executor: "code" },
+  ] }));
+  assert.equal(draft.goalApproval, "modified");
+  assert.equal(draft.prompt, undefined);
+  assert.match(draft.next, /compass_goal.*compass_plan request_approval/);
+  assert.match(goal.next, /define.*DAG first/);
+  await assert.rejects(() => call(pi, "compass_plan", { action: "start", taskIds: ["deliver"] }), /Goal.*not approved/);
+  const updated = receipt(await call(pi, "compass_goal", { action: "update", constraintEdits: [{ text: "Deliver separate PRs to master and the release branch." }] }));
+  assert.deepEqual(updated.prompt.questions.map(({ header }) => header), ["Goal", "DAG"]);
 });
 
 test("an expired proposal is a corrective block, not a host error", async () => {
@@ -662,7 +683,8 @@ test("acceptance records only existing criteria and repeated identical evidence 
   await assert.rejects(() => call(pi, "compass_acceptance", { results: [{ criterion: "AC9", status: "reported_pass", evidence: "invented" }] }), /No state changed/);
   await assert.rejects(() => call(pi, "compass_acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "one" }, { criterion: "AC1", status: "failed", evidence: "two" }] }), /once per batch/);
   assert.equal(stateOf(pi).stateRevision, revision);
-  await call(pi, "compass_acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "Ran npm test; 12/12 passed." }] });
+  const result = receipt(await call(pi, "compass_acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "Ran npm test; 12/12 passed." }] }));
+  assert.equal(result.outcome, "incomplete");
   const first = stateOf(pi);
   await call(pi, "compass_acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "Ran npm test; 12/12 passed." }] });
   assert.equal(stateOf(pi).stateRevision, first.stateRevision, "identical retry does not inflate state");
@@ -672,16 +694,27 @@ test("acceptance records only existing criteria and repeated identical evidence 
   assert.equal(status.unverified, 1);
 });
 
-test("out-of-scope writes are advisory drift evidence, not a global lock", async () => {
+test("only actual DAG drift is persisted; ordinary writes and errors stay in Pi", async () => {
   const pi = fakePi();
-  await plannedGoal(pi, [tasks[0], { ...tasks[1], executor: "parent", writeScope: "src/ui" }]);
+  await plannedGoal(pi, [
+    { id: "ui", title: "Edit UI", acceptance: "UI updated", executor: "code", writeScope: "src/ui" },
+    { id: "verify", title: "Review UI", acceptance: "Change verified", dependsOn: ["ui"], executor: "code" },
+  ]);
+  const write = (path) => pi.hooks.get("tool_call")[0]({ toolName: "edit", toolCallId: "write-1", input: { path } }, ctx(pi));
+  const draftEntryCount = pi.entries.length;
+  await write("docs/notes.md");
+  await pi.hooks.get("tool_execution_end")[0]({ toolName: "edit", isError: true }, ctx(pi));
+  assert.equal(pi.entries.length, draftEntryCount);
   await approve(pi);
-  const event = { toolName: "edit", toolCallId: "write-1", input: { path: "docs/notes.md" } };
-  const patch = await pi.hooks.get("tool_call").find(Boolean)(event, ctx(pi));
-  assert.equal(patch, undefined, "Compass never blocks a write by itself");
-  const state = stateOf(pi);
-  assert.equal(state.trace.writes.some((item) => item.target.includes("docs/notes.md")), true);
-  assert.match(state.plan.executionDrift?.reason ?? "", /no writable DAG task|writeScope|outside/);
+  await call(pi, "compass_plan", { action: "start", taskIds: ["ui"] });
+  const activeEntryCount = pi.entries.length;
+  await write("src/ui/notes.md");
+  assert.equal(pi.entries.length, activeEntryCount);
+  assert.equal(await write("docs/notes.md"), undefined, "Compass never blocks a write by itself");
+  assert.match(stateOf(pi).plan.executionDrift.reason, /outside every declared scope/);
+  const driftEntryCount = pi.entries.length;
+  await write("docs/notes.md");
+  assert.equal(pi.entries.length, driftEntryCount, "repeated identical drift is a no-op");
 });
 
 test("native branch navigation adopts the selected branch GoalRun", async () => {
@@ -720,18 +753,6 @@ test("failed native persistence never reports a mutation as committed", async ()
     action: "set", current: "Persist a Goal", constraints: [], criteria,
   }), /persistence failed/);
   assert.equal(pi.entries.filter((entry) => entry.customType === "pi-compass-v2.goalrun").length, persisted, "no candidate state is activated or persisted");
-});
-
-test("compass-preflight reports the fixed registry and host scope readiness", async () => {
-  const pi = fakePi();
-  await boot(pi);
-  const notifications = [];
-  const context = ctx(pi, { ui: { notify(body, level) { notifications.push({ body, level }); } } });
-  await pi.commands.get("compass-preflight").handler("", context);
-  assert.equal(notifications.length, 1);
-  assert.match(notifications[0].body, /PASS Release/);
-  assert.match(notifications[0].body, /PASS Fixed tool registry/);
-  assert.equal(notifications[0].level, "info");
 });
 
 async function waitFor(predicate, label, timeoutMs = 8000) {

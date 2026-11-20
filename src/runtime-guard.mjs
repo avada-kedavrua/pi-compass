@@ -69,7 +69,8 @@ export class RuntimeGuards {
     this.storeReady ??= (async () => {
       const dir = typeof this.profileDir === "function" ? await this.profileDir() : this.profileDir;
       if (this.closed) throw new Error("Guard runtime is closed.");
-      return this.database = new GuardStore({ path: path.join(dir, "runtime-guards.sqlite"), normalize: normalizeGuardState });
+      this.database = new GuardStore({ path: path.join(dir, "runtime-guards.sqlite"), normalize: normalizeGuardState });
+      return this.database;
     })();
     return this.storeReady;
   }
@@ -93,6 +94,11 @@ export class RuntimeGuards {
     });
     this.pending = result.catch(() => {});
     return result;
+  }
+  async preflight(ctx) {
+    await this.control({ action: "get" }, ctx);
+    const [result] = await this.vm.evaluate([{ source: '() => ({verdict:"pass"})', event: {} }], { signal: ctx.signal });
+    if (result?.verdict !== "pass") throw new Error(result?.error || "Guard sandbox did not return a valid verdict.");
   }
   async #cases(rule, cases, ctx, signal) {
     const checks = cases.map((item) => matchesGuard(rule, item.event.toolName)

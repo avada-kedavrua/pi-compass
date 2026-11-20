@@ -33,7 +33,7 @@ The [field-use audit and resolved TODOs](docs/agent-usage-audit-v0.10.0.md) reco
 
 ## Install
 
-From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v11/context v6 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
+First run `npm ci --ignore-scripts --omit=peer` in the Compass checkout. `pi install -l` registers a local package; it does not install its npm dependencies. From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v11/context v6 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
 
 ### Tool missing?
 
@@ -48,7 +48,7 @@ text(result);
 
 Mutations remain direct standalone calls; copy source refs unchanged, without binding/version/revision plumbing. Prefer `remember` for short qualified conclusions; `pin` retains full originals. Do not batch mutations in Code Mode. The old argument forms are not accepted. See the [consumer contract](docs/tool-contract.md#compass_context--memory-frames-values).
 
-Full preflight also exercises the native loader and runner in a disposable profile, including the two-tab approval boundary, automatic serial handoff, throw recovery and guard storage. `/compass-preflight` checks guard state and reports optional DAG dependencies separately: Pi must be in terminal TUI mode with `ask_user_question` enabled for approvals; native child dispatch also needs the pi-subagents bridge and launch preflight. Open Pi directly in a terminal for DAG acceptance, not through an RPC frontend. A delegation `PASS` confirms wiring, not an individual child profile or provider. Neither preflight requests a provider turn.
+Full preflight also exercises the native loader and runner in a disposable profile, including the two-tab approval boundary, automatic serial handoff, throw recovery and guard storage. `/compass-preflight` checks guard storage and a real Worker verdict, and reports optional DAG dependencies separately: Pi must be in terminal TUI mode with `ask_user_question` enabled for approvals; native child dispatch also needs the pi-subagents bridge and launch preflight. Open Pi directly in a terminal for DAG acceptance, not through an RPC frontend. A delegation `PASS` confirms wiring, not an individual child profile or provider. Neither preflight requests a provider turn.
 
 ## Runtime guards
 

@@ -82,7 +82,13 @@ export class GuardVM {
             }
           }
         });
-        worker.on("error", (error) => { if (this.#worker === worker && this.#active) this.#fail(this.#active, error); });
+        worker.on("error", (error) => {
+          if (this.#worker !== worker || !this.#active) return;
+          const failure = error.code === "ERR_MODULE_NOT_FOUND"
+            ? new Error("Guard sandbox dependency missing. Run npm ci --ignore-scripts --omit=peer in the Compass checkout, then rerun /compass-preflight.", { cause: error })
+            : error;
+          this.#fail(this.#active, failure);
+        });
         worker.on("exit", () => {
           if (this.#worker !== worker) return;
           this.#worker = undefined;

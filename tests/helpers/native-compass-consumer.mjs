@@ -119,6 +119,7 @@ try {
   await preflight();
   assert.match(notice, /UNAVAILABLE DAG approval: .*mode=rpc, hasUI=true/);
   assert.match(notice, /UNAVAILABLE Native DAG delegation: pi-subagents is not registered/);
+  assert.match(notice, /PASS Runtime guard: scopes readable and Worker verdict verified/);
   const beforeApproval = manager.getBranch().length;
   assert.equal((await runner.emitToolCall(proposal())).block, true, "RPC dialogs do not prove full presentation");
   assert.equal(manager.getBranch().length, beforeApproval);
@@ -188,8 +189,8 @@ try {
   assert.deepEqual(settled.affected, ["report"]);
   assert.equal(settled.approvalReason, "human_input_unreviewed");
   assert.equal((await readState()).outcome, "incomplete");
-  await tools.get("compass_acceptance").definition.execute("acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "Both permission paths documented" }] }, undefined, undefined, context);
-  assert.equal((await readState()).outcome, "agent_reported_satisfied");
+  const acceptance = await tools.get("compass_acceptance").definition.execute("acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "Both permission paths documented" }] }, undefined, undefined, context);
+  assert.equal(JSON.parse(acceptance.content[0].text).outcome, "agent_reported_satisfied");
 
   await tools.get("compass_goal").definition.execute("review-after-report", { action: "update" }, undefined, undefined, context);
   const retry = { action: "reopen", tasks: [{ id: "interpret", reason: "Check stop behavior with the existing input" }] };

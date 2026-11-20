@@ -28,7 +28,7 @@ Do not introduce a second scheduler, second session store, or duplicate conventi
 
 ## Messages contract
 
-Raw Pi session history remains append-only. Compass stores a compact, bounded GoalRun projection and event history; it does not copy every raw tool result into a second ledger. The context-attention layer alters only the future model-context projection through validated native boundary drafts and request-side retention overlays, never the original session record. Every omission/replacement must be traceable and must preserve the evidence needed for the active Goal.
+Raw Pi session history remains append-only. Compass stores a compact, bounded GoalRun projection and semantic event history. Ordinary tool failures and writes stay in Pi, not a second log; keep only advisory path-scope drift for authorized or already-running DAG work. The context-attention layer alters only the future model-context projection through validated native boundary drafts and request-side retention overlays, never the original session record. Every omission/replacement must be traceable and must preserve the evidence needed for the active Goal.
 
 Keep Pi-owned global/project instructions and the native request prefix intact. Working content appends by default; the Agent can drop, move, spill to a verified project file, or load on demand. The Agent explicitly pins temporary instructions; verified complete Skill reads auto-pin in scope. Pins inherit downward and a child can mask them without changing the parent. Frame refs are read-only, edits stay local, and explicit exports carry selected values. Approved parent nodes can declare exact artifact inputs. Make frame state and edits observable without Human intervention.
 

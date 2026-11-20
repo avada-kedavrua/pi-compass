@@ -9,8 +9,6 @@ export const GOAL_RUN_RELEASE = "0.10.0";
 
 const MAX_DECISIONS = 8;
 const MAX_CHECKPOINTS = 5;
-const MAX_FAILURES = 12;
-const MAX_WRITES = 12;
 const MAX_HUMAN_DECISIONS = 8;
 const MAX_EVENTS = 80;
 const MAX_EVENT_TEXT = 1_200;
@@ -47,7 +45,6 @@ export function emptyGoalRunState() {
     checkpoints: [],
     nextDecisionNumber: 1,
     nextCheckpointNumber: 1,
-    trace: { failures: [], writes: [] },
     projectRoot: null,
   };
 }
@@ -230,10 +227,6 @@ export function normalizeGoalRunState(input) {
     checkpoints: Array.isArray(raw.checkpoints) ? raw.checkpoints.slice(-MAX_CHECKPOINTS) : [],
     nextDecisionNumber: Number.isInteger(raw.nextDecisionNumber) ? raw.nextDecisionNumber : 1,
     nextCheckpointNumber: Number.isInteger(raw.nextCheckpointNumber) ? raw.nextCheckpointNumber : 1,
-    trace: {
-      failures: Array.isArray(raw.trace?.failures) ? raw.trace.failures.slice(-MAX_FAILURES) : [],
-      writes: Array.isArray(raw.trace?.writes) ? raw.trace.writes.slice(-MAX_WRITES) : [],
-    },
     projectRoot: typeof raw.projectRoot === "string" ? raw.projectRoot : null,
   };
   state.goal.version = Number.isInteger(state.goal.version) && state.goal.version >= 0 ? state.goal.version : 0;
@@ -312,14 +305,11 @@ export function normalizeGoalRunState(input) {
     state.plan = emptyDagState();
   }
   if (!Array.isArray(state.plan.tasks)) state.plan.tasks = [];
-  if (!state.trace || typeof state.trace !== "object") state.trace = { failures: [], writes: [] };
 
   const version = state.goal.version;
   for (const item of state.humanDecisions) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
   for (const item of state.decisions) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
   for (const item of state.checkpoints) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
-  for (const item of state.trace.failures) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
-  for (const item of state.trace.writes) if (!Number.isInteger(item.goalVersion)) item.goalVersion = version;
   state.events = state.events.filter((item) => item && typeof item === "object" && typeof item.kind === "string");
   return state;
 }
@@ -684,19 +674,6 @@ export function recordCheckpoint(stateValue, input) {
   return { state, item };
 }
 
-export function recordFailure(stateValue, input) {
-  const state = normalizeGoalRunState(stateValue);
-  const item = {
-    at: input?.at || timestamp(),
-    goalVersion: state.goal.version ?? 1,
-    tool: clip(input?.tool, 80) || "unknown",
-    error: clip(input?.error, 260) || "Tool failed without a readable error summary.",
-  };
-  state.trace.failures = [...state.trace.failures, item].slice(-MAX_FAILURES);
-  appendEvent(state, "tool_failure", { at: item.at, source: item.tool, summary: item.error, goalVersion: item.goalVersion });
-  return state;
-}
-
 export function recordExecutionDrift(stateValue, input = {}) {
   const state = normalizeGoalRunState(stateValue);
   if (!state.plan.goal || !state.plan.tasks.length) return { state, changed: false };
@@ -728,39 +705,6 @@ export function recordExecutionEvent(stateValue, input = {}) {
     text: typeof input.text === "string" ? input.text.slice(0, 1600) : "",
     ref: typeof input.ref === "string" ? input.ref : "",
   });
-  return state;
-}
-
-export function recordWriteTarget(stateValue, input) {
-  const state = normalizeGoalRunState(stateValue);
-  const target = clip(input?.target, 600);
-  if (!target) return state;
-  const item = { at: input?.at || timestamp(), goalVersion: state.goal.version ?? 1, tool: clip(input?.tool, 80) || "write", target };
-  const prior = state.trace.writes.at(-1);
-  if (prior?.goalVersion === item.goalVersion && prior?.tool === item.tool && prior?.target === target) return state;
-  state.trace.writes = [...state.trace.writes, item].slice(-MAX_WRITES);
-  appendEvent(state, "write_attempt", { at: item.at, source: item.tool, summary: item.target, goalVersion: item.goalVersion });
-  return state;
-}
-
-export function mergeTrace(stateValue, traceEntries = []) {
-  const state = normalizeGoalRunState(stateValue);
-  for (const entry of traceEntries) {
-    if (!entry || typeof entry !== "object") continue;
-    if (entry.kind === "failure" && entry.item) {
-      const key = `${entry.item.at}|${entry.item.tool}|${entry.item.error}`;
-      if (!state.trace.failures.some((x) => `${x.at}|${x.tool}|${x.error}` === key)) state.trace.failures.push(entry.item);
-      const eventExists = state.events.some((event) => event.kind === "tool_failure" && event.at === entry.item.at && event.source === entry.item.tool && event.summary === entry.item.error);
-      if (!eventExists) appendEvent(state, "tool_failure", { at: entry.item.at, source: entry.item.tool, summary: entry.item.error, goalVersion: entry.item.goalVersion });
-    } else if (entry.kind === "write" && entry.item) {
-      const key = `${entry.item.at}|${entry.item.tool}|${entry.item.target}`;
-      if (!state.trace.writes.some((x) => `${x.at}|${x.tool}|${x.target}` === key)) state.trace.writes.push(entry.item);
-      const eventExists = state.events.some((event) => event.kind === "write_attempt" && event.at === entry.item.at && event.source === entry.item.tool && event.summary === entry.item.target);
-      if (!eventExists) appendEvent(state, "write_attempt", { at: entry.item.at, source: entry.item.tool, summary: entry.item.target, goalVersion: entry.item.goalVersion });
-    }
-  }
-  state.trace.failures = state.trace.failures.slice(-MAX_FAILURES);
-  state.trace.writes = state.trace.writes.slice(-MAX_WRITES);
   return state;
 }
 
@@ -909,7 +853,7 @@ export function patchPlanState(state, input) {
 
 export function revisePlanState(stateValue, input) {
   const state = normalizeGoalRunState(stateValue);
-  if (!state.goal.current) throw new Error("No Goal has been captured in this session.");
+  if (!state.goal.current) throw new Error("Set the Goal and criteria with compass_goal before defining a DAG.");
   if (!Array.isArray(input.tasks) || input.tasks.length > 24) throw new Error("tasks must be an array of at most 24 tasks.");
   const criteria = state.goal.criteria.filter((item) => item.goalVersion === state.goal.version);
   if (!criteria.length) throw new Error("Define Goal acceptance criteria before creating a DAG.");

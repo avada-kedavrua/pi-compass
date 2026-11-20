@@ -34,7 +34,7 @@ From main, `request_approval` reuses usable proposals and renews only outstandin
 
 ## compass_acceptance — evidence only
 
-`{results:[{criterion,status,evidence}]}` records `reported_pass|failed|blocked|inconclusive` for existing current criterion IDs. Unknown or duplicate criteria fail before mutation; an identical repeat is a no-op. This is an Agent report, never independent verification; the deterministic outcome projection classifies recorded evidence, it does not prove correctness.
+`{results:[{criterion,status,evidence}]}` records `reported_pass|failed|blocked|inconclusive` for existing current criterion IDs. Unknown or duplicate criteria fail before mutation; an identical repeat is a no-op. The receipt includes the resulting Goal `outcome`: all criteria can be reported as passed while authorized DAG work remains incomplete. This is an Agent report, never independent verification.
 
 ## compass_context — memory, frames, values
 

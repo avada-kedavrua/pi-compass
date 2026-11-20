@@ -2,6 +2,8 @@
 
 ## 0.10.0 — seven-tool candidate
 
+- Fix macOS field-use detours: surface the blocked approval before another tab, give the exact recovery action, and probe the guard Worker in `/compass-preflight`. Keep native ordinary tool telemetry out of GoalRun; preserve actual advisory DAG drift.
+
 - Keep guard control receipts as compact JSON. Scope listing cursors to readable views, acknowledge writes with the committed revision, and emit deduplicated guard notices as short text without modifying business results.
 
 - Wake main through Pi after the first correlated child `throw` is persisted. Sibling results still settle, and a fallback under preflight cannot delay the stop or launch afterward. No pi-subagents changes.

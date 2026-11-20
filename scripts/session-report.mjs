@@ -107,7 +107,6 @@ function compactGoalState(raw) {
       currentCriteria: currentCriteria.length,
     },
     outcome: goalOutcomeStatus(state),
-    trace: { failures: state.trace?.failures?.length ?? 0, writes: state.trace?.writes?.length ?? 0 },
     latestEventSeq: Math.max(0, (state.eventSeq ?? 1) - 1),
   };
 }

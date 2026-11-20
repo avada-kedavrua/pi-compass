@@ -10,8 +10,6 @@ import {
   recordHumanQuestionnaireFailure,
   recordDecision,
   recordCheckpoint,
-  recordFailure,
-  mergeTrace,
   recordAcceptanceResult,
   acceptanceStatus,
   goalOutcomeStatus,
@@ -242,11 +240,6 @@ test("material decisions and checkpoints work without a DAG", () => {
   state = recordCheckpoint(state, { summary: "Before API integration", ref: "git:abc123", evidence: "Baseline tests pass" }).state;
   assert.equal(state.decisions[0].id, "D1");
   assert.equal(state.checkpoints[0].id, "C1");
-});
-
-test("tool failures are on-demand trace, remain on-demand trace data", () => {
-  let state = withGoal();
-  state = recordFailure(state, { tool: "bash", error: "command exited 1" });
 });
 
 test("reopening a prerequisite resets downstream dependents but preserves unrelated work", () => {
@@ -555,20 +548,6 @@ test("state snapshot never leaks previous-Goal events into the active delta", ()
 
 
 
-
-
-test("recovered trace entries become cursor-addressable events without duplicates", () => {
-  let state = withGoal("Goal: recover tool trace");
-  const oldCursor = buildStateSnapshot(state).cursor;
-  const failure = { at: new Date().toISOString(), goalVersion: 1, tool: "bash", error: "recovered failure" };
-  state = mergeTrace(state, [{ kind: "failure", item: failure }]);
-  const delta = buildStateSnapshot(state, oldCursor);
-  assert.ok(delta.delta.events.some((event) => event.kind === "tool_failure" && event.summary === "recovered failure"));
-  const once = state.events.filter((event) => event.kind === "tool_failure" && event.summary === "recovered failure").length;
-  state = mergeTrace(state, [{ kind: "failure", item: failure }]);
-  const twice = state.events.filter((event) => event.kind === "tool_failure" && event.summary === "recovered failure").length;
-  assert.equal(twice, once);
-});
 
 
 test("state cursor ahead is explicit and still returns a bounded recovery snapshot", () => {
