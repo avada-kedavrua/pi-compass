@@ -1002,11 +1002,11 @@ function registerTools(pi: any) {
       },
     },
     compass_context_search: {
-      label: "Find Context", description: "Recover missing Human instructions, observed data or working memory. Query uses literal keywords; exact refs recover across available scopes. Short snippets default; handles omits text; details adds qualifications. No mutation.", readOnly: true,
+      label: "Find Context", description: "Find source data by literal query, native read path, or exact refs. view=cleanup lists the largest droppable working groups without their bodies. No mutation.", readOnly: true,
       execute: async (params: any, ctx: any) => agentResult(agentSearch(ctx.sessionManager.getBranch(), { context: contextBoundaryPreview(ctx) }, contextState, params)),
     },
     compass_context: {
-      label: "Context", exposure: "model-only", description: "Retain memory and manage same-session frames. Approved parent nodes open automatically; finish with return(outcome). Use call(task) only for ordinary attention. Reuse opaque refs. One pin/unpin/remember may accompany sibling tools; other operations must be standalone. queued is provisional; use the native applied/rejected receipt, never poll. A frame is not filesystem rollback. Export retained values explicitly to preserve their lifetime in the parent.",
+      label: "Context", exposure: "model-only", description: "Retain memory and manage same-session frames. Approved parent nodes open automatically; finish with return(outcome). Use call(task) only for ordinary attention. Reuse opaque refs. One pin/unpin/remember may accompany siblings; other actions must be standalone. Wait for the native applied/rejected receipt; do not poll. A frame is not filesystem rollback. Export retained values explicitly to preserve their lifetime in the parent.",
       execute: async (input: any, ctx: any, toolCallId: string) => {
         const branch = ctx.sessionManager.getBranch();
         const call = persistedAssistantCall(branch, toolCallId);
@@ -1033,7 +1033,9 @@ function registerTools(pi: any) {
           if (operation.artifact) throw new Error(String(error instanceof Error ? error.message : error) + "; verified artifact remains at " + operation.artifact.path + "; filesystem effects were not rolled back.");
           throw error;
         }
-        return { content: [...agentResult({ queued: true, ...(operation.artifact?.path ? { artifact: operation.artifact.path } : {}) }).content, ...(prepared.content?.slice(1) ?? [])], details: { contextOperation: operation } };
+        const file = operation.artifact?.path;
+        const pending = "Context change not applied yet. Use the turn-end receipt; do not retry or poll.";
+        return { content: [{ type: "text", text: file ? `Verified artifact written: ${file}. ${pending}` : pending }, ...(prepared.content?.slice(1) ?? [])], details: { contextOperation: operation } };
       },
     },
     compass_plan: {

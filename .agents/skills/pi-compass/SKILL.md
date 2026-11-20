@@ -31,10 +31,10 @@ Compass registers seven fixed tools: `compass_goal`, `compass_state`, `compass_c
 
 ## Context
 
-- Search only for missing information: `compass_context_search({query})` for literal keywords, or `{refs}` for exact recovery. Default snippets are short; `view:"handles"` omits text, `view:"details"` adds qualifications.
+- Search only for missing information: `compass_context_search({query})` for literal keywords, or `{refs}` for exact recovery. Filter native reads by `path` when known. Default snippets are short; `handles` omits text, `details` adds qualifications. Use `view:"cleanup"` for unwanted working groups, not `retained`.
 - Copy refs unchanged; never construct or decode them. Prefer `remember({text,sources,caveats?})` for compact qualified conclusions; `pin({sources})` keeps complete originals visible and costs more.
-- All actions are flat: `compass_context({action:"call",...})`. One `pin`/`unpin`/`remember` may accompany sibling tools; everything else must be standalone. `queued` is provisional — the native applied/rejected receipt is authoritative, so never poll.
-- `call` opens same-session attention with explicit `capture` (`ref` is read-only, `copy` is private and editable). Finish by returning from the frame; do not report the overall result from inside it. `return` exports only what you name: retained exports keep their lifetime, unexported work releases. A frame is not filesystem rollback.
+- All actions are flat: `compass_context({action:"call",...})`. One `pin`/`unpin`/`remember` may accompany sibling tools; everything else must be standalone. Use the turn-end applied/rejected receipt, not the provisional tool response. Never poll or retry while pending.
+- `call` opens same-session attention with explicit `capture` (`ref` is read-only, `copy` is private and editable). Continue in the active frame; only a distinct nested task should pass its ID as `parentFrame`. Return one level at a time; report the overall result from main. `return` exports only what you name: retained exports keep their lifetime, unexported work releases. A frame is not filesystem rollback.
 - `compass_state(view:"retained")` lists retained sources. Edit or drop local Agent-authored memory directly. Complete native `SKILL.md` reads auto-pin in scope; child `unpin` masks inherited pins without changing the parent.
 - Use the updated ref from an applied `replace`/`spill`/`move` receipt. Spill verifies a new project artifact before removing context. A frame cannot return with live owned watches: unwatch or `transfer` first.
 

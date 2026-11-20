@@ -119,6 +119,12 @@ test("stable ancestor symlinks and non-relative artifact paths fail before creat
     await symlink(path.join(root, "outside"), path.join(root, "link"), "dir");
     const content = "source";
     const request = { projectRoot: root, source: "source", binding: "root/source", version: contentVersion(content), content, purpose: "retain source" };
+    const missing = await writeContextArtifact({ ...request, relativePath: "missing/sub/source.json" });
+    assert.match(missing.error, /Artifact directory "missing" does not exist/);
+    assert.equal(missing.error.includes("/proc/self/fd"), false);
+    assert.equal(missing.possibleOrphan, null);
+    const wrongFormat = await writeContextArtifact({ ...request, relativePath: "source.md" });
+    assert.match(wrongFormat.error, /Context artifacts use JSON/);
     for (const relativePath of ["link/source.json", "../source.json", "/source.json"]) {
       const result = await writeContextArtifact({ ...request, relativePath });
       assert.equal(result.ok, false);

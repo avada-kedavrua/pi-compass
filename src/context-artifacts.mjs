@@ -24,8 +24,14 @@ async function withArtifactTarget(projectRoot, relativePath, fn) {
     const openedRootIdentity = await directories[0].stat();
     if (openedRootIdentity.dev !== rootIdentity.dev || openedRootIdentity.ino !== rootIdentity.ino
       || await realpath(`/proc/self/fd/${directories[0].fd}`) !== root) throw new Error("Artifact root changed during resolution.");
-    for (const segment of segments.slice(0, -1)) {
-      directories.push(await open(`/proc/self/fd/${directories.at(-1).fd}/${segment}`, flags));
+    for (const [index, segment] of segments.slice(0, -1).entries()) {
+      try { directories.push(await open(`/proc/self/fd/${directories.at(-1).fd}/${segment}`, flags)); }
+      catch (error) {
+        const directory = segments.slice(0, index + 1).join("/");
+        if (error.code === "ENOENT") throw new Error(`Artifact directory ${JSON.stringify(directory)} does not exist. Choose a path under an existing project directory, or create the directory first.`);
+        if (["ELOOP", "ENOTDIR"].includes(error.code)) throw new Error(`Artifact directory ${JSON.stringify(directory)} is not a real directory; symlinks are not allowed.`);
+        throw error;
+      }
     }
     return await fn({ root, target: `/proc/self/fd/${directories.at(-1).fd}/${segments.at(-1)}` });
   } finally {
@@ -75,6 +81,7 @@ async function verifiedRead(request, descriptor) {
 export async function writeContextArtifact({ projectRoot, relativePath, source, binding, version, range = null, purpose, caveats = [], provenance = [], content }) {
   let created = false;
   try {
+    if (typeof relativePath !== "string" || path.extname(relativePath) !== ".json") throw new Error("Context artifacts use JSON. Choose a project-relative path ending in .json.");
     const manifest = { source, binding, version, range, purpose, caveats: [...caveats], provenance: [...provenance], contentVersion: contentVersion(content) };
     validateSelection({ ...manifest, content });
     const bytes = Buffer.from(JSON.stringify({ format: FORMAT, formatVersion: 1, manifest, content }), "utf8");

@@ -18,6 +18,7 @@ function createSummary(file) {
     endedAt: null,
     elapsedSeconds: null,
     compactions: 0,
+    projectionCheckpoints: 0,
     assistantRequests: 0,
     assistantRequestErrors: 0,
     assistantRequestErrorsByProviderModel: {},
@@ -41,7 +42,7 @@ function createSummary(file) {
     unchangedStateReads: 0,
     goalStateRecords: 0,
     goalStateBytes: 0,
-    context: { callsByAction: {}, queued: 0, messagesByAction: {}, rejectedBoundaries: 0 },
+    context: { callsByAction: {}, proposed: 0, messagesByAction: {}, rejectedBoundaries: 0, openFrames: 0 },
     finalState: null,
     malformedLines: 0,
   };
@@ -133,7 +134,11 @@ export async function analyzeSession(file) {
       summary.sessionId = record.id ?? null;
       summary.startedAt = isoTimestamp(record.timestamp);
     }
-    if (record.type === "compaction") summary.compactions += 1;
+    if (record.type === "compaction") {
+      if (record.details?.compassOperation) summary.projectionCheckpoints++;
+      else summary.compactions++;
+    }
+    if (record.type === "custom" && record.customType === "pi-compass-v2.context" && Array.isArray(record.data?.frames)) summary.context.openFrames = record.data.frames.length;
     if (record.type === "custom_message" && record.customType === "pi-compass-v2.context-message") {
       if (record.details?.contextError === true) summary.context.rejectedBoundaries++;
       else if (record.details?.action) addCount(summary.context.messagesByAction, record.details.action);
@@ -202,7 +207,7 @@ export async function analyzeSession(file) {
       if (name.startsWith("compass_")) summary.compassTopLevelErrors += 1;
     }
     const text = resultText(message);
-    if (name === "compass_context" && message.isError !== true && message.details?.contextOperation) summary.context.queued++;
+    if (name === "compass_context" && message.isError !== true && message.details?.contextOperation) summary.context.proposed++;
     if (name === "compass_state") {
       let unchanged = message.details?.unchanged === true;
       if (!unchanged) {
@@ -247,18 +252,23 @@ function sortedCounts(counts) {
 
 export function formatReport(summaries) {
   const totals = summaries.reduce((out, item) => {
-    for (const key of ["records", "compactions", "assistantRequests", "assistantRequestErrors", "requestErrorDurationMs", "topLevelToolCalls", "topLevelErrors", "nestedToolCalls", "nestedErrors", "totalToolCallsIncludingLoggedNested", "totalToolErrorsIncludingLoggedNested", "compassTopLevelCalls", "compassNestedCalls", "compassCallsIncludingLoggedNested", "compassTopLevelErrors", "compassNestedErrors", "compassErrorsIncludingLoggedNested", "codemodeCalls", "unchangedStateReads", "goalStateRecords", "malformedLines"]) out[key] = (out[key] ?? 0) + (item[key] ?? 0);
+    for (const key of ["records", "compactions", "projectionCheckpoints", "assistantRequests", "assistantRequestErrors", "requestErrorDurationMs",
+      "topLevelToolCalls", "nestedToolCalls", "totalToolCallsIncludingLoggedNested", "totalToolErrorsIncludingLoggedNested",
+      "compassCallsIncludingLoggedNested", "compassErrorsIncludingLoggedNested", "unchangedStateReads", "goalStateRecords"]) {
+      out[key] = (out[key] ?? 0) + item[key];
+    }
+    out.rejectedBoundaries += item.context.rejectedBoundaries;
     for (const key of Object.keys(out.usage)) out.usage[key] += item.usage[key] ?? 0;
     out.maxRequestErrorDurationMs = Math.max(out.maxRequestErrorDurationMs ?? 0, item.maxRequestErrorDurationMs ?? 0);
     for (const [key, count] of Object.entries(item.assistantRequestErrorsByProviderModel ?? {})) addCount(out.assistantRequestErrorsByProviderModel, key, count);
     return out;
-  }, { assistantRequestErrorsByProviderModel: {}, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0, cost: 0 } });
+  }, { rejectedBoundaries: 0, assistantRequestErrorsByProviderModel: {}, usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0, cost: 0 } });
   const rows = summaries.map((item) => {
     const final = item.finalState;
     const outcome = final?.outcome?.status ?? "unknown";
     const plan = final?.plan ? `${final.plan.done}/${final.plan.total} (${final.plan.blocked} blocked)` : "no DAG";
     const acceptance = final?.acceptance?.total ? `${final.acceptance.reportedPass}/${final.acceptance.total} reported pass` : "not defined";
-    return `| ${item.file} | ${item.records} | ${item.assistantRequests} | ${item.assistantRequestErrors} | ${item.requestErrorDurationSeconds}s | ${item.topLevelToolCalls} | ${item.nestedToolCalls} | ${item.totalToolCallsIncludingLoggedNested} | ${item.totalToolErrorsIncludingLoggedNested} | ${item.compassCallsIncludingLoggedNested} | ${item.compassErrorsIncludingLoggedNested} | ${item.compactions} | ${item.usage.totalTokens.toLocaleString("en-US")} | ${outcome} | ${plan} | ${acceptance} |`;
+    return `| ${item.file} | ${item.records} | ${item.assistantRequests} | ${item.assistantRequestErrors} | ${item.requestErrorDurationSeconds}s | ${item.topLevelToolCalls} | ${item.nestedToolCalls} | ${item.totalToolCallsIncludingLoggedNested} | ${item.totalToolErrorsIncludingLoggedNested} | ${item.compassCallsIncludingLoggedNested} | ${item.compassErrorsIncludingLoggedNested} | ${item.context.rejectedBoundaries} | ${item.context.openFrames} | ${item.compactions} | ${item.projectionCheckpoints} | ${item.usage.totalTokens.toLocaleString("en-US")} | ${outcome} | ${plan} | ${acceptance} |`;
   }).join("\n");
   const topTools = {};
   const nestedTools = {};
@@ -276,10 +286,10 @@ export function formatReport(summaries) {
     "",
     "Counts distinguish top-level Pi tool calls from nested Code Mode calls explicitly recorded in tool results. A visible nested expression is not counted as executed unless the JSONL records it.",
     "",
-    "| Session | Records | Assistant requests | Model request errors | Error wait | Top-level calls | Logged nested calls | Total logged calls | Tool errors | Compass calls | Compass errors | Compactions | Recorded tokens | Final Goal outcome | DAG progress | Acceptance report |",
-    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
+    "| Session | Records | Assistant requests | Model request errors | Error wait | Top-level calls | Logged nested calls | Total logged calls | Tool errors | Compass calls | Compass errors | Boundary rejects | Open frames | Native compactions | Compass checkpoints | Recorded tokens | Final Goal outcome | DAG progress | Acceptance report |",
+    "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|",
     rows,
-    `| **TOTAL** | **${totals.records}** | **${totals.assistantRequests}** | **${totals.assistantRequestErrors}** | **${Math.round(totals.requestErrorDurationMs / 1000)}s** | **${totals.topLevelToolCalls}** | **${totals.nestedToolCalls}** | **${totals.totalToolCallsIncludingLoggedNested}** | **${totals.totalToolErrorsIncludingLoggedNested}** | **${totals.compassCallsIncludingLoggedNested}** | **${totals.compassErrorsIncludingLoggedNested}** | **${totals.compactions}** | **${totals.usage.totalTokens.toLocaleString("en-US")}** | — | — | — |`,
+    `| **TOTAL** | **${totals.records}** | **${totals.assistantRequests}** | **${totals.assistantRequestErrors}** | **${Math.round(totals.requestErrorDurationMs / 1000)}s** | **${totals.topLevelToolCalls}** | **${totals.nestedToolCalls}** | **${totals.totalToolCallsIncludingLoggedNested}** | **${totals.totalToolErrorsIncludingLoggedNested}** | **${totals.compassCallsIncludingLoggedNested}** | **${totals.compassErrorsIncludingLoggedNested}** | **${totals.rejectedBoundaries}** | — | **${totals.compactions}** | **${totals.projectionCheckpoints}** | **${totals.usage.totalTokens.toLocaleString("en-US")}** | — | — | — |`,
     "",
     "## Recorded model usage",
     "",
@@ -308,6 +318,7 @@ export function formatReport(summaries) {
     "",
     "- Model-request errors are counted separately from toolResult errors. A failed assistant request may consume substantial wall time without producing any tool call; durationMs is the logged request duration, not necessarily pure provider processing time.",
     "- A tool error is not automatically a Compass defect; classify target-project, environment, model/schema, transport, and Compass state errors separately.",
+    "- Compass checkpoints change the native view without summarization. Boundary rejects are not additional tool calls; open frames are the last recorded stack depth.",
     "- Token totals are summed exactly as logged by the provider. Cache reads count toward reported total tokens but have different billing treatment by provider/model.",
     "- Only nested calls present in `nestedCalls.calls` or the result's recorded `details.calls` are counted. Static Code Mode expressions are not treated as executed calls.",
     "- Compare the same Goal class, starting repository state, Pi/model/provider, and acceptance standard before attributing savings to Compass.",

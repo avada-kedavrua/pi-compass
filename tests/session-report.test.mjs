@@ -13,18 +13,24 @@ test("session report distinguishes top-level calls, logged nested calls, errors,
   const records = [
     { type: "session", id: "sample-session", timestamp: "2026-10-26T00:00:00.000Z" },
     { type: "custom", customType: "pi-compass-v2.goalrun", data: goalState, timestamp: "2026-10-26T00:00:00.500Z" },
+    { type: "compaction", fromHook: false, usage: { totalTokens: 10 } },
+    { type: "compaction", fromHook: true, details: { compassOperation: "frame" } },
+    { type: "custom", customType: "pi-compass-v2.context", data: { frames: [{ id: "frame" }] } },
+    { type: "custom_message", customType: "pi-compass-v2.context-message", details: { contextError: true } },
     { type: "message", timestamp: "2026-10-26T00:00:01.000Z", message: { role: "assistant", usage: { input: 100, output: 20, cacheRead: 30, cacheWrite: 0, reasoning: 5, totalTokens: 150, cost: { total: 0.01 } }, content: [{ type: "toolCall", name: "codemode" }, { type: "toolCall", name: "compass_state" }, { type: "toolCall", name: "compass_context", arguments: { operation: { action: "pin", expectedRevision: 0, ids: ["source"] } } }] } },
     { type: "message", timestamp: "2026-10-26T00:00:02.000Z", message: { role: "toolResult", toolName: "codemode", content: [{ type: "text", text: "ok" }] }, nestedCalls: { calls: [{ id: "call/1", name: "compass_plan", status: "ok" }, { id: "call/2", name: "compass_context", status: "ok", arguments: { action: "search" } }, { id: "call/3", name: "compass_context_search", status: "ok", arguments: { query: "evidence" } }] } },
     { type: "message", timestamp: "2026-10-26T00:00:03.000Z", message: { role: "toolResult", toolName: "compass_state", details: { unchanged: true }, content: [{ type: "text", text: "unchanged" }] } },
     { type: "message", timestamp: "2026-10-26T00:00:04.000Z", message: { role: "toolResult", toolName: "bash", isError: true, content: [{ type: "text", text: "exit 1" }] } },
     { type: "message", timestamp: 1793028435898, message: { role: "assistant", provider: "cliproxyapi", model: "gpt-test", stopReason: "error", errorMessage: "response headers timed out", durationMs: 300000, diagnostics: [{ type: "provider_transport_failure", details: { phase: "before_message_stream_start", requestBytes: 1000000 } }], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } }, content: [] } },
   ];
-  fs.writeFileSync(file, records.map((item) => JSON.stringify(item)).join("\n") + "\n");
+  fs.writeFileSync(file, `${records.map((item) => JSON.stringify(item)).join("\n")}\n`);
   const summary = await analyzeSession(file);
-  assert.equal(summary.records, 7);
+  assert.equal(summary.records, 11);
+  assert.equal(summary.compactions, 1);
+  assert.equal(summary.projectionCheckpoints, 1);
   assert.equal(summary.goalStateRecords, 1);
   assert.equal(summary.goalStateBytes, Buffer.byteLength(JSON.stringify(goalState)));
-  assert.deepEqual(summary.context, { callsByAction: { pin: 1, search: 2 }, queued: 0, messagesByAction: {}, rejectedBoundaries: 0 });
+  assert.deepEqual(summary.context, { callsByAction: { pin: 1, search: 2 }, proposed: 0, messagesByAction: {}, rejectedBoundaries: 1, openFrames: 1 });
   assert.equal(summary.finalState.outcome.status, "incomplete", "a Goal with unverified criteria is incomplete, not unassessed");
   assert.equal(summary.assistantRequests, 2);
   assert.equal(summary.assistantRequestErrors, 1);
@@ -43,7 +49,9 @@ test("session report distinguishes top-level calls, logged nested calls, errors,
   assert.equal(summary.unchangedStateReads, 1);
   assert.equal(summary.usage.totalTokens, 150);
   assert.equal(summary.usage.cost, 0.01);
-  assert.match(formatReport([summary]), /Total logged calls/);
+  const report = formatReport([summary]);
+  assert.match(report, /Total logged calls/);
+  assert.match(report, /Boundary rejects | Open frames | Native compactions | Compass checkpoints/);
   assert.match(formatReport([summary]), /Final Goal outcome/);
   assert.match(formatReport([summary]), /Model request errors/);
   assert.match(formatReport([summary]), /response headers timed out/);

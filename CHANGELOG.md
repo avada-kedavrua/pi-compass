@@ -2,6 +2,8 @@
 
 ## 0.10.0 — seven-tool candidate
 
+- Resolve Release Assistant context detours: distinguish pending from applied, require explicit frame nesting, expose removable working groups without their bodies, and report actionable artifact path errors. Reuse an already blank frame checkpoint; session reports distinguish projection checkpoints from native compaction.
+
 - Fix AiClusterHub field-use detours: scope frame input and approval echoes, report native questionnaire availability before offering a prompt, reject mixed context mutations early, and let nodes return inconclusive evidence without unlocking dependents. Plan reads are compact; inspect one task by ID for qualified evidence.
 
 - Fix macOS field-use detours: surface the blocked approval before another tab, give the exact recovery action, and probe the guard Worker in `/compass-preflight`. Keep native ordinary tool telemetry out of GoalRun; preserve actual advisory DAG drift.

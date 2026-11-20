@@ -139,7 +139,10 @@ function summaryView(state, branch, context, cursor) {
   const input = visibleHumanInput(state, branch, frame);
   if (input) result.input = input;
   else delete result.input;
-  if (frame) result.returnMode = frame.node ? "node-outcome" : "ordinary";
+  if (frame) {
+    result.depth = context.frames.length;
+    result.returnMode = frame.node ? "node-outcome" : "ordinary";
+  }
   else result.frame = "main";
   return result;
 }

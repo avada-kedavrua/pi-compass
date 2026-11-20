@@ -55,10 +55,10 @@ test("a child can mask an inherited pin without changing its main-frame value or
   const manager = host();
   const pinnedId = user(manager, "SCOPED_PARENT_PIN");
   applyOperation(manager, { action: "pin", ids: [pinnedId] });
-  applyOperation(manager, { action: "call", task: "Child work" });
+  const { state: child } = applyOperation(manager, { action: "call", task: "Child work" });
   assert.match(JSON.stringify(pinnedContextOverlay(manager.getBranch(), restoreContextState(manager.getBranch()), [])), /SCOPED_PARENT_PIN/);
   applyOperation(manager, { action: "unpin", ids: [pinnedId] });
-  applyOperation(manager, { action: "call", task: "Nested child work" });
+  applyOperation(manager, { action: "call", task: "Nested child work", parentFrame: child.frames[0].id });
   assert.doesNotMatch(JSON.stringify(pinnedContextOverlay(manager.getBranch(), restoreContextState(manager.getBranch()), [])), /SCOPED_PARENT_PIN/);
   applyOperation(manager, { action: "return" });
   applyOperation(manager, { action: "return" });
@@ -415,9 +415,15 @@ test("return restores an existing parent summary, not a generic frame note", () 
   const manager = host();
   const tail = user(manager, "recent parent tail");
   manager.appendCompaction("PARENT SUMMARY contains a material caveat", tail, 0);
-  applyOperation(manager, { action: "call", task: "child procedure" });
+  const outer = applyOperation(manager, { action: "call", task: "child procedure" });
+  assert.equal(outer.planned.entries.filter((entry) => entry.type === "compaction").length, 1);
+  const nested = applyOperation(manager, { action: "call", task: "distinct nested work", parentFrame: outer.state.frames[0].id });
+  assert.equal(nested.planned.entries.some((entry) => entry.type === "compaction"), false, "an already hidden summary needs no second checkpoint");
+  assert.doesNotMatch(modelText(manager), /PARENT SUMMARY contains a material caveat/);
+  assert.equal(applyOperation(manager, { action: "return" }).planned.entries.some((entry) => entry.type === "compaction"), false);
   applyOperation(manager, { action: "return" });
   assert.match(modelText(manager), /PARENT SUMMARY contains a material caveat/);
+  assertPaired(manager);
 });
 
 test("native child compaction cannot resurrect released child process entries", () => {
@@ -436,8 +442,8 @@ test("native child compaction cannot resurrect released child process entries", 
 test("private writes survive the local abort but do not escape compaction and return", () => {
   const manager = host();
   const input = value(manager, "original value");
-  applyOperation(manager, { action: "call", task: "outer", capture: [capture(manager, input)] });
-  applyOperation(manager, { action: "call", task: "inner", capture: [{ ...capture(manager, input), mode: "copy" }] });
+  const { state: outer } = applyOperation(manager, { action: "call", task: "outer", capture: [capture(manager, input)] });
+  applyOperation(manager, { action: "call", task: "inner", parentFrame: outer.frames[0].id, capture: [{ ...capture(manager, input), mode: "copy" }] });
   const written = applyOperation(manager, { action: "replace", ids: [input], version: sourceVersion(manager, input), content: "updated local value" }, { outcome: "aborted" });
   assert.match(modelText(manager), /updated local value/);
   assert.equal(written.planned.continue, false);
@@ -454,8 +460,8 @@ test("private writes survive the local abort but do not escape compaction and re
 test("frame identities use persisted source entries, not session-global provider call IDs", () => {
   const manager = host();
   user(manager, "parent");
-  applyOperation(manager, { action: "call", task: "outer" }, { callId: "provider-reused-id" });
-  applyOperation(manager, { action: "call", task: "inner" }, { callId: "provider-reused-id" });
+  const { state: outer } = applyOperation(manager, { action: "call", task: "outer" }, { callId: "provider-reused-id" });
+  applyOperation(manager, { action: "call", task: "inner", parentFrame: outer.frames[0].id }, { callId: "provider-reused-id" });
   const frames = restoreContextState(manager.getBranch()).frames;
   assert.equal(new Set(frames.map((frame) => frame.id)).size, 2);
   for (const frame of frames) assert.equal(frame.id, frame.boundaryId);
@@ -527,9 +533,9 @@ test("assistant tool-call replacements and Human edits are rejected without muta
 test("branch navigation restores branch-local frames, not a higher-revision sibling", () => {
   const manager = host();
   const root = user(manager, "root");
-  applyOperation(manager, { action: "call", task: "branch A" });
+  const { state: outer } = applyOperation(manager, { action: "call", task: "branch A" });
   const branchA = manager.getLeafId();
-  applyOperation(manager, { action: "call", task: "nested A" });
+  applyOperation(manager, { action: "call", task: "nested A", parentFrame: outer.frames[0].id });
   manager.branch(root);
   assert.deepEqual(restoreContextState(manager.getBranch()), emptyContextState());
   applyOperation(manager, { action: "call", task: "branch B" });
@@ -623,9 +629,9 @@ test("native cancellation uses exact arm identity and transfer releases a frame 
   appendDrafts(manager, armed.entries);
   const staleCancel = planWatchBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: { toolResults: [{ toolName: "unwatch", details: { cancelledIds: ["w1"], cancelledInstanceIds: ["arm-b"] }, content: [] }] } });
   assert.equal(staleCancel, null, "a cancellation for another native arm must not release the live watch");
-  const transferBoundary = queueOperation(manager, { action: "transfer", watchIds: ["w1"], watchScope: "root" });
-  const transferred = planContextBoundary({ state: restoreContextState(manager.getBranch()), branch: manager.getBranch(), boundary: transferBoundary });
-  appendDrafts(manager, [...transferBoundary.entries, ...transferred.entries]);
+  const { planned: transferred } = applyOperation(manager, { action: "transfer", watchIds: ["w1"], watchScope: "root" });
+  const receipts = transferred.entries.filter((entry) => entry.customType === CONTEXT_MESSAGE_TYPE);
+  assert.deepEqual(receipts.map(({ content }) => JSON.parse(content)), [{ resultStatus: "applied", watches: ["w1"], owner: "main" }]);
   assert.equal(restoreContextState(manager.getBranch()).watches.w1.owner, "root");
   applyOperation(manager, { action: "return" });
   assert.equal(restoreContextState(manager.getBranch()).frames.length, 0);

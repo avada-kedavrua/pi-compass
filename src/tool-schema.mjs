@@ -29,10 +29,11 @@ export function contextSearchSchema() {
   return object({
     query: string(400, { description: "Literal keywords; any match by default. Omit when recovering known refs." }),
     refs: array(ref, 64),
+    path: string(500, { minLength: 1, description: "Exact recorded path of a native read. Can combine with a query." }),
     sourceScope: { ...choice("active", "parent", "history", "all"), description: "Default active for query; all available scopes for exact refs." },
     limit: { type: "integer", minimum: 1, maximum: 16 },
     match: choice("any", "all"),
-    view: { ...choice("snippets", "handles", "details"), description: "Default snippets: short previews. handles omits text; details adds source qualifications, not a full-body read." },
+    view: { ...choice("snippets", "handles", "details", "cleanup"), description: "cleanup lists largest droppable groups in active context; use without query/path/refs. Other views return previews, handles, or qualifications." },
   }, []);
 }
 
@@ -43,7 +44,7 @@ export function contextToolSchema() {
     operation("unpin", { sources }, ["sources"]),
     operation("remember", { text: string(4000, { minLength: 1, description: "Your compact working memory, not a new tool observation or Human instruction." }), sources: array(ref, 32), caveats, lifetime }, ["text"]),
 
-    operation("call", { task: string(4000, { minLength: 1, description: "Ordinary attention only. DAG frames open automatically." }), capture: { ...array(object({ ref, mode: { ...choice("ref", "copy"), description: "ref borrows read-only; copy is private and editable using its returned ref." } }, ["ref", "mode"]), 64), description: "Default none. Applied receipt sources correspond to this order; copies have new refs." } }, ["task"]),
+    operation("call", { task: string(4000, { minLength: 1, description: "Ordinary attention only. DAG frames open automatically." }), parentFrame: string(128, { minLength: 1, description: "Only for distinct nested work: copy the active frame ID. Omit from main." }), capture: { ...array(object({ ref, mode: { ...choice("ref", "copy"), description: "ref borrows read-only; copy is private and editable using its returned ref." } }, ["ref", "mode"]), 64), description: "Default none. Applied receipt sources correspond to this order; copies have new refs." } }, ["task"]),
     { ...operation("return", {
       outcome: { ...object({ status: choice("done", "inconclusive", "blocked", "throw"), evidence: string(1600, { minLength: 1, description: "At most 1600 characters: conclusion and exact citations. Export selected refs for longer evidence." }), reason: string(600, { minLength: 1 }), sideEffects: string(800, { minLength: 1 }), caveats: array(string(400, { minLength: 1 }), 8) }, ["status"]), description: "DAG nodes only. done attests acceptance; inconclusive finishes work without attesting acceptance. Both need evidence. blocked needs a reason; throw needs reason and evidence. Send outcome without result, in its own tool call." },
       result: string(8000, { description: "Ordinary frames only. Do not combine with outcome." }), exportSources: { ...array(ref, 64), description: "Only selected refs export; retained values keep their lifetime in the parent. DAG nodes may export up to eight." },
@@ -52,8 +53,8 @@ export function contextToolSchema() {
     operation("replace", { source: ref, text: string(8000, { minLength: 1, description: "Agent-derived replacement. Human originals and executed calls require a private copy. Edit retained memory directly; unpin originals before editing eligible working values. Use the applied receipt's updated ref for subsequent operations." }), caveats }, ["source", "text"]),
     operation("drop", { sources }, ["sources"]),
     operation("mark", { source: ref, handling: choice("active", "handled", "retired"), reason: string(600, { minLength: 1 }) }, ["source", "handling", "reason"]),
-    operation("move", { sources, range, verifiedAgainst: ref }, ["sources"]),
-    operation("spill", { source: ref, path: string(500, { minLength: 1, description: "New project-relative artifact, no overwrite. Use the applied updated ref for verified recovery." }), purpose: string(1000, { minLength: 1 }) }, ["source", "path", "purpose"]),
+    operation("move", { sources, range: { ...range, description: "Only Agent-authored text or an exact complete native read. For any recoverable excerpt use load instead." }, verifiedAgainst: ref }, ["sources"]),
+    operation("spill", { source: ref, path: string(500, { minLength: 1, pattern: "[.]json$", description: "New project-relative .json artifact under an existing directory; no overwrite. Use the applied updated ref to recover." }), purpose: string(1000, { minLength: 1 }) }, ["source", "path", "purpose"]),
     operation("transfer", { watchIds: array(string(128, { minLength: 1 }), 8, 1), target: choice("parent", "root") }, ["watchIds", "target"]),
   ];
   return actions(operations);
@@ -64,7 +65,7 @@ const reason = string(600, { minLength: 1 });
 const criterion = string(24, { minLength: 1 });
 const task = object({
   id: taskId, title: string(200, { minLength: 1 }), dependsOn: array(taskId, 24), acceptance: string(400, { minLength: 1, description: "Observable acceptance; an investigation must be able to disprove its working hypothesis." }),
-  executor: { ...choice("parent", "code", "subagent"), description: "Default parent: automatic serial frames, finish with compass_context return(outcome). code: deterministic start/done. subagent: automatic read-only dispatch." },
+  executor: { ...choice("parent", "code", "subagent"), description: "Default parent: automatic serial frames, finish with compass_context return(outcome). code: deterministic start/done. subagent: separate read-only session; no Compass context tools." },
   agent: choice("scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"),
   output: string(400), writeScope: string(200), dispatchReason: string(400, { minLength: 12, description: "Required for subagent: why another semantic context is worth its cost." }),
   fromTasks: { ...array(taskId, 8), description: "Parent-node artifact producers only. This also creates dependencies; use dependsOn for ordering without exports." }, inputRefs: { ...array(ref, 8), description: "Parent nodes only: exact refs of existing frame exports." },

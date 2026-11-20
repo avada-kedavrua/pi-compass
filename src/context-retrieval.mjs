@@ -140,11 +140,12 @@ export function selectSourceRange(content, range) {
   const text = lines.slice(startLine - 1, endLine).join("\n");
   return { content: typeof content === "string" ? text : [{ ...block, text }], range: { part, startLine, endLine } };
 }
-export function searchSources(index, state, { query = "", ids = [], scope = "active", limit = 8, match = "any" } = {}) {
+export function searchSources(index, state, { query = "", path, ids = [], scope = "active", limit = 8, match = "any" } = {}) {
   scopes(scope);
   if (typeof query !== "string" || query.length > 400 || !Number.isInteger(limit) || limit < 1 || limit > 16) fail("Search requires query <=400 characters and limit 1..16.");
   if (!Array.isArray(ids) || ids.length > 256 || ids.some((id) => typeof id !== "string")) fail("Invalid source IDs.");
   if (!["any", "all"].includes(match)) fail("match must be any or all.");
+  if (path !== undefined && (typeof path !== "string" || !path.trim() || path.length > 500)) fail("path must be a recorded native read path.");
   const terms = [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
   const hits = [];
   let scanned = 0;
@@ -153,6 +154,7 @@ export function searchSources(index, state, { query = "", ids = [], scope = "act
   for (const candidate of uniqueCandidates(index, state, scope, new Set(ids))) {
     if (scanned === MAX_SCAN || (!terms.length && hits.length === limit)) { truncated = true; break; }
     scanned++;
+    if (path !== undefined && candidate.readStatus?.path !== path) continue;
     const parts = typeof candidate.content === "string" ? [{ type: "text", text: candidate.content }] : candidate.content;
     let part = -1;
     let matchedTerms = [];

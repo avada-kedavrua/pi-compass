@@ -263,7 +263,10 @@ function operationFromBoundary(boundary, toolName) {
 }
 
 function planCall({ next, index, boundary, operation, turnIds }) {
-  if (next.frames.length >= MAX_DEPTH) fail("Context frame depth limit (16) reached.");
+  const parent = next.frames.at(-1);
+  if (parent && operation.parentFrame !== parent.id) fail(`Continue in the active frame ${parent.id}; do not reopen it. For distinct nested work, set parentFrame to ${parent.id}.`);
+  if (!parent && operation.parentFrame !== undefined) fail("parentFrame names a frame that is no longer active; main is current.");
+  if (next.frames.length >= MAX_DEPTH) fail("Context frame depth limit (16) reached; return before opening another frame.");
   ensureText(operation.task, "Frame task", 4_000);
   const captures = operation.capture ?? [];
   ensureIds(captures.map((item) => item.id), "capture IDs");
@@ -274,7 +277,7 @@ function planCall({ next, index, boundary, operation, turnIds }) {
     if (!["ref", "copy"].includes(item.mode)) fail("Capture mode must be ref or copy.");
     source(index, item.id);
     const value = currentValue(next, index, item.id, { key: item.binding, allowHidden: Boolean(operation.node) });
-    if (value.version !== item.version) fail(`Stale capture ${item.id}.`);
+    if (value.version !== item.version) fail("Capture ref is stale. Reuse the updated ref from the last applied receipt or search the active context for a fresh ref.");
     adoptValue(next, value);
     if (item.mode === "ref") {
       refs.push({ id: value.id, key: value.key, version: value.version });
@@ -290,7 +293,7 @@ function planCall({ next, index, boundary, operation, turnIds }) {
   }
   const saved = snapshot(next, index, turnIds);
   const summary = latestSummary(boundary);
-  const frame = { id: operation.id, parent: next.frames.at(-1)?.id ?? "root", boundaryId: boundary.messageEntryId, saved, refs, copies: copies.map(({ materialize: _materialize, key: _key, ...copy }) => copy), summaryId: summary?.id ?? null };
+  const frame = { id: operation.id, parent: parent?.id ?? "root", boundaryId: boundary.messageEntryId, saved, refs, copies: copies.map(({ materialize: _materialize, key: _key, ...copy }) => copy), summaryId: summary?.id ?? null };
   if (operation.node) frame.node = operation.node;
   for (const pin of visiblePins(next)) {
     const view = index.valueViews.get(pin.key) ?? index.active.get(pin.id);
@@ -299,7 +302,8 @@ function planCall({ next, index, boundary, operation, turnIds }) {
   const kept = exchangeClosure(index, inputs);
   for (const id of kept) visible(index, id);
   next.frames.push(frame);
-  const entries = summary ? [nativeCheckpoint("", saved[0]?.id ?? null, operation.id)] : [];
+  // A blank checkpoint already hides the summary and preserves the native cut.
+  const entries = summary?.summary ? [nativeCheckpoint("", saved[0]?.id ?? null, operation.id)] : [];
   for (const [id, item] of index.active) {
     const reusable = operation.node && item.sourceEntry.customType === VALUE_MESSAGE_TYPE && item.sourceEntry.details?.action === "export";
     if (!reusable && item.messages.length && (turnIds.has(id) || !kept.has(id))) entries.push(nativeEdit(id, null));
@@ -308,15 +312,20 @@ function planCall({ next, index, boundary, operation, turnIds }) {
     const head = next.values[copy.key];
     entries.push(valueMessage({ id: copy.id, key: copy.key, head, content: valueContent(index, head, copy.id) }));
   }
-  entries.push(frameReceipt(frame, operation, next.revision + 1));
+  entries.push(frameReceipt(frame, operation, next));
   return entries;
 }
-function frameReceipt(frame, operation, revision) {
+function contextReceipt(data, details) {
+  return nativeMessage(JSON.stringify({ resultStatus: "applied", ...data }), details);
+}
+function frameReceipt(frame, operation, state) {
   const refs = (operation.capture ?? []).map((item) => contextRef({ binding: item.mode === "copy" ? `${frame.id}/${item.id}` : frame.refs.find((ref) => ref.id === item.id).key, version: item.version }));
   const next = frame.node
     ? 'Submit the node outcome in a standalone compass_context call: {action:"return",outcome:{status:"done",evidence:"<observed result and citations, max 1600 chars>"}}. Use inconclusive if acceptance is unproven. Do not add result.'
-    : "Finish with compass_context return before reporting final results.";
-  return nativeMessage(JSON.stringify({ resultStatus: "applied", frame: frame.id, task: operation.task, next, ...(frame.node ? { taskId: frame.node.taskId } : {}), ...(refs.length ? { sources: refs } : {}) }), { frame: frame.id, action: "call", callId: operation.callId, revision });
+    : "Frame is open. Do the task here; do not call it again. Return before reporting the final result.";
+  return contextReceipt({ frame: frame.id, depth: state.frames.length, task: operation.task, next,
+    ...(frame.node ? { taskId: frame.node.taskId } : {}), ...(refs.length ? { sources: refs } : {}) },
+  { frame: frame.id, action: "call", callId: operation.callId, revision: state.revision + 1 });
 }
 function external(entry) {
   const message = messageOf(entry);
@@ -382,10 +391,6 @@ function restoreParent({ frame, next, index, boundary, operation, owned }) {
       const copy = owner?.copies.find((item) => item.id === saved.logicalId);
       if (copy) copy.viewKey = saved.binding;
     }
-  }
-  if (operation.result !== undefined && operation.result !== "") {
-    ensureText(operation.result, "Return value");
-    entries.push(nativeMessage(`Return from ${frame.id}:\n${operation.result}`, { frame: frame.id, action: "result" }));
   }
   return entries;
 }
@@ -497,19 +502,12 @@ function planEdits({ next, index, operation, boundary }) {
   }
   const selected = operation.ids.map((id) => {
     source(index, id);
-    const value = selectedValue(next, index, operation, id);
-    assertWritableValue(next, value, true);
-    return value;
+    return selectedValue(next, index, operation, id);
   });
-  const byNativeId = new Map(selected.map((value) => [value.nativeId, value]));
   const versions = new Map((operation.versions ?? []).map((item) => [item.id, item.version]));
-  const ids = exchangeClosure(index, selected.map((value) => value.nativeId));
   const entries = [];
-  for (const nativeId of ids) {
-    const id = logicalSource(index, nativeId);
-    const value = byNativeId.get(nativeId) ?? currentValue(next, index, id);
-    assertWritableValue(next, value, true);
-    if (value.head.readOnly && (value.head.kind === "human" || messageOf(source(index, id)).role === "user")) fail("Human messages cannot be dropped.");
+  for (const value of dropGroup(next, index, selected)) {
+    const { id, nativeId } = value;
     next.pins = next.pins.filter((pin) => pin.key !== value.key);
     ensureVersion(versions.get(id));
     if (value.version !== versions.get(id)) fail(`Source ${id} changed since selection.`);
@@ -522,6 +520,57 @@ function planEdits({ next, index, operation, boundary }) {
   }
   return entries;
 }
+function dropGroup(state, index, selected) {
+  const views = new Map(selected.map((value) => [value.nativeId, value]));
+  return [...exchangeClosure(index, [...views.keys()])].map((nativeId) => {
+    const id = logicalSource(index, nativeId);
+    const value = views.get(nativeId) ?? currentValue(state, index, id);
+    if (value.nativeId !== nativeId) fail("A tool exchange companion is no longer in its original view.");
+    assertWritableValue(state, value, true);
+    if (value.head.readOnly && (value.head.kind === "human" || messageOf(source(index, id)).role === "user")) fail("Human messages cannot be dropped.");
+    return value;
+  });
+}
+
+export function contextCleanup(branch, boundary, state, limit) {
+  const index = sourceIndex(branch, boundary);
+  const frame = state.frames.at(-1)?.id ?? "root";
+  const pinned = new Set(state.pins.map(({ key }) => key));
+  const groups = new Map();
+  for (const [nativeId, { sourceEntry, messages }] of index.active) {
+    if (!messages.length || external(sourceEntry) || sourceEntry.customType === CONTEXT_MESSAGE_TYPE) continue;
+    const message = messages[0];
+    const group = index.groups.get(nativeId);
+    if (message.role === "user" || (group && message.role !== "toolResult")) continue;
+    const key = group?.ids[0] ?? nativeId;
+    const bytes = Buffer.byteLength(JSON.stringify(message.content));
+    const previous = groups.get(key);
+    if (!previous) groups.set(key, { nativeId, message, bytes, largestResult: bytes });
+    else {
+      previous.bytes += bytes;
+      if (bytes > previous.largestResult) Object.assign(previous, { nativeId, message, largestResult: bytes });
+    }
+  }
+  const candidates = [];
+  let incomplete = false;
+  for (const { nativeId, message, bytes } of [...groups.values()].sort((a, b) => b.bytes - a.bytes)) {
+    const id = logicalSource(index, nativeId);
+    const key = bindingKey(state, index, id);
+    if (!key.startsWith(`${frame}/`) || pinned.has(key)) continue;
+    let value;
+    try {
+      value = currentValue(state, index, id, { key });
+      if (value.nativeId !== nativeId) continue;
+      dropGroup(state, index, [value]);
+    } catch { continue; } // A protected or incomplete exchange is not a cleanup suggestion.
+    if (candidates.length === limit) { incomplete = true; break; }
+    const path = value.head.readStatus?.path;
+    candidates.push({ ref: contextRef({ id, binding: key, version: value.version }), bytes, type: message.toolName ?? message.role, ...(path ? { path } : {}) });
+  }
+  return { frame: frame === "root" ? "main" : frame, candidates, ...(incomplete ? { incomplete } : {}),
+    next: "Drop only refs no longer needed. A tool result drops its complete call/result group from future context; raw history is unchanged." };
+}
+
 function sourceDataDraft(state, operation, selected, action, number = 0, owner = state.frames.at(-1)?.id ?? "root") {
   const content = dataBlocks(selected.content);
   if (!content.length) fail("Selection has no displayable source data; select a text or image part.");
@@ -570,7 +619,7 @@ export async function prepareContextOperation({ state, branch, boundary, operati
     if (!(["assistant", "toolResult"].includes(selected.role))) fail("Selected-range movement is limited to Agent-authored text or a complete read-only tool result; Human messages are immutable.");
     if (selected.role === "toolResult") {
       const observation = readOnlyObservation(index, selected.id);
-      if (!observation || observation.payloadVersion !== selected.version) fail("Only successful, untruncated native read results at the exact observed payload version can be range-relocated.");
+      if (!observation || observation.payloadVersion !== selected.version) fail("Only successful, untruncated native read results at the exact observed payload version can be range-relocated. Use load with the range to make a data copy instead.");
       exchangeClosure(index, [selected.id]);
     }
     const cut = cutTextRange(selected.content, operation.range);
@@ -797,10 +846,13 @@ export function planContextTransition({ state: input, branch, boundary, operatio
   args.moveComparison = operation.action === "move" ? verifyMoveComparison(args.index, next, operation) : null;
   let entries;
   let nextNode;
+  let closedFrame;
   switch (operation.action) {
     case "call": entries = planCall(args); break;
     case "return": {
+      if (operation.result) ensureText(operation.result, "Return value");
       const returned = planReturn(args);
+      closedFrame = returned.frame.id;
       const follow = successor?.(next, returned.exports);
       if (follow) {
         // Keep the original main snapshot hidden. The new boundary and all
@@ -809,13 +861,13 @@ export function planContextTransition({ state: input, branch, boundary, operatio
           summaryId: returned.frame.summaryId, refs: follow.capture.map(({ id, binding, version }) => ({ id, key: binding, version })), copies: [], node: follow.node };
         next.frames.push(frame);
         nextNode = frame.node;
-        entries = [...returned.cleanup, ...returned.exports, frameReceipt(frame, { ...follow, callId: operation.callId }, next.revision + 1)];
+        entries = [...returned.cleanup, ...returned.exports, frameReceipt(frame, { ...follow, callId: operation.callId }, next)];
       } else entries = [...returned.restore(), ...returned.cleanup, ...returned.exports];
       break;
     }
     case "transfer": {
-      const transferred = planWatchTransfer(args);
-      entries = [nativeMessage(`Native watch ownership transferred; watches: ${transferred.join(", ")}; scope: ${operation.watchScope}.`, { action: "transfer", watches: transferred, scope: operation.watchScope })];
+      planWatchTransfer(args);
+      entries = [];
       break;
     }
     case "remember": entries = planRemember(args); break;
@@ -830,28 +882,43 @@ export function planContextTransition({ state: input, branch, boundary, operatio
   next.revision += 1;
   const references = entries.filter((entry) => entry.type === "custom_message" && entry.customType === VALUE_MESSAGE_TYPE && entry.details.derived).map((entry) => ({ id: entry.details.sourceId, binding: entry.details.key, version: entry.details.version }));
   if (operation.node) next.nodeEffect = { node: operation.node, revision: next.revision, outcome: operation.outcome ?? null, artifacts: references.map(contextRef), ...(nextNode ? { nextNode } : {}) };
-  if (operation.action !== "call") {
-    const movedEntry = operation.action === "move" ? args.index.byId.get(operation.ids?.[0]) : null;
-    const movedRole = movedEntry ? messageOf(movedEntry)?.role : null;
-    const comparison = args.moveComparison;
-    const changedKey = ["replace", "spill"].includes(operation.action) || (operation.action === "move" && operation.range) ? (operation.selections?.[0]?.binding ?? operation.binding ?? bindingKey(next, args.index, operation.ids[0])) : null;
-    const updated = changedKey && next.values[changedKey] ? contextRef({ binding: changedKey, version: next.values[changedKey].version }) : null;
-    const comparisonText = comparison?.kind === "exact"
-      ? ` Verified exact repeat of ${comparison.firstId} and ${comparison.secondId} at ${comparison.path}; the earlier payload was relocated and the covered companion became a qualified pointer.`
-      : comparison?.kind === "subset"
-        ? ` Verified subset of ${comparison.path} on file revision ${comparison.fileRevision}; the full prior superset was relocated, the covered subset became a qualified pointer, and content outside lines ${comparison.range.startLine}-${comparison.range.endLine} remains unrefreshed.`
-        : "";
-    const change = operation.action !== "move" ? "" : operation.range
-      ? movedRole === "toolResult"
-        ? " Selected verified read lines were appended as qualified data; the original call/result and larger source remain unchanged."
-        : " Selected Agent-authored lines were removed from the future view and appended as qualified data; the raw message remains unchanged."
-      : movedRole === "toolResult"
-        ? " The complete verified read payload was relocated to the append end; its original call/result pair remains present with a projection pointer."
-        : " The selected working value was moved to the append end.";
-    const thrown = operation.outcome?.status === "throw" ? { reason: operation.outcome.reason, evidence: operation.outcome.evidence, sideEffects: operation.outcome.sideEffects ?? "unknown" } : {};
-    if (!nextNode) entries.push(nativeMessage(JSON.stringify({ resultStatus: "applied", ...thrown, ...(operation.action === "return" ? { frame: next.frames.at(-1)?.id ?? "main", ...(operation.node ? { taskId: operation.node.taskId, outcome: operation.outcome.status } : {}) } : {}), ...(operation.action === "remember" && next.frames.length ? { next: "Frame still open. Return with the selected source refs to keep them." } : {}), ...(updated ? { updated } : {}), ...(references.length ? { sources: references.map(contextRef) } : {}), ...(change || comparisonText ? { note: `${change}${comparisonText}`.trim() } : {}) }), { action: operation.action, callId: operation.callId, revision: next.revision, references, ...(operation.action === "move" ? { sourceIds: [...(operation.ids ?? [])], range: operation.range ?? null, rawExchangePreserved: movedRole === "toolResult", rawSourcePreserved: movedRole !== "toolResult", ...(comparison ? { relocationComparison: comparison, coalescedSourceIds: [operation.verifiedAgainst.id] } : {}) } : {}) }));
-  }
+  if (operation.action !== "call" && !nextNode) entries.push(operationReceipt(args, references, closedFrame));
   return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: ["call", "return"].includes(operation.action) && boundary.outcome === "completed" };
+}
+
+function operationReceipt({ next, index, operation, moveComparison: comparison }, references, closedFrame) {
+  const { action, callId, outcome, result, artifact } = operation;
+  const data = {};
+  const details = { action, callId, revision: next.revision, references };
+  if (references.length) data.sources = references.map(contextRef);
+  if (artifact) data.artifact = artifact.path;
+  if (closedFrame) {
+    const frame = next.frames.at(-1);
+    Object.assign(data, { closedFrame, frame: frame?.id ?? "main", depth: next.frames.length });
+    if (frame) data.next = "Only this frame closed. Continue in its parent; return again before reporting the overall result.";
+    if (result) data.result = result;
+    if (operation.node) Object.assign(data, { taskId: operation.node.taskId, outcome: outcome.status });
+    if (outcome?.status === "throw") Object.assign(data, { reason: outcome.reason, evidence: outcome.evidence, sideEffects: outcome.sideEffects ?? "unknown" });
+  }
+  if (action === "transfer") Object.assign(data, { watches: operation.watchIds, owner: operation.watchScope === "root" ? "main" : operation.watchScope });
+  if (action === "replace" || action === "spill" || (action === "move" && operation.range)) {
+    const key = operation.selections?.[0]?.binding ?? operation.binding ?? bindingKey(next, index, operation.ids[0]);
+    if (next.values[key]) data.updated = contextRef({ binding: key, version: next.values[key].version });
+  }
+  if (action === "move") {
+    const role = messageOf(index.byId.get(operation.ids[0]))?.role;
+    const nativeRead = role === "toolResult";
+    if (operation.range) data.note = nativeRead ? "Selected read lines appended; the full original exchange is unchanged." : "Selected lines moved in the future view; raw history is unchanged.";
+    else data.note = nativeRead ? "The complete verified read payload was relocated; the original exchange remains paired with a pointer." : "Working value moved to the end.";
+    Object.assign(details, { sourceIds: operation.ids, range: operation.range ?? null, rawExchangePreserved: nativeRead, rawSourcePreserved: nativeRead });
+    if (comparison) {
+      data.note = comparison.kind === "subset"
+        ? `The full prior superset was relocated. Only lines ${comparison.range.startLine}–${comparison.range.endLine} of ${comparison.path} were verified at ${comparison.fileRevision}; the remainder is unrefreshed.`
+        : `Verified exact repeat at ${comparison.path}; the covered result is now a pointer.`;
+      Object.assign(details, { relocationComparison: comparison, coalescedSourceIds: [operation.verifiedAgainst.id] });
+    }
+  }
+  return contextReceipt(data, details);
 }
 
 function activeWatchScopes(state) {
@@ -917,7 +984,6 @@ function planWatchTransfer({ next, operation }) {
     if (watch.owner !== current) fail(`Native watch ${id} is owned by ${watch.owner}; only its owner may transfer it.`);
   }
   for (const id of ids) next.watches[id].owner = scope;
-  return ids;
 }
 export function planWatchBoundary({ state: input, boundary }) {
   const state = normalizeContextState(input);
@@ -1104,7 +1170,6 @@ export function planRetentionBoundary({ state: input, branch, boundary }) {
   if (!overlays.length) return null;
   const entries = overlays.map(({ role: _role, timestamp: _timestamp, ...message }) => ({ type: "custom_message", ...message }));
   next.revision += 1;
-  entries.push(nativeMessage(`Context retention applied; revision ${next.revision}. Sources: ${overlays.map((message) => message.details.sourceId).join(", ")}.`, { action: "retention", revision: next.revision }));
   const operation = { id: `${branch.at(-1)?.id ?? "root"}:retention` };
   return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: false };
 }

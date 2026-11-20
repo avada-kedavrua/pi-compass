@@ -18,7 +18,7 @@ test("the context schema accepts semantic intent and rejects internal plumbing",
     { action: "remember", text: "Qualified conclusion", sources: [ref] },
     { action: "load", source: ref, range: { startLine: 2, endLine: 5 } },
     { action: "move", sources: [ref], verifiedAgainst: ref },
-    { action: "spill", source: ref, path: "artifacts/source.txt", purpose: "Recover later without context cost" },
+    { action: "spill", source: ref, path: "artifacts/source.json", purpose: "Recover later without context cost" },
     { action: "transfer", watchIds: ["w1"], target: "root" },
   ]) assert.deepEqual(validate("compass_context", schema, operation), operation);
   for (const operation of [

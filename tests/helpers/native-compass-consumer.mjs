@@ -57,7 +57,7 @@ try {
     assert.equal(await runner.emitToolCall({ type: "tool_call", toolName: "compass_context", toolCallId: id, input }), undefined);
     const queued = await tools.get("compass_context").definition.execute(id, input, undefined, undefined, context);
     assert.equal(queued.isError, undefined, JSON.stringify(queued));
-    assert.deepEqual(JSON.parse(queued.content[0].text), { queued: true });
+    assert.match(queued.content[0].text, /not applied yet.*do not retry or poll/);
     const result = { role: "toolResult", toolCallId: id, toolName: "compass_context", ...queued, timestamp: Date.now() };
     const committed = await finishTurn(message, messageEntryId, result);
     const receipt = JSON.parse(committed.entries.find((entry) => entry.customType === "pi-compass-v2.context-message" && entry.details?.callId === id).content);

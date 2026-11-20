@@ -12,14 +12,12 @@ test("value binding follows immutable source identity, independently of provenan
   const selected = { binding: "root/source", version: contentVersion("payload") };
   const ref = contextRef(selected);
   assert.deepEqual(contextSelection(ref), { id: "source", ...selected });
-  for (const invalid of ["issue-settings-tabs", ref + "=", "S.YQ"]) assert.throws(() => contextSelection(invalid), /source ref/);
+  for (const invalid of ["issue-settings-tabs", `${ref}=`, "S.YQ"]) assert.throws(() => contextSelection(invalid), /source ref/);
   for (const field of ["content", "operation", "snapshot", "questionnaire"]) {
     const content = field === "snapshot" ? [{ type: "text", text: "payload" }] : "payload";
-    const entry = field === "operation"
-      ? { id: "write", type: "message", message: { role: "toolResult", toolName: "compass_context", details: { contextOperation: { action: "replace", ids: ["source"], content } } } }
-      : field === "snapshot"
-        ? { id: "snapshot", type: "custom_message", customType: "pi-compass-v2.value", details: { derived: true, sourceId: "source" }, content: [{ type: "text", text: "header" }, ...content] }
-        : { id: "source", type: "custom_message", customType: "test-value", content };
+    let entry = { id: "source", type: "custom_message", customType: "test-value", content };
+    if (field === "operation") entry = { id: "write", type: "message", message: { role: "toolResult", toolName: "compass_context", details: { contextOperation: { action: "replace", ids: ["source"], content } } } };
+    else if (field === "snapshot") entry = { id: "snapshot", type: "custom_message", customType: "pi-compass-v2.value", details: { derived: true, sourceId: "source" }, content: [{ type: "text", text: "header" }, ...content] };
     const index = { byId: new Map([[entry.id, entry]]) };
     const head = { entryId: entry.id, field, version: contentVersion(content), kind: "memory", readOnly: false, rendered: true, handling: "active", caveats: [], sources: ["independent-evidence"] };
     if (field !== "questionnaire") assert.deepEqual(valueContent(index, head, "source"), content);
@@ -30,8 +28,8 @@ test("value binding follows immutable source identity, independently of provenan
 test("an inner copy cannot write through an outer ref binding", () => {
   const manager = host();
   const id = value(manager, "original");
-  applyOperation(manager, { action: "call", task: "outer", capture: [capture(manager, id, "ref")] });
-  applyOperation(manager, { action: "call", task: "inner private", capture: [capture(manager, id, "copy")] });
+  const { state: outer } = applyOperation(manager, { action: "call", task: "outer", capture: [capture(manager, id, "ref")] });
+  applyOperation(manager, { action: "call", task: "inner private", parentFrame: outer.frames[0].id, capture: [capture(manager, id, "copy")] });
   applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "private mutation" });
   applyOperation(manager, { action: "return" });
   assert.match(modelText(manager), /original/);
@@ -46,8 +44,8 @@ test("an inner copy cannot write through an outer ref binding", () => {
 test("an inner ref cannot change its enclosing private copy", () => {
   const manager = host();
   const id = value(manager, "original");
-  applyOperation(manager, { action: "call", task: "outer private", capture: [capture(manager, id, "copy")] });
-  applyOperation(manager, { action: "call", task: "inner shared", capture: [capture(manager, id, "ref")] });
+  const { state: outer } = applyOperation(manager, { action: "call", task: "outer private", capture: [capture(manager, id, "copy")] });
+  applyOperation(manager, { action: "call", task: "inner shared", parentFrame: outer.frames[0].id, capture: [capture(manager, id, "ref")] });
   assert.throws(() => applyOperation(manager, { action: "replace", ids: [id], version: sourceVersion(manager, id), content: "private shared mutation" }), /read-only in this frame/);
   applyOperation(manager, { action: "return" });
   assert.equal(search(manager, id).snippet, "original");

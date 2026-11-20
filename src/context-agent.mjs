@@ -1,13 +1,19 @@
-import { sourceIndex, searchContext, retentionForGoal, visiblePins } from "./context-core.mjs";
+import { contextCleanup, sourceIndex, searchContext, retentionForGoal, visiblePins } from "./context-core.mjs";
 import { currentValue, contextRef, contextSelection } from "./context-values.mjs";
 import { resolveSource } from "./context-retrieval.mjs";
 
 export function agentSearch(branch, boundary, state, params = {}) {
   const { refs, view = "snippets", ...query } = params;
-  if (!["snippets", "handles", "details"].includes(view)) throw new Error("view must be snippets, handles or details. No context changed.");
+  if (view === "cleanup") {
+    const limit = query.limit ?? 8;
+    if (refs || Object.keys(query).some((key) => key !== "limit")) throw new Error("Cleanup lists active work; use only view and optional limit. No context changed.");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 16) throw new Error("limit must be 1..16. No context changed.");
+    return contextCleanup(branch, boundary, state, limit);
+  }
+  if (!["snippets", "handles", "details"].includes(view)) throw new Error("Unknown context search view. No context changed.");
   let result;
   if (refs) {
-    if (query.query) throw new Error("Use query to find sources or refs to recover exact selections, not both. No context changed.");
+    if (query.query || query.path) throw new Error("Use query/path to find sources or refs to recover exact selections, not both. No context changed.");
     const index = sourceIndex(branch, boundary);
     const limit = query.limit ?? 8;
     if (!Number.isInteger(limit) || limit < 1 || limit > 16) throw new Error("limit must be 1..16. No context changed.");
@@ -44,7 +50,8 @@ export function agentSearch(branch, boundary, state, params = {}) {
 export function retainedContext(branch, boundary, state, goalVersion, limit) {
   const refs = [...new Set(visiblePins(retentionForGoal(state, goalVersion)).map((pin) => contextRef({ binding: pin.key, version: state.values[pin.key].version })))];
   const result = agentSearch(branch, boundary, state, { refs, limit: Math.min(limit, 16) });
-  return { frame: result.frame, retained: result.hits, ...(result.incomplete ? { total: refs.length } : {}) };
+  return { frame: result.frame, retained: result.hits, ...(result.incomplete ? { total: refs.length } : {}),
+    next: "Retained values only. To find working context to remove, use compass_context_search(view=cleanup)." };
 }
 
 /** Translate intent once. Agent never transports binding/version/revision tuples. */
@@ -56,7 +63,7 @@ export function agentContextOperation(branch, boundary, state, input) {
   const operation = { action: input.action, expectedRevision: state.revision, selections, ids: selections.map((item) => item.id) };
   if (selections.length === 1) Object.assign(operation, { binding: selections[0].binding, version: selections[0].version });
   operation.versions = selections.map(({ id, version }) => ({ id, version }));
-  for (const name of ["task", "result", "range", "lifetime", "caveats", "handling", "reason", "path", "purpose", "watchIds"]) if (input[name] !== undefined) operation[name] = input[name];
+  for (const name of ["task", "parentFrame", "result", "range", "lifetime", "caveats", "handling", "reason", "path", "purpose", "watchIds"]) if (input[name] !== undefined) operation[name] = input[name];
   if (input.text !== undefined) operation.content = input.text;
   if (input.skill === true) operation.kind = "skill";
   if (input.capture) operation.capture = input.capture.map(({ ref, mode }) => ({ ...contextSelection(ref), mode }));
