@@ -44,7 +44,10 @@ export function contextToolSchema() {
     operation("remember", { text: string(4000, { minLength: 1, description: "Your compact working memory, not a new tool observation or Human instruction." }), sources: array(ref, 32), caveats, lifetime }, ["text"]),
 
     operation("call", { task: string(4000, { minLength: 1, description: "Ordinary attention only. DAG frames open automatically." }), capture: { ...array(object({ ref, mode: { ...choice("ref", "copy"), description: "ref borrows read-only; copy is private and editable using its returned ref." } }, ["ref", "mode"]), 64), description: "Default none. Applied receipt sources correspond to this order; copies have new refs." } }, ["task"]),
-    operation("return", { outcome: { ...object({ status: choice("done", "blocked", "throw"), evidence: string(1600, { minLength: 1 }), reason: string(600, { minLength: 1 }), sideEffects: string(800, { minLength: 1 }), caveats: array(string(400, { minLength: 1 }), 8) }, ["status"]), description: "Required for an active parent DAG node: done attests node acceptance with evidence and optional caveats; blocked needs a reason; throw needs both. Never use for ordinary attention frames." }, result: string(8000), exportSources: { ...array(ref, 64), description: "Only selected values export; retained values keep their lifetime in the parent. Other local work releases." } }),
+    { ...operation("return", {
+      outcome: { ...object({ status: choice("done", "inconclusive", "blocked", "throw"), evidence: string(1600, { minLength: 1, description: "At most 1600 characters: conclusion and exact citations. Export selected refs for longer evidence." }), reason: string(600, { minLength: 1 }), sideEffects: string(800, { minLength: 1 }), caveats: array(string(400, { minLength: 1 }), 8) }, ["status"]), description: "DAG nodes only. done attests acceptance; inconclusive finishes work without attesting acceptance. Both need evidence. blocked needs a reason; throw needs reason and evidence. Send outcome without result, in its own tool call." },
+      result: string(8000, { description: "Ordinary frames only. Do not combine with outcome." }), exportSources: { ...array(ref, 64), description: "Only selected refs export; retained values keep their lifetime in the parent. DAG nodes may export up to eight." },
+    }), not: { required: ["outcome", "result"] } },
     operation("load", { source: ref, range }, ["source"]),
     operation("replace", { source: ref, text: string(8000, { minLength: 1, description: "Agent-derived replacement. Human originals and executed calls require a private copy. Edit retained memory directly; unpin originals before editing eligible working values. Use the applied receipt's updated ref for subsequent operations." }), caveats }, ["source", "text"]),
     operation("drop", { sources }, ["sources"]),
@@ -60,7 +63,7 @@ const evidence = string(1600, { minLength: 1 });
 const reason = string(600, { minLength: 1 });
 const criterion = string(24, { minLength: 1 });
 const task = object({
-  id: taskId, title: string(200, { minLength: 1 }), dependsOn: array(taskId, 24), acceptance: string(400, { minLength: 1 }),
+  id: taskId, title: string(200, { minLength: 1 }), dependsOn: array(taskId, 24), acceptance: string(400, { minLength: 1, description: "Observable acceptance; an investigation must be able to disprove its working hypothesis." }),
   executor: { ...choice("parent", "code", "subagent"), description: "Default parent: automatic serial frames, finish with compass_context return(outcome). code: deterministic start/done. subagent: automatic read-only dispatch." },
   agent: choice("scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"),
   output: string(400), writeScope: string(200), dispatchReason: string(400, { minLength: 12, description: "Required for subagent: why another semantic context is worth its cost." }),
@@ -74,7 +77,7 @@ const assessment = { status: choice("pass", "fail", "inconclusive"), evidence, c
 export const toolSchemas = {
   compass_goal: actions([
     operation("set", {
-      current: string(4000, { minLength: 1 }), constraints: array(string(600, { minLength: 1 }), 24),
+      current: string(4000, { minLength: 1, description: "State the objective. Keep unverified causes as hypotheses, not premises or required findings." }), constraints: array(string(600, { minLength: 1 }), 24),
       criteria: { ...array(string(300, { minLength: 1 }), 12), description: "Complete acceptance list when supplied; omission preserves criteria, [] clears." },
     }, ["current", "constraints"]),
     operation("update", { constraintEdits: array(definitionEdit(600), 24, 1), criterionEdits: array(definitionEdit(300), 12, 1) }),
@@ -82,7 +85,8 @@ export const toolSchemas = {
     operation("checkpoint", { ref: string(500, { minLength: 1, description: "Real recoverable Git/artifact reference; not an automatic snapshot or rollback." }), note: string(320) }, ["ref"]),
   ]),
   compass_state: object({
-    view: { ...choice("summary", "goal", "plan", "acceptance", "history", "execution", "retained"), description: "Default compact summary. Other views return complete requested domain evidence. Read-only; no tool loading." },
+    view: { ...choice("summary", "goal", "plan", "proposal", "acceptance", "history", "execution", "retained"), description: "Compact summary by default. plan gives status; taskId adds one node’s detail. proposal reads exact pending previews from main." },
+    taskId: { ...taskId, description: "With view=plan only: inspect this exact current task." },
     cursor: string(80, { minLength: 1, description: "Opaque previous cursor; copy unchanged for summary deltas." }),
     limit: { type: "integer", minimum: 1, maximum: 20 },
   }, []),

@@ -215,7 +215,7 @@ test("a DAG is a draft, requires Goal criteria, and rejects unsafe or unexplaine
   await call(pi, "compass_plan", { action: "define", tasks });
   const plan = await view(pi, { view: "plan" });
   assert.equal(plan.approval, "awaiting_questionnaire", "define alone never authorizes execution");
-  assert.match(plan.next, /ask_user_question.*unchanged/);
+  assert.match(plan.next, /ask_user_question tool directly, outside Code Mode/);
   const replay = receipt(await call(pi, "compass_plan", { action: "request_approval" }));
   assert.equal(replay.unchanged, true);
   assert.deepEqual(replay.prompt, plan.prompt, "request_approval reuses a valid unpresented proposal");

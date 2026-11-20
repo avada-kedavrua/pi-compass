@@ -2,6 +2,8 @@
 
 ## 0.10.0 — seven-tool candidate
 
+- Fix AiClusterHub field-use detours: scope frame input and approval echoes, report native questionnaire availability before offering a prompt, reject mixed context mutations early, and let nodes return inconclusive evidence without unlocking dependents. Plan reads are compact; inspect one task by ID for qualified evidence.
+
 - Fix macOS field-use detours: surface the blocked approval before another tab, give the exact recovery action, and probe the guard Worker in `/compass-preflight`. Keep native ordinary tool telemetry out of GoalRun; preserve actual advisory DAG drift.
 
 - Keep guard control receipts as compact JSON. Scope listing cursors to readable views, acknowledge writes with the committed revision, and emit deduplicated guard notices as short text without modifying business results.

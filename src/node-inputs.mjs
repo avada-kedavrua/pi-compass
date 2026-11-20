@@ -16,7 +16,6 @@ export function nodeInputResolver(plan, context, branch, preview, freshExports =
   let index;
   let byId;
   return (task) => {
-    if (context.frames.length) throw new Error("Return to the main frame before starting a parent DAG node.");
     const refs = new Set(task.inputRefs ?? []);
     for (const id of task.fromTasks ?? []) {
       byId ??= new Map(plan.tasks.map((node) => [node.id, node]));

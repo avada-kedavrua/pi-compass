@@ -33,5 +33,5 @@ test("Compass exposes exactly the seven fixed tools with closed object schemas",
     assert.equal(schema.additionalProperties, false, `${name} rejects unlisted fields`);
   }
   assert.deepEqual(toolSchemas.compass_goal.properties.action.enum, ["set", "update", "decide", "checkpoint"]);
-  assert.deepEqual(toolSchemas.compass_state.properties.view.enum, ["summary", "goal", "plan", "acceptance", "history", "execution", "retained"]);
+  assert.deepEqual(toolSchemas.compass_state.properties.view.enum, ["summary", "goal", "plan", "proposal", "acceptance", "history", "execution", "retained"]);
 });

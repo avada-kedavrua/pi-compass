@@ -106,13 +106,22 @@ try {
     { id: "conclude", title: "Conclude without borrowing earlier notes", executor: "parent", dependsOn: ["interpret"], acceptance: "A supported conclusion exists" },
     { id: "report", title: "Summarize the observations", executor: "code", dependsOn: ["conclude"], acceptance: "Explain both paths" },
   ] }, undefined, undefined, context);
-  const prompt = JSON.parse(draft.content[0].text).prompt;
+  assert.equal(JSON.parse(draft.content[0].text).prompt, undefined, "unavailable transport does not advertise an unusable prompt");
   const callId = "native-approval";
-  const questionCall = { role: "assistant", content: [{ type: "toolCall", id: callId, name: "ask_user_question", arguments: prompt }], timestamp: Date.now() };
-  const questionEntryId = manager.appendMessage(questionCall);
+  const previewRead = await tools.get("compass_state").definition.execute("preview", { view: "proposal" }, undefined, undefined, context);
+  const previews = JSON.parse(previewRead.content[0].text).proposals;
   let notice;
   const ui = { custom: async () => undefined, notify: (message) => { notice = message; } };
   const preflight = () => runner.getCommand("compass-preflight").handler("", runner.createCommandContext());
+  runner.setUIContext(ui, "tui");
+  await preflight();
+  assert.match(notice, /UNAVAILABLE DAG approval: Enable the native ask_user_question tool/);
+  active.push("ask_user_question");
+  const proposalReceipt = await planTool.execute("request", { action: "request_approval" }, undefined, undefined, context);
+  const { prompt, next } = JSON.parse(proposalReceipt.content[0].text);
+  assert.match(next, /directly, outside Code Mode/);
+  const questionCall = { role: "assistant", content: [{ type: "toolCall", id: callId, name: "ask_user_question", arguments: prompt }], timestamp: Date.now() };
+  const questionEntryId = manager.appendMessage(questionCall);
   const proposal = () => ({ type: "tool_call", toolName: "ask_user_question", toolCallId: callId, input: structuredClone(prompt) });
   runner.setUIContext(ui, "rpc");
   assert.equal(context.hasUI, true);
@@ -124,12 +133,11 @@ try {
   assert.equal((await runner.emitToolCall(proposal())).block, true, "RPC dialogs do not prove full presentation");
   assert.equal(manager.getBranch().length, beforeApproval);
   runner.setUIContext(ui, "tui");
-  await preflight();
-  assert.match(notice, /UNAVAILABLE DAG approval: enable the native ask_user_question tool/);
   const event = proposal();
   const block = await runner.emitToolCall(event);
   assert.equal(block, undefined, block?.reason);
   assert.deepEqual(event.input.questions.map(({ header }) => header), ["Goal", "DAG"]);
+  assert.deepEqual(previews.map(({ preview }) => preview), event.input.questions.map(({ options }) => options[0].preview), "on-demand inspection matches the exact native previews");
   const answers = exactAnswers(event.input.questions);
   assert.match(answers[1].preview, /Inspect success\nInspect refusal/);
   const result = await runner.emitToolResult({ type: "tool_result", toolName: "ask_user_question", toolCallId: callId, input: event.input,
@@ -147,7 +155,28 @@ try {
   assert.equal(repeated.entries.some((entry) => entry.customType === "pi-compass-v2.context"), false, "an observed boundary cannot open the same frame twice");
   const requestContext = await runner.emitContext(manager.buildSessionProjection().messages);
   assert.ok(requestContext.some((message) => message.role === "custom" && String(message.content).includes("Submit the node outcome")), "the next model context already addresses the node");
-  assert.equal((await readState()).returnMode, "node-outcome", "approval opens the first frame without an Agent context call");
+  assert.doesNotMatch(JSON.stringify(requestContext), /Historical Human questionnaire/, "clean approval is not pinned into the node");
+  const activeNode = await readState();
+  assert.equal(activeNode.returnMode, "node-outcome", "approval opens the first frame without an Agent context call");
+  assert.equal(activeNode.input, undefined, "the reviewed parent message must not be re-advertised inside the node");
+  const nodeGoal = JSON.parse((await tools.get("compass_state").definition.execute("node-goal", { view: "goal" }, undefined, undefined, context)).content[0].text);
+  assert.equal(nodeGoal.input, undefined);
+  assert.equal(nodeGoal.humanAnswers, undefined, "routine approval echoes are not returned as node business answers");
+  const historical = await tools.get("compass_context_search").definition.execute("history-ref", { refs: [observed.input.ref] }, undefined, undefined, context);
+  assert.equal(JSON.parse(historical.content[0].text).hits.length, 1, "explicit historical recovery remains possible");
+  const mixed = { action: "return", outcome: { status: "done", evidence: "Not executed" } };
+  const batch = { role: "assistant", content: [
+    { type: "toolCall", id: "mixed-return", name: "compass_context", arguments: mixed },
+    { type: "toolCall", id: "mixed-read", name: "read", arguments: { path: "settings.ts" } },
+  ], timestamp: Date.now() };
+  const beforeBatch = manager.getLeafId();
+  manager.appendMessage({ role: "user", content: "New instruction while in the node", timestamp: Date.now() });
+  const interruption = await readState(activeNode.cursor);
+  assert.equal(interruption.input.reviewed, false, "new input is still visible inside a frame");
+  manager.branch(beforeBatch);
+  manager.appendMessage(batch);
+  await assert.rejects(() => tools.get("compass_context").definition.execute("mixed-return", mixed, undefined, undefined, context), /standalone/);
+  manager.branch(beforeBatch);
   await assert.rejects(() => runPlan({ action: "patch", upsertTasks: [{ id: "report", title: "Replan from a node" }] }), /Only the main frame/);
   await assert.rejects(() => runPlan({ action: "request_approval" }), /Only the main frame/);
   assert.equal(manager.getBranch().findLast((entry) => entry.customType === "pi-compass-v2.goalrun").data.plan.tasks.find(({ id }) => id === "audit").status, "in_progress");
@@ -166,7 +195,12 @@ try {
   assert.equal((await mutate(step("The observations support the conclusion"))).frame, "main");
   await runner.emitContext(manager.buildSessionProjection().messages);
   const plan = await tools.get("compass_state").definition.execute("plan", { view: "plan" }, undefined, undefined, context);
-  assert.deepEqual(JSON.parse(plan.content[0].text).ready, { code: ["report"] });
+  const planStatus = JSON.parse(plan.content[0].text);
+  assert.deepEqual(planStatus.ready, { code: ["report"] });
+  assert.equal(planStatus.tasks[0].evidence, undefined);
+  const detail = JSON.parse((await tools.get("compass_state").definition.execute("audit-detail", { view: "plan", taskId: "audit" }, undefined, undefined, context)).content[0].text).task;
+  assert.equal(detail.evidence, "Observed allow and deny");
+  assert.equal(detail.assessment.evidence, undefined, "the same evidence is not repeated as an assessment payload");
   // Native input can reach the branch before Compass's observation hooks run.
   const beforeInput = await readState();
   manager.appendMessage({ role: "user", content: "How is the work going?", timestamp: Date.now() });
@@ -176,7 +210,9 @@ try {
   const paused = await tools.get("compass_state").definition.execute("plan", { view: "plan" }, undefined, undefined, context);
   assert.equal(JSON.parse(paused.content[0].text).approval, "stale");
   await assert.rejects(() => runPlan({ action: "start", taskIds: ["report"] }), /Review the latest Human input.*compass_goal/);
-  assert.equal(JSON.parse(paused.content[0].text).approvalReason, "human_input_unreviewed");
+  const pausedState = JSON.parse(paused.content[0].text);
+  assert.equal(pausedState.approvalReason, "human_input_unreviewed");
+  assert.deepEqual(pausedState.input, pendingInput.input);
   await assert.rejects(() => runPlan({ action: "request_approval" }), /Review the latest Human input.*compass_goal/);
   await tools.get("compass_goal").definition.execute("review", { action: "update" }, undefined, undefined, context);
   const resumed = await runPlan({ action: "request_approval" });

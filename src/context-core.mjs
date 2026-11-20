@@ -246,17 +246,20 @@ function nativeCheckpoint(summary, firstKeptEntryId, operationId) { return { typ
 function latestSummary(boundary) {
   return boundary.context.contextEntries.find((item) => item.sourceEntry.type === "compaction" && item.messages.some((message) => message.role === "compactionSummary"))?.sourceEntry ?? null;
 }
+export function validateContextBatch(action, calls, toolName = "compass_context") {
+  if (calls.filter((call) => call.name === toolName).length > 1) fail("Use one context mutation per tool batch.");
+  if (calls.length > 1 && !["remember", "pin", "unpin"].includes(action)) fail("Projection-changing context operations must be standalone tool calls.");
+}
 function operationFromBoundary(boundary, toolName) {
   const calls = boundary.message?.role === "assistant" ? boundary.message.content.filter((part) => part.type === "toolCall") : [];
-  const own = calls.filter((call) => call.name === toolName);
-  if (!own.length) return null;
-  if (own.length !== 1) fail("Use one context mutation per tool batch.");
-  const result = boundary.toolResults?.find((item) => item.toolCallId === own[0].id);
-  if (!result || result.isError) return null;
-  const ordinaryMemory = ["remember", "pin", "unpin"].includes(result.details?.contextOperation?.action);
-  if (!ordinaryMemory && (calls.length !== 1 || boundary.toolResults?.length !== 1)) fail("Projection-changing context operations must be standalone tool calls.");
-  if (result.toolCallId !== own[0].id || !object(result.details?.contextOperation)) return null;
-  return { ...result.details.contextOperation, callId: own[0].id, id: boundary.messageEntryId };
+  const own = calls.find((call) => call.name === toolName);
+  if (!own) return null;
+  const result = boundary.toolResults?.find(({ toolCallId }) => toolCallId === own.id);
+  const operation = result?.details?.contextOperation;
+  if (!object(operation) || result.isError) return null;
+  validateContextBatch(operation.action, calls, toolName);
+  if (calls.length === 1 && boundary.toolResults.length !== 1) fail("Context mutation has an incomplete native tool exchange.");
+  return { ...operation, callId: own.id, id: boundary.messageEntryId };
 }
 
 function planCall({ next, index, boundary, operation, turnIds }) {
@@ -310,7 +313,9 @@ function planCall({ next, index, boundary, operation, turnIds }) {
 }
 function frameReceipt(frame, operation, revision) {
   const refs = (operation.capture ?? []).map((item) => contextRef({ binding: item.mode === "copy" ? `${frame.id}/${item.id}` : frame.refs.find((ref) => ref.id === item.id).key, version: item.version }));
-  const next = frame.node ? "Submit the node outcome with compass_context return." : "Finish with compass_context return before reporting final results.";
+  const next = frame.node
+    ? 'Submit the node outcome in a standalone compass_context call: {action:"return",outcome:{status:"done",evidence:"<observed result and citations, max 1600 chars>"}}. Use inconclusive if acceptance is unproven. Do not add result.'
+    : "Finish with compass_context return before reporting final results.";
   return nativeMessage(JSON.stringify({ resultStatus: "applied", frame: frame.id, task: operation.task, next, ...(frame.node ? { taskId: frame.node.taskId } : {}), ...(refs.length ? { sources: refs } : {}) }), { frame: frame.id, action: "call", callId: operation.callId, revision });
 }
 function external(entry) {
@@ -1053,7 +1058,7 @@ function collectVerifiedReads({ next, index, boundary, goalVersion }) {
   return entries;
 }
 
-export function planObservationBoundary({ state: input, branch, boundary, goalVersion = 1 }) {
+export function planObservationBoundary({ state: input, branch, boundary, goalVersion = 1, signed }) {
   const next = normalizeContextState(input);
   const expired = next.pins.filter((pin) => pin.goalVersion !== undefined && pin.goalVersion !== goalVersion);
   if (!expired.length && !(boundary.toolResults ?? []).some((result) => result.toolName === "read" || /ask.*user.*question|ask_user_question/i.test(result.toolName))) return null;
@@ -1071,6 +1076,8 @@ export function planObservationBoundary({ state: input, branch, boundary, goalVe
   }
   for (const id of boundary.toolResultEntryIds ?? []) {
     const entry = index.byId.get(id);
+    // Pure Compass approval is control state, not business data to pin into nodes.
+    if (signed?.has(messageOf(entry)?.toolCallId)) continue;
     const content = questionnaireContent(entry);
     const key = `root/${id}`;
     if (!content || next.values[key]) continue;

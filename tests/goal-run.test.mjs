@@ -15,7 +15,6 @@ import {
   goalOutcomeStatus,
   buildRecentEvents,
   buildStateSnapshot,
-  buildGoalDetails,
   transitionTasks,
   reconcileUnknownExecutionTasks,
   revisePlanState,
@@ -171,7 +170,6 @@ test("structured questionnaire answers preserve choice semantics without storing
     }],
   });
   assert.match(captured.item.summary, /Where should the frontend run\? = Local Vite/);
-  assert.match(JSON.stringify(buildGoalDetails(captured.state).humanAnswers), /Keep HMR enabled/);
   assert.doesNotMatch(JSON.stringify(captured.state), /large-preview-body/);
   assert.equal(captured.state.events.at(-1).status, "answered");
 });
@@ -574,6 +572,12 @@ test("Goal outcome projection never upgrades Agent-reported acceptance to indepe
   state = transitionTasks(state, "block", [{ id: "smoke", reason: "External service unavailable" }], updateTasks).state;
   assert.equal(goalOutcomeStatus(state).status, "blocked");
   assert.deepEqual(goalOutcomeStatus(state).blockedTaskIds, ["smoke"]);
+  state = transitionTasks(state, "reopen", [{ id: "smoke", reason: "Service responded" }], updateTasks).state;
+  for (const id of ["api", "ui", "smoke"]) state = completeAndAssess(state, id, `Observed ${id}`);
+  assert.equal(goalOutcomeStatus(state).status, "agent_reported_satisfied");
+  state = recordTaskAssessment(state, { taskId: "smoke", status: "inconclusive", evidence: "The environment did not exercise the production path" }).state;
+  assert.deepEqual(goalOutcomeStatus(state).unresolvedTaskIds, ["smoke"]);
+  assert.equal(goalOutcomeStatus(state).status, "incomplete", "all tasks done and reported criteria pass do not hide an inconclusive node");
 });
 
 test("Goal outcome projection distinguishes incomplete and failed acceptance", () => {
@@ -707,12 +711,10 @@ test("new Human input locks approval until explicitly acknowledged without rebin
   assert.equal(dagApprovalStatus(state).approved, true);
   state = observeHumanInput(state, "newest-entry").state;
   assert.equal(dagApprovalStatus(state).approved, false);
-  assert.deepEqual(buildGoalDetails(state).input, { id: "newest-entry", reviewed: false });
   state = setGoal(state, { expectedVersion: 1, current: state.goal.current,
     constraints: [] }).state;
   assert.equal(dagApprovalStatus(state).approved, true);
   assert.equal(state.plan.approvalRequest.id, requestId);
-  assert.deepEqual(buildGoalDetails(state).input, { id: "newest-entry", reviewed: true });
 });
 
 test("same-text constraint changes preserve evidence but invalidate approval; replacement guards unknown identity", () => {

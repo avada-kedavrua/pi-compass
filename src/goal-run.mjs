@@ -60,6 +60,7 @@ function normalizeHumanDecisionRecord(value, index, fallbackVersion = 0) {
   const text = clip(value.text, 2600);
   const questionnaire = normalizeQuestionnaireRecord(value.questionnaire);
   if (!text && !questionnaire) return null;
+  const defaultVersion = Number.isInteger(fallbackVersion) && fallbackVersion >= 0 ? fallbackVersion : 0;
   return {
     id: typeof value.id === "string" && /^H\d+$/.test(value.id) ? value.id : `H${index + 1}`,
     at: typeof value.at === "string" ? value.at.slice(0, 64) : timestamp(),
@@ -68,7 +69,7 @@ function normalizeHumanDecisionRecord(value, index, fallbackVersion = 0) {
     sourceCallId: typeof value.sourceCallId === "string" ? value.sourceCallId.slice(0, 128) : "",
     goalVersion: Number.isInteger(value.goalVersion) && value.goalVersion >= 0
       ? value.goalVersion
-      : (Number.isInteger(fallbackVersion) && fallbackVersion >= 0 ? fallbackVersion : 0),
+      : defaultVersion,
     text,
     summary: clip(value.summary || text, 420),
     ...(questionnaire ? { questionnaire } : {}),
@@ -140,6 +141,7 @@ function normalizeExecutionRecord(value, fallbackRevision = 1) {
       durationMs: nullableMetric(item.primaryUsage, "durationMs"),
     } : null,
   })) : [];
+  const missingError = status === "unknown" ? "Persisted execution metadata requires reconciliation; verify whether a child run is still active before releasing this batch." : null;
   return {
     requestId,
     runId: typeof value.runId === "string" && value.runId.trim() ? value.runId.trim().slice(0, 128) : null,
@@ -150,7 +152,7 @@ function normalizeExecutionRecord(value, fallbackRevision = 1) {
     status,
     startedAt: typeof value.startedAt === "string" ? value.startedAt.slice(0, 64) : timestamp(),
     completedAt: typeof value.completedAt === "string" ? value.completedAt.slice(0, 64) : null,
-    error: typeof value.error === "string" ? clip(value.error, 600) : status === "unknown" ? "Persisted execution metadata requires reconciliation; verify whether a child run is still active before releasing this batch." : null,
+    error: typeof value.error === "string" ? clip(value.error, 600) : missingError,
     policy: value.policy && typeof value.policy === "object" ? {
       mode: clip(value.policy.mode || "unknown", 40),
       reason: clip(value.policy.reason || "", 400),
@@ -365,7 +367,9 @@ function acceptanceSummary(state) {
   const failed = criteria.filter((item) => item.status === "failed").length;
   const blocked = criteria.filter((item) => item.status === "blocked").length;
   const unverified = criteria.filter((item) => !["reported_pass", "failed", "blocked"].includes(item.status)).length;
-  const status = failed || blocked ? "blocked" : passed === criteria.length ? "reported_satisfied" : "active";
+  let status = "active";
+  if (failed || blocked) status = "blocked";
+  else if (passed === criteria.length) status = "reported_satisfied";
   return { status, total: criteria.length, passed, failed, blocked, unverified };
 }
 
@@ -383,7 +387,8 @@ function outcomeSummary(state, acceptance = acceptanceSummary(state)) {
     return { status: "no_goal", evidenceLevel: "none", independentlyVerified: false, unresolvedTaskIds: [], blockedTaskIds: [], failedCriterionIds: [], blockedCriterionIds: [], unverifiedCriterionIds: [] };
   }
   const tasks = state.plan.approval || planHasActiveWork(state) ? state.plan.tasks : [];
-  const unresolvedTaskIds = tasks.filter((task) => task.status !== "done").map((task) => task.id);
+  const unresolvedTaskIds = tasks.filter((task) => task.status !== "done"
+    || (task.assessment && task.assessment.status !== "pass")).map((task) => task.id);
   const blockedTaskIds = tasks.filter((task) => task.status === "blocked").map((task) => task.id);
   const currentCriteria = (state.goal.criteria ?? []).filter((item) => item.goalVersion === (state.goal.version ?? 1));
   const failedCriterionIds = currentCriteria.filter((item) => item.status === "failed").map((item) => item.id);
@@ -396,11 +401,10 @@ function outcomeSummary(state, acceptance = acceptanceSummary(state)) {
   else if (!acceptance.total) status = "not_assessed";
   else if (acceptance.unverified > 0 || unresolvedTaskIds.length) status = "incomplete";
   else if (acceptance.passed === acceptance.total) status = "agent_reported_satisfied";
+  const evidenceLevel = { agent_reported_satisfied: "agent_reported", failed: "agent_reported_failure", not_assessed: "none" }[status] ?? "partial_or_unresolved";
   return {
     status,
-    evidenceLevel: status === "agent_reported_satisfied" ? "agent_reported"
-      : status === "failed" ? "agent_reported_failure"
-        : ["no_goal", "not_assessed"].includes(status) ? "none" : "partial_or_unresolved",
+    evidenceLevel,
     independentlyVerified: false,
     acceptanceStatus: acceptance.status,
     acceptanceTotal: acceptance.total,
@@ -470,11 +474,12 @@ export function setGoal(stateValue, input = {}) {
   const replacing = Boolean(state.goal.current) && state.goal.current !== current;
   const creating = !state.goal.current;
   const criteriaProvided = Object.hasOwn(input, "criteria");
-  const criteria = criteriaProvided ? validateGoalCriteria(input.criteria)
-    : (creating || replacing ? [] : (state.goal.criteria ?? []).filter((item) => item.goalVersion === state.goal.version).map((item) => item.text));
+  const previousCriteria = state.goal.criteria.filter((item) => item.goalVersion === state.goal.version).map((item) => item.text);
+  const retainedCriteria = creating || replacing ? [] : previousCriteria;
+  const criteria = criteriaProvided ? validateGoalCriteria(input.criteria) : retainedCriteria;
   if (replacing && planHasActiveWork(state)) throw new Error("Cannot replace the Goal while work is active or unresolved. No state changed.");
   const oldConstraints = JSON.stringify(state.goal.constraints ?? []);
-  const oldCriteria = JSON.stringify((state.goal.criteria ?? []).filter((item) => item.goalVersion === state.goal.version).map((item) => item.text));
+  const oldCriteria = JSON.stringify(previousCriteria);
   const semanticChanged = oldConstraints !== JSON.stringify(constraints) || oldCriteria !== JSON.stringify(criteria);
   if (!creating && semanticChanged && hasUnresolvedExecution(state)) throw new Error("Cannot change Goal definitions while native execution is unresolved. Consume terminal results or reconcile first. No state changed.");
   const sameTextMetadataChanged = !creating && !replacing && (semanticChanged
@@ -552,9 +557,9 @@ export function captureHumanDecision(stateValue, input) {
   // Structured results are the source of truth. The package's model-facing
   // envelope may echo a selected option's full preview; preserve that raw
   // envelope in Pi history, but do not duplicate it into bounded GoalRun state.
-  const text = questionnaire
-    ? questionnaireSummary(questionnaire, "")
-    : (typeof input?.text === "string" && input.text.trim() ? nonEmpty(input.text, "text", 2600) : "");
+  let text = "";
+  if (questionnaire) text = questionnaireSummary(questionnaire, "");
+  else if (typeof input?.text === "string" && input.text.trim()) text = nonEmpty(input.text, "text", 2600);
   if (!text && !questionnaire) return { state, captured: false, kind: "no_decision" };
   const sourceEntryId = typeof input?.sourceEntryId === "string" ? input.sourceEntryId : "";
   const sourceCallId = typeof input?.sourceCallId === "string" ? input.sourceCallId : "";
@@ -708,17 +713,6 @@ export function recordExecutionEvent(stateValue, input = {}) {
   return state;
 }
 
-export function buildGoalDetails(stateValue) {
-  const state = normalizeGoalRunState(stateValue);
-  return {
-    goal: state.goal.current ? { version: state.goal.version, original: state.goal.original, current: state.goal.current, constraints: state.goal.constraints } : null,
-    reviewedInputId: state.goal.reviewedInputId,
-    ...(state.latestHumanEntryId ? { input: { id: state.latestHumanEntryId, reviewed: state.goal.reviewedInputId === state.latestHumanEntryId } } : {}),
-    criteria: state.goal.criteria.filter((item) => item.goalVersion === state.goal.version).map((item) => ({ id: item.id, text: item.text, status: item.status })),
-    humanAnswers: state.humanDecisions.filter((item) => item.goalVersion === state.goal.version).map((item) => ({ id: item.id, sourceEntryId: item.sourceEntryId, sourceCallId: item.sourceCallId, ...(item.questionnaire ? { questionnaire: item.questionnaire } : { text: item.text }) })),
-  };
-}
-
 function eventSequence(id) {
   const match = typeof id === "string" ? id.match(/^E(\d+)$/) : null;
   return match ? Number(match[1]) : null;
@@ -792,7 +786,7 @@ export function buildStateSnapshot(stateValue, afterCursor = null, runtime = {})
     cursor,
     frame,
     goal: state.goal.current ? { version: state.goal.version, current: clip(state.goal.current, 240), ...(state.goal.current.length > 240 ? { currentTruncated: true } : {}) } : null,
-    ...(outcome.status !== "no_goal" ? { outcome: outcome.status } : {}),
+    ...(outcome.status === "no_goal" ? {} : { outcome: outcome.status }),
     ...(outcomeCaveat ? { caveat: clip(outcomeCaveat, 320) } : {}),
     ...(state.latestHumanEntryId ? { input: { id: state.latestHumanEntryId, ...(state.goal.current ? { reviewed: state.goal.reviewedInputId === state.latestHumanEntryId } : {}) } } : {}),
     ...(plan ? { plan } : {}),
@@ -814,7 +808,7 @@ export function buildRecentEvents(stateValue, limit = 12) {
   }));
 }
 
-export const HUMAN_INPUT_REVIEW = "Review the latest Human input with compass_goal before continuing. If it does not change the Goal, use action=update with no edits.";
+export const HUMAN_INPUT_REVIEW = 'Review the latest Human input with compass_goal before continuing. If unchanged, call compass_goal({action:"update"}) and reuse its prompt if present.';
 
 function requireReviewedHumanInput(state) {
   if (state.goal.reviewedInputId !== state.latestHumanEntryId) throw new Error(`${HUMAN_INPUT_REVIEW} No state changed.`);
@@ -953,7 +947,7 @@ function applyTaskAssessment(state, input) {
   task.assessment = {
     status: input.status,
     criteria: task.acceptance,
-    evidence,
+    ...(evidence === task.evidence ? {} : { evidence }),
     caveats: [...new Set((input.caveats ?? []).map((item) => nonEmpty(item, "caveat", 400)))],
     unresolvedCaveats,
     goalVersion: state.goal.version ?? 1,
@@ -962,7 +956,7 @@ function applyTaskAssessment(state, input) {
     binding: taskAssessmentBinding(state.plan, task),
     assessedAt: timestamp(),
   };
-  const semanticFields = ({ status, evidence, caveats, unresolvedCaveats }) => JSON.stringify([status, evidence, caveats, unresolvedCaveats]);
+  const semanticFields = ({ status, evidence, caveats, unresolvedCaveats }) => JSON.stringify([status, evidence ?? task.evidence, caveats, unresolvedCaveats]);
   if (!previous || semanticFields(previous) !== semanticFields(task.assessment)) {
     const affected = dependentTaskIds(state.plan.tasks, [id]);
     for (const other of state.plan.tasks) if (other.id !== id && affected.has(other.id)) other.assessment = null;
@@ -970,7 +964,6 @@ function applyTaskAssessment(state, input) {
   state.plan.stateVersion = (state.plan.stateVersion ?? 0) + 1;
   appendEvent(state, "task_assessed", {
     summary: `Task ${id} assessment: ${input.status}.`,
-    text: `${evidence}${task.assessment.caveats.length ? `\nCaveats: ${task.assessment.caveats.join("; ")}` : ""}${unresolvedCaveats.length ? `\nUnresolved caveats: ${unresolvedCaveats.join("; ")}` : ""}`,
     ref: id,
     status: input.status,
   });
@@ -978,20 +971,21 @@ function applyTaskAssessment(state, input) {
 }
 
 export function settleParentNode(stateValue, { node, outcome, artifacts }) {
-  let state = normalizeGoalRunState(stateValue);
+  const state = normalizeGoalRunState(stateValue);
   const task = state.plan.tasks.find(({ id }) => id === node.taskId);
   if (task?.executor !== "parent" || task.status !== "in_progress" || state.goal.version !== node.goalVersion || state.plan.revision !== node.planRevision) throw new Error("This node no longer owns an active frame. No state changed.");
   if (outcome?.status === "throw") return stopPlan(state, { taskId: task.id, ...outcome }, updateTasks);
-  if (!outcome || !["done", "blocked"].includes(outcome.status)) throw new Error("An active node must return done, blocked, or throw. No state changed.");
-  const terminal = outcome.status === "done" ? { evidence: nonEmpty(outcome.evidence, "evidence", 1600) } : { reason: nonEmpty(outcome.reason, "reason", 600) };
-  state.plan = updateTasks(state.plan, [{ id: task.id, status: outcome.status, ...terminal }], { terminalEvidence: true });
-  if (outcome.status === "done") {
-    if (artifacts.length) state.plan.tasks.find(({ id }) => id === task.id).artifacts = artifacts;
-    if (!unmetTaskPrerequisites(state.plan, task).length) {
-      state = applyTaskAssessment(state, { taskId: task.id, status: "pass", evidence: outcome.evidence, caveats: outcome.caveats }).state;
-    }
+  if (!outcome || !["done", "inconclusive", "blocked"].includes(outcome.status)) throw new Error("An active node must return done, inconclusive, blocked, or throw. No state changed.");
+  const { status, evidence, reason, caveats } = outcome;
+  if (status === "blocked") {
+    state.plan = updateTasks(state.plan, [{ id: task.id, status, reason: nonEmpty(reason, "reason", 600) }], { terminalEvidence: true });
+    appendEvent(state, "node_returned", { status, summary: `Node ${task.id} blocked.`, ref: task.id });
+    return state;
   }
-  return recordExecutionEvent(state, { status: outcome.status, summary: `Node ${task.id} frame returned: ${outcome.status}.`, ref: task.id, text: outcome.evidence || outcome.reason });
+  state.plan = updateTasks(state.plan, [{ id: task.id, status: "done", evidence: nonEmpty(evidence, "evidence", 1600) }], { terminalEvidence: true });
+  if (artifacts.length) state.plan.tasks.find(({ id }) => id === task.id).artifacts = artifacts;
+  const pass = status === "done" && !unmetTaskPrerequisites(state.plan, task).length;
+  return applyTaskAssessment(state, { taskId: task.id, status: pass ? "pass" : "inconclusive", evidence, caveats }).state;
 }
 
 export function dagApprovalStatus(stateValue) {

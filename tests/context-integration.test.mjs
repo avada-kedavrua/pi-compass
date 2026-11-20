@@ -498,6 +498,7 @@ test("planner and frame worker can produce, assess, consume, throw and replan wi
   };
   const view = () => call("compass_state", { view: "plan" });
   const node = (id, title, extra = {}) => ({ id, title, acceptance: "Observable evidence", ...extra });
+  await assert.rejects(() => call("compass_context", { action: "return", result: "Ordinary output", outcome: { status: "done", evidence: "Node output" } }), /Validation failed/);
   await call("compass_goal", { action: "set", current: "Document an observed route", constraints: [], criteria: ["Route is documented"] });
   await call("compass_plan", { action: "define", tasks: [node("a", "Produce observation"), node("b", "Consume observation", { fromTasks: ["a"] }), node("c", "Record output", { dependsOn: ["b"] })] });
   await approve();
@@ -522,9 +523,10 @@ test("planner and frame worker can produce, assess, consume, throw and replan wi
   assert.equal((await view()).tasks[0].status, "in_progress", "queued return does not settle the node");
   appendDrafts(manager, returned.entries);
   await runner.emitContext(manager.buildSessionProjection().messages);
-  const produced = (await view()).tasks[0];
+  const { task: produced } = await call("compass_state", { view: "plan", taskId: "a" });
   assert.equal(produced.status, "done");
   assert.equal(produced.artifacts.length, 1);
+  assert.deepEqual(produced.assessment.caveats, ["No provider check."]);
   assert.equal(produced.assessment.status, "pass", "the executing frame attests acceptance together with its outcome");
   assert.equal((await view()).tasks[1].status, "in_progress", "the successor starts as part of the same handoff");
   assert.match(modelText(manager), /ROUTE_OBSERVATION/);
@@ -541,8 +543,14 @@ test("planner and frame worker can produce, assess, consume, throw and replan wi
   await runner.emitContext(manager.buildSessionProjection().messages);
   assert.equal((await view()).tasks[1].status, "in_progress");
   assert.match(modelText(manager), /ROUTE_OBSERVATION/);
-  await host.turn({ action: "return", outcome: { status: "done", evidence: "Correct consumer used the original artifact" } });
-  assert.equal((await view()).tasks[1].status, "done");
+  await host.turn({ action: "return", outcome: { status: "inconclusive", evidence: "Correct consumer had the artifact, but the required observation is missing" } });
+  const unresolved = await view();
+  assert.equal(unresolved.tasks[1].status, "done");
+  assert.equal(unresolved.tasks[1].assessment.status, "inconclusive");
+  assert.deepEqual(unresolved.review, ["b"]);
+  assert.equal(unresolved.tasks[2].status, "pending", "inconclusive evidence cannot open a dependent frame");
+  const accepted = await call("compass_acceptance", { results: [{ criterion: "AC1", status: "reported_pass", evidence: "The report exists" }] });
+  assert.equal(accepted.outcome, "incomplete");
   assertPaired(manager);
   assert.deepEqual(host.errors, []);
 });
