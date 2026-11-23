@@ -18,14 +18,17 @@ Compass registers seven fixed tools: `compass_goal`, `compass_state`, `compass_c
 
 ## Acceptance
 
-`compass_acceptance({results:[{criterion,status,evidence}]})` records `reported_pass|failed|blocked|inconclusive` for existing criteria. Unknown or duplicate criteria fail without changing state. Your report is not independent verification.
+`compass_acceptance({results:[{criterion,status,evidence}]})` records `reported_pass|failed|blocked|inconclusive` for existing criteria. Unknown or duplicate criteria fail without changing state. Your report is not independent verification. Tests and self-assessment are evidence, not proof that all normal, abnormal and edge behavior is covered.
 
 ## Plans and Subagents
 
 - A DAG is optional. Choose `executor` explicitly: coupled reasoning stays with `parent`, deterministic batching with `code`, bounded read-only investigation with `subagent`. Every `subagent` task needs `writeScope:"read-only"` and a `dispatchReason` explaining why another context is worth the call.
 - From main, pass the latest `prompt` unchanged to the native `ask_user_question` tool directly (TUI, not Code Mode or chat). Both stamps must be current, but only pending definitions are asked. Follow `next` when approval is held: apply answer notes, then present the new prompt. If no definition changes, use `request_approval`. Do not work around the gate by executing the requested DAG from main. A Goal-only final criterion edit does not reauthorize the DAG; patch the DAG if its work changes.
 - Approved `parent` frames open and advance automatically. In a node, use standalone `return(outcome)` with observed evidence and optional caveats. Use `inconclusive` if acceptance is still unproven, or `throw` back to main if the plan must change. No manual node `call` or separate assessment for a normal parent return. `code` uses `start/done`; Compass dispatches approved read-only children.
-- Use `assess` when a completed non-frame prerequisite needs semantic review. Use `dependsOn` for ordering, `fromTasks` to import declared parent exports, and `inputRefs` for exact earlier exports. `waiting` explains missing inputs. Use `discard` for an inactive plan you no longer need.
+- Use `assess` when a completed non-frame prerequisite needs semantic review. Return `inconclusive` when the work is done but coverage or acceptance is not established; do not invent a pass to unlock a dependent.
+- An independent review is optional, not a Compass ritual. If risk justifies its cost, add one read-only `subagent` task with `agent:"reviewer"` or `agent:"evidence-auditor"`, ask it to seek counterexamples, and explain the extra call in `dispatchReason`. The result is evidence; the main Agent decides `pass|fail|inconclusive`.
+- Use `dependsOn` for ordering, `fromTasks` to import declared parent exports, and `inputRefs` for exact earlier exports. `waiting` explains missing inputs. Use `discard` for an inactive plan you no longer need.
+- Compass has no training-style penalty score. Correct a rejected precondition from its short next action; use an existing deterministic guard for repeated mechanical misuse. Do not pin or remember error text as a punishment signal.
 - If evidence invalidates the plan, report `throw` with the reason, evidence and known side effects. For native children, check execution state and `cancel` only exact attempts you judge invalidated; a request is not a terminal result. Do not assume rollback.
 - `unknown` batches require native Subagent status evidence and `compass_plan({action:"resolve",...})`; never retry them. A task marked done is not Goal acceptance.
 

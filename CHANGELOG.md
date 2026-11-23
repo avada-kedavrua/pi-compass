@@ -2,6 +2,8 @@
 
 ## 0.10.0 — seven-tool candidate
 
+- Clarify Agent-first semantic verification: Compass checks deterministic mechanics only; domain coverage belongs in the Goal, project instructions and tests. Independent reviewer tasks remain optional and evidence-only. Do not add training-style penalty scores, long-lived error memories or universal review/watchdog loops; use bounded corrective receipts and existing deterministic gates.
+
 - Resolve Release Assistant context detours: distinguish pending from applied, require explicit frame nesting, expose removable working groups without their bodies, and report actionable artifact path errors. Reuse an already blank frame checkpoint; session reports distinguish projection checkpoints from native compaction.
 
 - Fix AiClusterHub field-use detours: scope frame input and approval echoes, report native questionnaire availability before offering a prompt, reject mixed context mutations early, and let nodes return inconclusive evidence without unlocking dependents. Plan reads are compact; inspect one task by ID for qualified evidence.

@@ -23,6 +23,8 @@ Do not introduce a second scheduler, second session store, or duplicate conventi
 - A child result is evidence, not final Goal acceptance.
 - Missing, stale, partial, or contradictory evidence stays unknown/inconclusive; never upgrade it to pass.
 - Human instructions remain authoritative. The Agent drafts the Goal and constraints, and the Human approves that exact interpretation separately from the DAG. The first semantic Goal remains Original Goal; raw instructions stay in Pi.
+- Semantic completeness is not a deterministic Compass property. Code checks closed-world mechanics (schema, dependencies, identity, scope and lifecycle); the Agent/AGENTS.md defines domain coverage and test strategy; an optional independent reviewer supplies falsification evidence when its cost is justified. Do not encode open-ended business semantics as scenario-specific guards.
+- Compass does not implement training-style penalties, accumulated negative scores, or long-lived error memories. A violation gets one bounded corrective result with the failed precondition and next action; repeated deterministic misuse may be blocked by an existing guard or schema gate. Semantic disagreement is recorded as `fail` or `inconclusive`, not punished or converted into a global attention signal.
 - New native Human input pauses further approved DAG progression until an explicit Agent interpretation reviews it. Reaffirming unchanged semantics preserves approval; changing material definitions requires new approval. Terminal native evidence is still consumed.
 - Goal replacement rejects unresolved native executions and resets Goal-specific work without a separate Goal-change archive. No candidate registry, prose classifier or schema migration is retained.
 
