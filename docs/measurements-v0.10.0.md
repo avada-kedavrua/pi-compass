@@ -1,6 +1,23 @@
 # v0.10 local measurements
 
-All numbers below are bounded local measurements, not provider, token-cache or semantic-quality evidence.
+Local replay numbers are not provider, token-cache or semantic-quality measurements. Field counts below are observations, not a matched performance comparison.
+
+## AiClusterHub live snapshot
+
+Private Pi session `2026-11-20T09-03-54-635Z_01a1f832-b309-70bd-83cf-9038127520ed.jsonl`; first 9,038 records only (SHA-256 `a10a19822c2a1a08073415a69880b9e9b65221b41f7321e71875d8fa9ff17da4`). GoalRun v11; the exact installed build hash is not recorded. `scripts/session-report.mjs`: 1,541 assistant requests, 1,680 top-level plus 10 logged nested calls, 52 tool errors, 65 Compass calls with 5 errors, and 8 model-request errors/interruptions (68 s of recorded request duration). The 193M reported tokens include 190.2M cache reads; they are not uncached input or billing. At cutoff the task projection had 11/13 done, with `diag` inconclusive, `ui` stopped, `e2e` pending and zero final criteria reported passed. No native child ran in this slice.
+
+| Evidence (JSONL lines) | Root cause and ownership |
+|---|---|
+| L554, L6290/6294, L6659/9022 | Parent entry carried a local task but not approved cross-node scope. Seven identical Goal detail reads were 5,317 bytes each; the UI node read only the DAG and mounted in the wrong panel. Entry now carries the bound objective and constraints, not the rest of Goal state. This removes the need for routine Goal reads; it cannot guarantee semantic compliance. The `diag` criterion also duplicated UI work assigned to another node (L5534/6290); the framework correctly kept `diag` inconclusive. |
+| L4363/4368, L4561–4568, L4577/4874 | From the guards return to the next node, unreviewed Human input correctly held new work. The receipt looked like a normal return to main; recovery took a state read, then more probes and a Human interruption. The same approval resumed after `update`. The receipt now states why handoff paused; unchanged input does not need a questionnaire. |
+| L268/282/288, L5653/6688/9022 | An objective replacement reset the old DAG; `patch` was not applicable. In a node, patch/plan-throw are main-only; `context return(outcome)` is the exit. The original recovery did not distinguish the two `throw` routes. Schema and receipts now identify the applicable action without weakening the gates. |
+| L932/2314 | Return evidence was 1,809 and 1,778 UTF-16 code units against a 1,600 limit, causing two retries and full argument echo by Pi. The shared DAG evidence limit is now 2,000; longer bodies should be cited or exported. Native schema rejection still belongs to Pi. |
+| L1568, L1752–6459 | One stale guard revision and ten blocks by the session's cwd rule. CAS protected existing rules; the Agent had the revision from `put`, and the rule already gave a corrective hint. No score, predicate inference or automatic retry added. |
+| L767/908/2168/3380/4919, L2188/2220/4421/4423, L4001/6617 | Missing tools/dependencies, request timeout and environment/import errors; nonunique, overlapping or unmatched edits; a completed PID and a UI inspection mode mismatch. These are project or native-tool issues. Prefer preflight of the actual target interpreter and narrow result batches. L3530–4449 also includes broad baseline tests and their interruption, not Compass execution delay. |
+
+Bash accounts for 1,307 top-level calls. Several repeated probes were avoidable, but the trace does not show how many calls were necessary or what a matched no-Compass run would cost. In the raw prefix, 5,660 context edits (5,015 omissions and 645 replacements) occupy 2.18 MB, context snapshots 2.16 MB, GoalRun snapshots 1.76 MB. The four Compass checkpoints carry no model usage; most of their bytes are Pi `systemMessage` metadata, not injected evidence. The two native compactions are L1570 and L6628. Removing the unused `plan.activity` field would remove 38,741 serialized bytes across these GoalRun snapshots; task/event evidence remains in its original owner. This is a field-footprint calculation, not a rewrite of the log.
+
+**Local replay.** Reconstruct the 9,036-entry branch by following `parentId` from the last entry in the fixed prefix. On Node 22.22.1, 30 full scans of the branch averaged 39.3 ms; one incremental replay through all committed context snapshots took 38.3 ms total and produced identical final control state. Ten thousand reads of the same verified branch averaged under 0.001 ms. This measures only context control restoration, excluding Pi's `getBranch`, request projection, and provider calls. The installed-boundary regressions cover compaction, unchanged-approval recovery and explicit throw routing; an existing persistence regression now exercises a warmed reader with tampered/incomplete commits and a fork. No live rerun or workload speedup is claimed.
 
 ## Local stop and field recovery checks
 

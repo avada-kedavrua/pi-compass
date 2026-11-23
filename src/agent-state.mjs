@@ -36,7 +36,7 @@ export function planProgress(state, branch, context, preview, transportIssue) {
   if (frame && approval.next) {
     delete approval.prompt;
     approval.next = frame.node
-      ? "The current node can report its outcome. Return or throw to main before revising or approving the Goal or DAG."
+      ? "Finish with compass_context return(outcome); use outcome.status=throw if the plan must change. Review Human input and revise or approve from main."
       : "Return to main before revising or approving the Goal or DAG.";
   }
   if (approval.approval !== "approved" || approval.goalApproval !== "approved" || approval.approvalReason) return approval;

@@ -2,6 +2,8 @@
 
 ## 0.10.0 — seven-tool candidate
 
+- Carry approved scope into parent nodes (including after compaction), explain paused handoffs, and make Goal replacement and node-stop recovery explicit. Verify new context records incrementally and remove the unused DAG activity copy. See the [AiClusterHub field replay](docs/measurements-v0.10.0.md#aiclusterhub-live-snapshot).
+
 - Clarify Agent-first semantic verification: Compass checks deterministic mechanics only; domain coverage belongs in the Goal, project instructions and tests. Independent reviewer tasks remain optional and evidence-only. Do not add training-style penalty scores, long-lived error memories or universal review/watchdog loops; use bounded corrective receipts and existing deterministic gates.
 
 - Resolve Release Assistant context detours: distinguish pending from applied, require explicit frame nesting, expose removable working groups without their bodies, and report actionable artifact path errors. Reuse an already blank frame checkpoint; session reports distinguish projection checkpoints from native compaction.

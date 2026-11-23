@@ -5,6 +5,7 @@ import {
 } from "./context-values.mjs";
 import { analyzeRepeatedSelections, readObservationIdentity, readOnlyObservation, resolveSource, searchSources, selectSourceRange } from "./context-retrieval.mjs";
 import { loadContextArtifact, writeContextArtifact } from "./context-artifacts.mjs";
+import { DAG_EVIDENCE_LIMIT } from "./dag-core.mjs";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 export { contentVersion } from "./context-values.mjs";
@@ -116,19 +117,23 @@ function draftShape(entry) {
     default: fail(`Unexpected entry ${entry.type} in context commit.`);
   }
 }
-function verifyCommit(branch, positions, position, commit, state) {
+function verifyCommit(branch, position, commit, state) {
   const start = position - commit.count;
-  const base = commit.fromLeafId === null ? -1 : positions.get(commit.fromLeafId) ?? -1;
-  const gap = branch.slice(base + 1, start);
-  if (!Number.isInteger(commit.count) || commit.count < 1 || start < 0 || base >= start || (commit.fromLeafId !== null && base < 0) || gap.some((entry) => entry.type !== "custom" || [CONTEXT_STATE_TYPE, INTENT_TYPE].includes(entry.customType))) recoveryRequired("Context commit does not match its active-branch baseline.");
+  const invalid = () => recoveryRequired("Context commit does not match its active-branch baseline.");
+  if (!Number.isInteger(commit.count) || commit.count < 1 || start < 0) invalid();
+  let base = start - 1;
+  while (base >= 0 && branch[base].id !== commit.fromLeafId) {
+    const entry = branch[base--];
+    if (entry.type !== "custom" || [CONTEXT_STATE_TYPE, INTENT_TYPE].includes(entry.customType)) invalid();
+  }
+  if (base < 0 && commit.fromLeafId !== null) invalid();
   const actual = branch.slice(start, position).map(draftShape);
   if (contentVersion({ entries: actual, state }) !== commit.digest) recoveryRequired("Context proposal or resulting control state was changed or only partially persisted.");
 }
-export function restoreContextState(branch) {
-  let restored = emptyContextState();
-  const positions = new Map(branch.map((entry, position) => [entry.id, position]));
+function replayContextState(branch, start, checkpoint) {
+  let restored = checkpoint;
   const pending = new Set();
-  for (let position = 0; position < branch.length; position++) {
+  for (let position = start; position < branch.length; position++) {
     const entry = branch[position];
     if (entry.type !== "custom") continue;
     if (entry.customType === INTENT_TYPE) pending.add(entry.data.operationId);
@@ -136,7 +141,7 @@ export function restoreContextState(branch) {
     const state = normalizeContextState(entry.data);
     if (entry.data.commit) {
       if (!pending.has(entry.data.commit.operationId)) recoveryRequired("Context commit has no matching operation intent.");
-      verifyCommit(branch, positions, position, entry.data.commit, state);
+      verifyCommit(branch, position, entry.data.commit, state);
       pending.delete(entry.data.commit.operationId);
     }
     restored = state;
@@ -144,6 +149,29 @@ export function restoreContextState(branch) {
   if (pending.size) recoveryRequired(`Uncommitted context transition ${[...pending].join(", ")}.`);
   return restored;
 }
+
+export function restoreContextState(branch) {
+  return replayContextState(branch, 0, emptyContextState());
+}
+
+// Pi's persisted branch is an immutable chain. Keep only one verified prefix,
+// anchored by the native leaf ID; preview drafts never enter this reader.
+export function createContextReader() {
+  let length = 0;
+  let leafId;
+  let state = emptyContextState();
+  return (branch) => {
+    if (length > 0 && branch[length - 1]?.id !== leafId) {
+      length = 0;
+      state = emptyContextState();
+    }
+    state = replayContextState(branch, length, state);
+    length = branch.length;
+    leafId = branch.at(-1)?.id;
+    return state;
+  };
+}
+
 export function contextStateEntry(state) {
   return { type: "custom", customType: CONTEXT_STATE_TYPE, data: normalizeContextState(state) };
 }
@@ -321,10 +349,10 @@ function contextReceipt(data, details) {
 function frameReceipt(frame, operation, state) {
   const refs = (operation.capture ?? []).map((item) => contextRef({ binding: item.mode === "copy" ? `${frame.id}/${item.id}` : frame.refs.find((ref) => ref.id === item.id).key, version: item.version }));
   const next = frame.node
-    ? 'Submit the node outcome in a standalone compass_context call: {action:"return",outcome:{status:"done",evidence:"<observed result and citations, max 1600 chars>"}}. Use inconclusive if acceptance is unproven. Do not add result.'
+    ? `Work in this node. Close it with standalone compass_context({action:"return",outcome:{status,evidence}}); cite observations within ${DAG_EVIDENCE_LIMIT} characters. Use inconclusive for unproven acceptance or throw with reason and evidence if the plan must change.`
     : "Frame is open. Do the task here; do not call it again. Return before reporting the final result.";
   return contextReceipt({ frame: frame.id, depth: state.frames.length, task: operation.task, next,
-    ...(frame.node ? { taskId: frame.node.taskId } : {}), ...(refs.length ? { sources: refs } : {}) },
+    ...(frame.node ? { taskId: frame.node.taskId, goal: operation.goal } : {}), ...(refs.length ? { sources: refs } : {}) },
   { frame: frame.id, action: "call", callId: operation.callId, revision: state.revision + 1 });
 }
 function external(entry) {
@@ -369,8 +397,8 @@ function restoreParent({ frame, next, index, boundary, operation, owned }) {
   const summary = frame.summaryId === null ? null : index.byId.get(frame.summaryId);
   if (frame.summaryId !== null && summary?.type !== "compaction") fail("Parent summary is unavailable on this branch.");
   const firstKeptEntryId = frame.saved[0]?.id ?? summary?.id ?? owned.find(external)?.id ?? null;
-  const entries = (latestSummary(boundary)?.id ?? null) !== frame.summaryId
-    ? [nativeCheckpoint(summary?.summary ?? "", firstKeptEntryId, operation.id)] : [];
+  const entries = (latestSummary(boundary)?.id ?? null) === frame.summaryId
+    ? [] : [nativeCheckpoint(summary?.summary ?? "", firstKeptEntryId, operation.id)];
   for (const saved of frame.saved) {
     const head = saved.binding ? next.values[saved.binding] : null;
     const changed = head && contentVersion(head) !== saved.valueState;
@@ -476,8 +504,10 @@ function planHandling({ next, index, operation }) {
   return value.message ? writeView(next, value, head, value.content) : [];
 }
 function assertLocalValue(state, value) {
-  const scope = state.frames.at(-1)?.id ?? "root";
+  const frame = state.frames.at(-1);
+  const scope = frame?.id ?? "root";
   if (!value.key.startsWith(`${scope}/`)) fail(`Outer value ${value.id} is read-only in this frame; use a private copy.`);
+  if (frame?.node && isNodeEntryReceipt(value.message, frame.id)) fail("The active node receipt carries approved scope and cannot be changed.");
 }
 function assertWritableValue(state, value, editRetainedMemory = false) {
   assertLocalValue(state, value);
@@ -545,11 +575,10 @@ export function contextCleanup(branch, boundary, state, limit) {
     const key = group?.ids[0] ?? nativeId;
     const bytes = Buffer.byteLength(JSON.stringify(message.content));
     const previous = groups.get(key);
-    if (!previous) groups.set(key, { nativeId, message, bytes, largestResult: bytes });
-    else {
+    if (previous) {
       previous.bytes += bytes;
       if (bytes > previous.largestResult) Object.assign(previous, { nativeId, message, largestResult: bytes });
-    }
+    } else groups.set(key, { nativeId, message, bytes, largestResult: bytes });
   }
   const candidates = [];
   let incomplete = false;
@@ -830,13 +859,13 @@ export function validateContextOperation({ state, branch, boundary, operation, c
   } });
 }
 
-export function planContextBoundary({ state: input, branch, boundary, toolName = "compass_context", successor }) {
+export function planContextBoundary({ state: input, branch, boundary, toolName = "compass_context", afterNodeReturn }) {
   const operation = operationFromBoundary(boundary, toolName);
   if (!operation) return null;
-  return planContextTransition({ state: input, branch, boundary, operation, successor });
+  return planContextTransition({ state: input, branch, boundary, operation, afterNodeReturn });
 }
 
-export function planContextTransition({ state: input, branch, boundary, operation, successor }) {
+export function planContextTransition({ state: input, branch, boundary, operation, afterNodeReturn }) {
   const next = normalizeContextState(input);
   if (operation.expectedRevision !== next.revision) fail(`Stale context revision ${operation.expectedRevision}; current revision is ${next.revision}.`);
   if ((boundary.entries ?? []).some((entry) => entry.type !== "custom")) fail("Another extension proposed context changes; run this context operation at a separate boundary.");
@@ -847,13 +876,15 @@ export function planContextTransition({ state: input, branch, boundary, operatio
   let entries;
   let nextNode;
   let closedFrame;
+  let returnNext;
   switch (operation.action) {
     case "call": entries = planCall(args); break;
     case "return": {
       if (operation.result) ensureText(operation.result, "Return value");
       const returned = planReturn(args);
       closedFrame = returned.frame.id;
-      const follow = successor?.(next, returned.exports);
+      const { follow, next: guidance } = afterNodeReturn?.(next, returned.exports) ?? {};
+      returnNext = guidance;
       if (follow) {
         // Keep the original main snapshot hidden. The new boundary and all
         // borrowed exports use stable identities, not preview entry IDs.
@@ -882,11 +913,11 @@ export function planContextTransition({ state: input, branch, boundary, operatio
   next.revision += 1;
   const references = entries.filter((entry) => entry.type === "custom_message" && entry.customType === VALUE_MESSAGE_TYPE && entry.details.derived).map((entry) => ({ id: entry.details.sourceId, binding: entry.details.key, version: entry.details.version }));
   if (operation.node) next.nodeEffect = { node: operation.node, revision: next.revision, outcome: operation.outcome ?? null, artifacts: references.map(contextRef), ...(nextNode ? { nextNode } : {}) };
-  if (operation.action !== "call" && !nextNode) entries.push(operationReceipt(args, references, closedFrame));
+  if (operation.action !== "call" && !nextNode) entries.push(operationReceipt(args, references, closedFrame, returnNext));
   return { state: next, entries: transitionEntries(next, branch, boundary, operation, entries), continue: ["call", "return"].includes(operation.action) && boundary.outcome === "completed" };
 }
 
-function operationReceipt({ next, index, operation, moveComparison: comparison }, references, closedFrame) {
+function operationReceipt({ next, index, operation, moveComparison: comparison }, references, closedFrame, returnNext) {
   const { action, callId, outcome, result, artifact } = operation;
   const data = {};
   const details = { action, callId, revision: next.revision, references };
@@ -896,6 +927,7 @@ function operationReceipt({ next, index, operation, moveComparison: comparison }
     const frame = next.frames.at(-1);
     Object.assign(data, { closedFrame, frame: frame?.id ?? "main", depth: next.frames.length });
     if (frame) data.next = "Only this frame closed. Continue in its parent; return again before reporting the overall result.";
+    else if (returnNext) data.next = returnNext;
     if (result) data.result = result;
     if (operation.node) Object.assign(data, { taskId: operation.node.taskId, outcome: outcome.status });
     if (outcome?.status === "throw") Object.assign(data, { reason: outcome.reason, evidence: outcome.evidence, sideEffects: outcome.sideEffects ?? "unknown" });
@@ -1026,8 +1058,7 @@ export function releaseWatchMessages(input, text) {
  * blocks use Pi's normal provider conversion without granting source data system authority.
  */
 export function pinnedContextOverlay(branch, state, messages = [], goalVersion) {
-  const normalized = retentionForGoal(state, goalVersion);
-  const pins = visiblePins(normalized);
+  const pins = visiblePins(state, goalVersion);
   if (!pins.length) return [];
   const index = { byId: sourceEntries(branch) };
   const present = new Set(messages.filter((message) => message.role !== "system" && message.content !== undefined).map((message) => contentVersion(message.content)));
@@ -1036,7 +1067,7 @@ export function pinnedContextOverlay(branch, state, messages = [], goalVersion) 
   for (const pin of pins) {
     if (seen.has(pin.key)) continue;
     seen.add(pin.key);
-    const head = normalized.values[pin.key];
+    const head = state.values[pin.key];
     const value = { id: pin.id, key: pin.key, head, content: valueContent(index, head, pin.id) };
     const rendered = renderValue(value);
     // Exact envelope equality only proves that the outgoing data is present.
@@ -1047,6 +1078,25 @@ export function pinnedContextOverlay(branch, state, messages = [], goalVersion) 
     overlays.push({ role: "custom", customType: draft.customType, content: draft.content, display: draft.display, details: draft.details, timestamp: 0 });
   }
   return overlays;
+}
+
+function isNodeEntryReceipt(entry, frameId) {
+  return entry?.customType === CONTEXT_MESSAGE_TYPE && entry.details?.action === "call" && entry.details.frame === frameId;
+}
+
+export function restoreMissingNodeReceipt(branch, frame, messages) {
+  if (!frame?.node) return messages;
+  const entry = branch.findLast((item) => item.type === "custom_message" && isNodeEntryReceipt(item, frame.id));
+  if (!entry) return messages;
+  const { customType, content, display, details } = entry;
+  const visible = messages.find((message) => message.role === "custom" && isNodeEntryReceipt(message, frame.id));
+  if (visible) {
+    if (!isDeepStrictEqual(visible.content, content)) fail("The active node receipt was altered in the outgoing context.");
+    return messages;
+  }
+  const first = messages.findIndex(({ role }) => !["system", "compactionSummary"].includes(role));
+  const at = first < 0 ? messages.length : first;
+  return [...messages.slice(0, at), { role: "custom", customType, content, display, details, timestamp: 0 }, ...messages.slice(at)];
 }
 
 export function scopedDagArtifacts(branch, state, messages) {
@@ -1075,15 +1125,10 @@ export function scopedDagArtifacts(branch, state, messages) {
   return visible;
 }
 
-export function visiblePins(state) {
+export function visiblePins(state, goalVersion) {
   const masked = new Set(state.frames.flatMap((frame) => frame.unpinned ?? []));
-  return state.pins.filter((pin) => !masked.has(pin.key));
-}
-
-export function retentionForGoal(input, goalVersion) {
-  const next = normalizeContextState(input);
-  if (Number.isSafeInteger(goalVersion)) next.pins = next.pins.filter((pin) => pin.goalVersion === undefined || pin.goalVersion === goalVersion);
-  return next;
+  return state.pins.filter((pin) => !masked.has(pin.key)
+    && (goalVersion === undefined || pin.goalVersion === undefined || pin.goalVersion === goalVersion));
 }
 
 /** Keep genuine structured answers by immutable source reference, not by copying a child exchange. */

@@ -16,8 +16,8 @@ import { contextRef, RESERVED_CUSTOM_TYPES } from "./context-values.mjs";
 import { registerRuntimeGuards } from "./runtime-guard.mjs";
 import { DELEGATION_EVENTS, FALLBACK_MODEL, PRIMARY_MODEL, REVIEW_MODEL, DEFAULT_TIMEOUT_MS, MAX_WAVE_TASKS, START_ACK_TIMEOUT_MS, assessWavePolicy, hasCompleteUsageMetrics, buildSubagentDelegationRequest, delegationCandidates, parseSubagentDelegationResponse, normalizeProviderDiagnostics, providerFallbackReason, readOnlyLaunchRefusal } from "./execution-orchestrator.mjs";
 import { executionUnresolved, readyTasks, retainExecutions, taskDependencies, updateTasks } from "./dag-core.mjs";
-import { setGoal, updateGoal, patchPlanState, discardPlan, addressedConstraints, observeHumanInput, stateCursor, GOAL_RUN_API_VERSION, GOAL_RUN_RELEASE, recordAcceptanceResult, goalOutcomeStatus, bindApprovalQuestionnaire, captureHumanDecision, recordTaskAssessment, renewApprovalRequests, emptyGoalRunState, normalizeGoalRunState, recordCheckpoint, recordDecision, recordHumanQuestionnaireFailure, recordExecutionDrift, recordExecutionEvent, revisePlanState, settleParentNode, stopPlan, transitionTasks, reconcileUnknownExecutionTasks, expandApprovalProposal } from "./goal-run.mjs";
-import { CONTEXT_MESSAGE_TYPE, CONTEXT_STATE_TYPE, PLAN_STOP_MESSAGE_TYPE, emptyContextState, normalizeContextState, pinnedContextOverlay, scopedDagArtifacts, planContextBoundary, planContextTransition, planRetentionBoundary, planObservationBoundary, planWatchBoundary, prepareContextOperation, validateContextBatch, validateContextOperation, releaseWatchMessages, restoreContextState } from "./context-core.mjs";
+import { HUMAN_INPUT_REVIEW, setGoal, updateGoal, patchPlanState, discardPlan, addressedConstraints, observeHumanInput, stateCursor, GOAL_RUN_API_VERSION, GOAL_RUN_RELEASE, recordAcceptanceResult, goalOutcomeStatus, bindApprovalQuestionnaire, captureHumanDecision, recordTaskAssessment, renewApprovalRequests, emptyGoalRunState, normalizeGoalRunState, recordCheckpoint, recordDecision, recordHumanQuestionnaireFailure, recordExecutionDrift, recordExecutionEvent, revisePlanState, settleParentNode, stopPlan, transitionTasks, reconcileUnknownExecutionTasks, expandApprovalProposal } from "./goal-run.mjs";
+import { CONTEXT_MESSAGE_TYPE, CONTEXT_STATE_TYPE, PLAN_STOP_MESSAGE_TYPE, emptyContextState, normalizeContextState, pinnedContextOverlay, restoreMissingNodeReceipt, scopedDagArtifacts, planContextBoundary, planContextTransition, planRetentionBoundary, planObservationBoundary, planWatchBoundary, prepareContextOperation, validateContextBatch, validateContextOperation, releaseWatchMessages, createContextReader } from "./context-core.mjs";
 
 const STATE_ENTRY_TYPE = "pi-compass-v2.goalrun";
 // A settled-UNKNOWN request keeps its correlation so a genuinely late terminal
@@ -28,6 +28,7 @@ const PACKAGE_VERSION = JSON.parse(fs.readFileSync(new URL("../package.json", im
 export default function (pi: any, resolvePreflight = (tool: unknown) => loadDelegationPreflight(tool, (url: string) => import(url))) {
 let state: any = emptyGoalRunState();
 let contextState: any = emptyContextState();
+let readContextState = createContextReader();
 let needsRestore = true;
 let mutationQueue: Promise<any> = Promise.resolve();
 let activePi: any = pi;
@@ -672,7 +673,7 @@ async function admitReadySubagents(pi: unknown, generation: number, ctx: Extensi
       status: "blocked", summary: "Native launch preflight blocked: " + refused.map(({ id }) => id).join(", ") + ". See plan for reasons.",
     });
     if (!passed.length) { persistState(pi); return; }
-    const frameScope = restoreContextState(ctx.sessionManager.getBranch()).frames.at(-1)?.id ?? null;
+    const frameScope = readContextState(ctx.sessionManager.getBranch()).frames.at(-1)?.id ?? null;
     const batch = executionRecordForWave(waveId, ready, state.plan.revision, state.plan.stateVersion, requests.map(({ requestId }) => requestId), policy, frameScope);
     state.plan.executions.push(batch);
     state = recordExecutionEvent(state, {
@@ -792,17 +793,28 @@ function readyParent(candidate: typeof state, context: typeof contextState, bran
     || event.context.pendingMessages.some((message) => message.role === "user")) return null;
   const next = nextParentNode(candidate.plan, nodeInputResolver(candidate.plan, context, branch, () => event.context, exports));
   if (!next) return null;
-  return { node: { taskId: next.task.id, goalVersion: candidate.goal.version, planRevision: candidate.plan.revision }, ...nodeFrameInput(next.task, next.inputs) };
+  const { current, constraints } = candidate.goal;
+  return { node: { taskId: next.task.id, goalVersion: candidate.goal.version, planRevision: candidate.plan.revision },
+    goal: { current, ...(constraints.length ? { constraints } : {}) }, ...nodeFrameInput(next.task, next.inputs) };
 }
 
 function planNodeBoundary(event: TurnEndEvent, branch: NativeBranch, operation?: any) {
   const candidate = stateWithCurrentInput(branch);
-  const successor = operation?.node && ["done", "inconclusive", "blocked"].includes(operation.outcome?.status) ? (context: typeof contextState, exports: ExportDraft[]) => {
+  const afterNodeReturn = operation?.node ? (context: typeof contextState, exports: ExportDraft[]) => {
     const artifacts = exports.map((entry) => contextRef({ binding: entry.details.key, version: entry.details.version }));
-    const settled = settleParentNode(candidate, { node: operation.node, outcome: operation.outcome, artifacts });
-    return readyParent(settled, context, branch, event, exports);
+    const settled = checkedNodeReturn(candidate, operation, artifacts);
+    const follow = readyParent(settled, context, branch, event, exports);
+    if (follow) return { follow };
+    if (settled.plan.stopped) return { next: "DAG stopped. Patch or discard it from main after active work settles." };
+    if (settled.goal.reviewedInputId !== settled.latestHumanEntryId || event.context.pendingMessages.some((message) => message.role === "user")) {
+      return { next: `DAG paused for Human input. ${HUMAN_INPUT_REVIEW}` };
+    }
+    if (settled.plan.tasks.some((task: { status: string; assessment?: { status: string } }) => task.status !== "done" || (task.assessment && task.assessment.status !== "pass"))) {
+      return { next: 'No parent handoff on this turn. Read compass_state({view:"plan"}) for remaining work or blockers.' };
+    }
+    return {};
   } : undefined;
-  const explicit = planContextBoundary({ state: contextState, branch, boundary: event, successor });
+  const explicit = planContextBoundary({ state: contextState, branch, boundary: event, afterNodeReturn });
   if (explicit) return explicit;
   const admission = readyParent(candidate, contextState, branch, event);
   if (!admission) return null;
@@ -810,11 +822,9 @@ function planNodeBoundary(event: TurnEndEvent, branch: NativeBranch, operation?:
   return planContextTransition({ state: contextState, branch, boundary: event, operation: start });
 }
 
-function verifyNodeReturn(operation: any) {
-  const { node, outcome } = operation;
-  if (!node) return;
+function checkedNodeReturn(candidate: typeof state, { node, outcome }: Pick<Parameters<typeof settleParentNode>[1], "node" | "outcome">, artifacts: string[] = []) {
   if (contextState.frames.at(-1)?.node?.taskId !== node.taskId) throw new Error("Only the active node frame can submit this outcome. No state changed.");
-  noMutation(() => settleParentNode(state, { node, outcome, artifacts: [] }));
+  return noMutation(() => settleParentNode(candidate, { node, outcome, artifacts }));
 }
 
 function reconcileNodeFrame(ctx: any) {
@@ -840,7 +850,7 @@ function restoreContext(ctx: any) {
   try {
     const branch = ctx?.sessionManager?.getBranch?.();
     if (!Array.isArray(branch)) throw new Error("Native active-branch context is unavailable; no context state was reset.");
-    contextState = restoreContextState(branch);
+    contextState = readContextState(branch);
     const frame = contextState.frames.at(-1);
     if (ctx?.hasUI) ctx.ui?.setStatus?.("compass-frame", frame ? `frame ${contextState.frames.length} · ${frame.id}` : "frame: main");
     return contextState;
@@ -901,7 +911,12 @@ function approvalTransportIssue(ctx: ExtensionContext) {
 }
 
 function requireMainFrame() {
-  if (contextState.frames.length) throw new Error("Only the main frame can define the Goal or DAG or request its approval. Finish the current frame, or throw if the plan must change. No state changed.");
+  const frame = contextState.frames.at(-1);
+  if (!frame) return;
+  const next = frame.node
+    ? 'Use standalone compass_context({action:"return",outcome:{status:"throw",reason,evidence}}) if the plan must change; otherwise finish the node with return(outcome).'
+    : 'Use compass_context({action:"return"}) before continuing in main.';
+  throw new Error(`Only the main frame can perform this operation. ${next} No state changed.`);
 }
 
 function contextCwd(ctx: any) { return typeof ctx?.cwd === "string" && ctx.cwd.trim() ? ctx.cwd : process.cwd(); }
@@ -964,7 +979,7 @@ function registerTools(pi: any) {
           const candidate = stateWithCurrentInput(branch);
           const result = noMutation(() => setGoal(candidate, { expectedVersion: candidate.goal.version, current: params.current, constraints: params.constraints, ...(Object.hasOwn(params, "criteria") ? { criteria: params.criteria } : {}) }));
           if (result.changed) { state = result.state; afterMutation(pi, contextCwd(ctx)); }
-          return stateResult({ ...(result.replaced ? { replaced: true } : {}), ...(Object.hasOwn(params, "criteria") ? { criteria: state.goal.criteria.map(({ id, text }: any) => ({ id, text })) } : {}), ...(!approvalIsCurrent(state) ? planApproval(state, branch, () => approvalTransportIssue(ctx)) : {}) }, !result.changed);
+          return stateResult({ ...(result.replaced ? { replaced: true, ...(candidate.plan.tasks.length ? { planReset: true } : {}) } : {}), ...(Object.hasOwn(params, "criteria") ? { criteria: state.goal.criteria.map(({ id, text }: any) => ({ id, text })) } : {}), ...(!approvalIsCurrent(state) ? planApproval(state, branch, () => approvalTransportIssue(ctx)) : {}) }, !result.changed);
         }
         if (params.action === "update") {
           const branch = ctx.sessionManager.getBranch();
@@ -1023,7 +1038,7 @@ function registerTools(pi: any) {
             normalized.node = node;
             normalized.outcome = input.outcome;
             if ((normalized.exportIds?.length ?? 0) > 8) throw new Error("A node may export up to eight explicit artifacts. No state changed.");
-            verifyNodeReturn(normalized);
+            checkedNodeReturn(state, normalized);
           }
         }
         const prepared = await prepareContextOperation({ state: contextState, branch, boundary, operation: { ...normalized, callId: toolCallId, goalVersion: state.goal.version }, projectRoot: contextCwd(ctx) });
@@ -1164,13 +1179,15 @@ function resolveExecution(pi: any, params: any, ctx: any) {
 }
 
 registerTools(pi);
-pi.on("session_start", async (_event: any, ctx: any) => {
+for (const event of ["session_start", "session_tree"]) pi.on(event, (_event: unknown, ctx: ExtensionContext) => {
   branchGeneration += 1; autoSchedulers.delete(pi);
-  await serialized(() => { state = adoptBranchState(ctx); needsRestore = false; state.projectRoot = contextCwd(ctx); restoreContext(ctx); });
-});
-pi.on("session_tree", async (_event: any, ctx: any) => {
-  branchGeneration += 1; autoSchedulers.delete(pi);
-  return serialized(() => { state = adoptBranchState(ctx); needsRestore = false; state.projectRoot = contextCwd(ctx); restoreContext(ctx); });
+  return serialized(() => {
+    readContextState = createContextReader();
+    state = adoptBranchState(ctx);
+    needsRestore = false;
+    state.projectRoot = contextCwd(ctx);
+    restoreContext(ctx);
+  });
 });
 pi.on("session_shutdown", async (_event: any, ctx: any) => {
   branchGeneration += 1; autoSchedulers.delete(pi);
@@ -1251,9 +1268,10 @@ pi.on("session_shutdown", async (_event: any, ctx: any) => {
       if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
       const branch = ctx?.sessionManager?.getBranch?.();
       if (!Array.isArray(branch)) throw new Error("Native branch is unavailable; retained pins cannot be restored for this request.");
-      const committed = restoreContextState(branch);
+      const committed = readContextState(branch);
       const overlays = pinnedContextOverlay(branch, committed, messages, state.goal.version);
-      const output = scopedDagArtifacts(branch, committed, overlays.length ? [...messages, ...overlays] : messages);
+      const scoped = scopedDagArtifacts(branch, committed, overlays.length ? [...messages, ...overlays] : messages);
+      const output = restoreMissingNodeReceipt(branch, committed.frames.at(-1), scoped);
       if (output.length !== event.messages.length || output.some((message, index) => event.messages[index] !== message)) return { messages: output };
     } catch (error) {
       // Request-only retention is fail-closed: do not silently send a request
@@ -1275,7 +1293,6 @@ pi.on("session_shutdown", async (_event: any, ctx: any) => {
     try {
       if (event.messageEntryId === contextState.frames.at(-1)?.boundaryId) return;
       const nodeOperation = event.toolResults?.find((result: any) => !result.isError && result.toolName === "compass_context" && result.details?.contextOperation?.node)?.details.contextOperation;
-      if (nodeOperation) verifyNodeReturn(nodeOperation);
       const planned = planNodeBoundary(event, branch, nodeOperation);
       if (planned) {
         // Pi commits only after all boundary handlers finish. Reconcile the

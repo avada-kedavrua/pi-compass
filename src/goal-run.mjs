@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { emptyDagState, createOrRevisePlan, executionUnresolved, retainExecutions, dependentTaskIds, taskAssessmentBinding, unmetTaskPrerequisites, updateTasks } from "./dag-core.mjs";
+import { DAG_EVIDENCE_LIMIT, emptyDagState, createOrRevisePlan, executionUnresolved, retainExecutions, dependentTaskIds, taskAssessmentBinding, unmetTaskPrerequisites, updateTasks } from "./dag-core.mjs";
 import { APPROVAL_TARGETS, approvalBinding, approvalIsCurrent, clearApprovalAnswer, createApprovalRequest, definitionApproved, matchesApprovalQuestion, pendingApprovalRequests } from "./dag-approval.mjs";
 import { normalizeQuestionnaireRecord } from "./questionnaire-integration.mjs";
 import { normalizeProviderDiagnostics } from "./execution-orchestrator.mjs";
@@ -249,9 +249,15 @@ export function normalizeGoalRunState(input) {
   if (!Array.isArray(state.plan.executions)) throw new Error("Unsupported Compass execution snapshot. Select a current native branch; no state changed.");
   state.plan = {
     ...emptyDagState(),
-    ...state.plan,
+    goal: state.plan.goal ?? null,
+    revision: state.plan.revision ?? 0,
+    stateVersion: state.plan.stateVersion ?? 0,
+    definitionKey: state.plan.definitionKey,
+    approvalRequest: state.plan.approvalRequest ?? null,
+    approval: state.plan.approval ?? null,
+    stopped: state.plan.stopped ?? null,
+    ...(state.plan.nodeContextRevision === undefined ? {} : { nodeContextRevision: state.plan.nodeContextRevision }),
     planHistory: Array.isArray(state.plan.planHistory) ? state.plan.planHistory.slice(-8) : [],
-    activity: Array.isArray(state.plan.activity) ? state.plan.activity.slice(-8) : [],
     executionHistory: Array.isArray(state.plan.executionHistory) ? state.plan.executionHistory.slice(-8).filter((item) => item && typeof item === "object" && typeof item.requestId === "string").map((item) => ({
       requestId: item.requestId.slice(0, 128),
       planRevision: Number.isInteger(item.planRevision) && item.planRevision > 0 ? item.planRevision : 1,
@@ -829,7 +835,7 @@ export function expandApprovalProposal(stateValue, input) {
 }
 
 export function patchPlanState(state, input) {
-  if (!state.plan.tasks.length) throw new Error("Define a DAG before editing it.");
+  if (!state.plan.tasks.length) throw new Error('There is no current DAG to patch. Use compass_plan({action:"define",tasks:[…]}) to submit the full graph.');
   const tasks = new Map(state.plan.tasks.map((task) => [task.id, task]));
   const touched = new Set();
   for (const id of input.removeTasks ?? []) {
@@ -937,7 +943,7 @@ function applyTaskAssessment(state, input) {
   const task = state.plan.tasks.find((item) => item.id === id);
   if (!task) throw new Error(`Unknown or stale task ID "${id}". No assessment was recorded.`);
   if (task.status !== "done") throw new Error(`Task "${id}" must be completed before assessment. No assessment was recorded.`);
-  const evidence = nonEmpty(input.evidence, "evidence", 1600);
+  const evidence = nonEmpty(input.evidence, "evidence", DAG_EVIDENCE_LIMIT);
   if (!Array.isArray(input.caveats ?? []) || (input.caveats ?? []).some((item) => typeof item !== "string" || !item.trim())) throw new Error("caveats must be an array of non-empty strings. No assessment was recorded.");
   if (!Array.isArray(input.unresolvedCaveats ?? []) || (input.unresolvedCaveats ?? []).some((item) => typeof item !== "string" || !item.trim())) throw new Error("unresolvedCaveats must be an array of non-empty strings. No assessment was recorded.");
   const unresolvedCaveats = [...new Set((input.unresolvedCaveats ?? []).map((item) => nonEmpty(item, "unresolvedCaveat", 400)))];
@@ -982,7 +988,7 @@ export function settleParentNode(stateValue, { node, outcome, artifacts }) {
     appendEvent(state, "node_returned", { status, summary: `Node ${task.id} blocked.`, ref: task.id });
     return state;
   }
-  state.plan = updateTasks(state.plan, [{ id: task.id, status: "done", evidence: nonEmpty(evidence, "evidence", 1600) }], { terminalEvidence: true });
+  state.plan = updateTasks(state.plan, [{ id: task.id, status: "done", evidence: nonEmpty(evidence, "evidence", DAG_EVIDENCE_LIMIT) }], { terminalEvidence: true });
   if (artifacts.length) state.plan.tasks.find(({ id }) => id === task.id).artifacts = artifacts;
   const pass = status === "done" && !unmetTaskPrerequisites(state.plan, task).length;
   return applyTaskAssessment(state, { taskId: task.id, status: pass ? "pass" : "inconclusive", evidence, caveats }).state;
@@ -1026,7 +1032,7 @@ export function reconcileUnknownExecutionTasks(stateValue, requestId, items, upd
     const id = item?.id;
     if (!remaining.delete(id)) throw new Error(`Unexpected or duplicate unresolved task ${id}.`);
     if (state.plan.tasks.find((task) => task.id === id)?.status !== "in_progress") throw new Error(`Task ${id} is not in progress for this batch.`);
-    if (item.status === "done" && item.reason === undefined) return { id, status: "done", evidence: nonEmpty(item.evidence, "evidence", 1600) };
+    if (item.status === "done" && item.reason === undefined) return { id, status: "done", evidence: nonEmpty(item.evidence, "evidence", DAG_EVIDENCE_LIMIT) };
     if (item.status === "blocked" && item.evidence === undefined) return { id, status: "blocked", reason: nonEmpty(item.reason, "reason", 600) };
     throw new Error(`Invalid terminal result for ${id}: use done with evidence or blocked with a reason.`);
   });
@@ -1041,7 +1047,7 @@ export function stopPlan(stateValue, input, updateTasksFn) {
   const task = state.plan.tasks.find((item) => item.id === taskId);
   if (task?.status !== "in_progress") throw new Error("Only an active task can report a semantic stop. No state changed.");
   const reason = nonEmpty(input.reason, "reason", 600);
-  const evidence = nonEmpty(input.evidence, "evidence", 1600);
+  const evidence = nonEmpty(input.evidence, "evidence", DAG_EVIDENCE_LIMIT);
   const sideEffects = input.sideEffects === undefined ? "unknown" : nonEmpty(input.sideEffects, "sideEffects", 800);
   state.plan = updateTasksFn(state.plan, [{ id: taskId, status: "blocked", reason, evidence }]);
   state.plan.stopped ??= { taskId, reason, evidence, sideEffects };
@@ -1081,7 +1087,7 @@ export function transitionTasks(stateValue, action, items, updateTasksFn) {
       } else if (task.status !== "in_progress") {
         throw new Error(`Task "${id}" is ${task.status}; only ready pending or in-progress tasks can be marked done.`);
       }
-      updates.push({ id, status: "done", evidence: nonEmpty(item.evidence, `items[${index}].evidence`, 1600) });
+      updates.push({ id, status: "done", evidence: nonEmpty(item.evidence, `items[${index}].evidence`, DAG_EVIDENCE_LIMIT) });
     } else if (action === "block") {
       if (!new Set(["pending", "in_progress"]).has(task.status)) throw new Error(`Task "${id}" is ${task.status}; only pending or in-progress tasks can be blocked.`);
       updates.push({ id, status: "blocked", reason: nonEmpty(item.reason, `items[${index}].reason`, 600) });

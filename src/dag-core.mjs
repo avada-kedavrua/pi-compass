@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 const TASK_STATUSES = new Set(["pending", "in_progress", "done", "blocked"]);
 const MAX_PLAN_HISTORY = 8;
-const MAX_ACTIVITY = 8;
+export const DAG_EVIDENCE_LIMIT = 2000;
 const ALLOWED_EXECUTORS = new Set(["parent", "code", "subagent"]);
 const ALLOWED_AGENTS = new Set(["scout", "researcher", "reviewer", "evidence-auditor", "delegate", "oracle"]);
 
@@ -13,7 +13,6 @@ export function emptyDagState() {
     revision: 0,
     stateVersion: 0,
     planHistory: [],
-    activity: [],
     executionHistory: [],
     executions: [],
     executionDrift: null,
@@ -61,7 +60,6 @@ function withStateDefaults(state) {
     tasks: Array.isArray(source.tasks) ? source.tasks : [],
     stateVersion: Number.isInteger(source.stateVersion) ? source.stateVersion : 0,
     planHistory: Array.isArray(source.planHistory) ? source.planHistory : [],
-    activity: Array.isArray(source.activity) ? source.activity : [],
     executionHistory: Array.isArray(source.executionHistory) ? source.executionHistory.slice(-8) : [],
   };
 }
@@ -256,7 +254,6 @@ export function createOrRevisePlan(currentState, input) {
   // A revision identifies a material change within this Goal, not another plan() call.
   const revision = changedGoal ? 1 : previous.revision + (delta.material ? 1 : 0);
   const baseHistory = changedGoal ? [] : previous.planHistory;
-  const baseActivity = changedGoal ? [] : previous.activity;
   const changeReason = clipped(input.changeReason, 500);
   let planHistory = baseHistory;
   if (delta.material) {
@@ -283,7 +280,6 @@ export function createOrRevisePlan(currentState, input) {
     revision,
     stateVersion: previous.stateVersion + (delta.material ? 1 : 0),
     planHistory,
-    activity: baseActivity,
     executionHistory: changedGoal ? [] : (previous.executionHistory ?? []).slice(-8),
   };
 }
@@ -340,7 +336,7 @@ export function updateTasks(state, updates, { terminalEvidence = false } = {}) {
   next.tasks = structuredClone(next.tasks);
   const byId = new Map(next.tasks.map((task) => [task.id, task]));
   const seen = new Set();
-  const activityItems = [];
+  let changed = false;
 
   for (const [index, update] of updates.entries()) {
     if (!update || typeof update !== "object" || Array.isArray(update)) {
@@ -373,15 +369,7 @@ export function updateTasks(state, updates, { terminalEvidence = false } = {}) {
       task.evidence = "";
       task.reason = "";
     }
-    if (before.status !== task.status || before.evidence !== task.evidence || before.reason !== task.reason) {
-      activityItems.push({
-        id,
-        from: before.status,
-        to: task.status,
-        evidence: clipped(task.evidence, 180),
-        reason: clipped(task.reason, 180),
-      });
-    }
+    changed ||= before.status !== task.status || before.evidence !== task.evidence || before.reason !== task.reason;
   }
 
   for (const task of next.tasks) {
@@ -393,13 +381,6 @@ export function updateTasks(state, updates, { terminalEvidence = false } = {}) {
     }
   }
 
-  if (activityItems.length) {
-    next.stateVersion = (Number.isInteger(next.stateVersion) ? next.stateVersion : 0) + 1;
-    next.activity = [...next.activity, {
-      at: now(),
-      changes: activityItems.slice(0, 12),
-      omittedCount: Math.max(0, activityItems.length - 12),
-    }].slice(-MAX_ACTIVITY);
-  }
+  if (changed) next.stateVersion++;
   return next;
 }

@@ -154,7 +154,11 @@ try {
   const repeated = await previewTurn(opening.base);
   assert.equal(repeated.entries.some((entry) => entry.customType === "pi-compass-v2.context"), false, "an observed boundary cannot open the same frame twice");
   const requestContext = await runner.emitContext(manager.buildSessionProjection().messages);
-  assert.ok(requestContext.some((message) => message.role === "custom" && String(message.content).includes("Submit the node outcome")), "the next model context already addresses the node");
+  const entryReceipt = requestContext.find((message) => message.role === "custom" && message.customType === "pi-compass-v2.context-message" && message.details?.action === "call");
+  const openedNode = JSON.parse(entryReceipt.content);
+  assert.equal(openedNode.taskId, "audit");
+  assert.deepEqual(openedNode.goal.constraints, ["Do not change unrelated pages"]);
+  assert.match(openedNode.next, /compass_context.*action:"return"/);
   assert.doesNotMatch(JSON.stringify(requestContext), /Historical Human questionnaire/, "clean approval is not pinned into the node");
   const activeNode = await readState();
   assert.equal(activeNode.returnMode, "node-outcome", "approval opens the first frame without an Agent context call");

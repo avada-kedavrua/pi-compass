@@ -1,3 +1,5 @@
+import { DAG_EVIDENCE_LIMIT } from "./dag-core.mjs";
+
 const string = (maxLength, extra = {}) => ({ type: "string", maxLength, ...extra });
 const object = (properties, required) => ({ type: "object", properties, required, additionalProperties: false });
 const array = (items, maxItems, minItems = 0) => ({ type: "array", items, minItems, maxItems, uniqueItems: true });
@@ -46,7 +48,7 @@ export function contextToolSchema() {
 
     operation("call", { task: string(4000, { minLength: 1, description: "Ordinary attention only. DAG frames open automatically." }), parentFrame: string(128, { minLength: 1, description: "Only for distinct nested work: copy the active frame ID. Omit from main." }), capture: { ...array(object({ ref, mode: { ...choice("ref", "copy"), description: "ref borrows read-only; copy is private and editable using its returned ref." } }, ["ref", "mode"]), 64), description: "Default none. Applied receipt sources correspond to this order; copies have new refs." } }, ["task"]),
     { ...operation("return", {
-      outcome: { ...object({ status: choice("done", "inconclusive", "blocked", "throw"), evidence: string(1600, { minLength: 1, description: "At most 1600 characters: conclusion and exact citations. Export selected refs for longer evidence." }), reason: string(600, { minLength: 1 }), sideEffects: string(800, { minLength: 1 }), caveats: array(string(400, { minLength: 1 }), 8) }, ["status"]), description: "DAG nodes only. done attests acceptance; inconclusive finishes work without attesting acceptance. Both need evidence. blocked needs a reason; throw needs reason and evidence. Send outcome without result, in its own tool call." },
+      outcome: { ...object({ status: choice("done", "inconclusive", "blocked", "throw"), evidence: string(DAG_EVIDENCE_LIMIT, { minLength: 1, description: "Conclusion and exact citations. Export selected refs for longer evidence." }), reason: string(600, { minLength: 1 }), sideEffects: string(800, { minLength: 1 }), caveats: array(string(400, { minLength: 1 }), 8) }, ["status"]), description: "DAG nodes only. done attests acceptance; inconclusive finishes work without attesting acceptance. Both need evidence. blocked needs a reason; throw needs reason and evidence. Send outcome without result, in its own tool call." },
       result: string(8000, { description: "Ordinary frames only. Do not combine with outcome." }), exportSources: { ...array(ref, 64), description: "Only selected refs export; retained values keep their lifetime in the parent. DAG nodes may export up to eight." },
     }), not: { required: ["outcome", "result"] } },
     operation("load", { source: ref, range }, ["source"]),
@@ -60,7 +62,7 @@ export function contextToolSchema() {
   return actions(operations);
 }
 
-const evidence = string(1600, { minLength: 1 });
+const evidence = string(DAG_EVIDENCE_LIMIT, { minLength: 1 });
 const reason = string(600, { minLength: 1 });
 const criterion = string(24, { minLength: 1 });
 const task = object({
@@ -78,7 +80,7 @@ const assessment = { status: choice("pass", "fail", "inconclusive"), evidence, c
 export const toolSchemas = {
   compass_goal: actions([
     operation("set", {
-      current: string(4000, { minLength: 1, description: "State the objective. Keep unverified causes as hypotheses, not premises or required findings." }), constraints: array(string(600, { minLength: 1 }), 24),
+      current: string(4000, { minLength: 1, description: "A different objective replaces the Goal and clears its DAG; use update for constraints/criteria. Keep unverified causes as hypotheses." }), constraints: array(string(600, { minLength: 1 }), 24),
       criteria: { ...array(string(300, { minLength: 1 }), 12), description: "Complete acceptance list when supplied; omission preserves criteria, [] clears." },
     }, ["current", "constraints"]),
     operation("update", { constraintEdits: array(definitionEdit(600), 24, 1), criterionEdits: array(definitionEdit(300), 12, 1) }),

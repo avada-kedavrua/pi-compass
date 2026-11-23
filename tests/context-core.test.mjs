@@ -5,7 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
-  CONTEXT_MESSAGE_TYPE, PLAN_STOP_MESSAGE_TYPE, sourceIndex, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, prepareContextOperation, releaseWatchMessages, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
+  CONTEXT_MESSAGE_TYPE, PLAN_STOP_MESSAGE_TYPE, sourceIndex, createContextReader, emptyContextState, normalizeContextState, planContextBoundary, planWatchBoundary, prepareContextOperation, releaseWatchMessages, restoreContextState, searchContext, pinnedContextOverlay, planObservationBoundary,
 } from "../src/context-core.mjs";
 import {
   SessionManager, appendDrafts, applyOperation, assertPaired, contextPreview, modelText, queueOperation, sourceVersion,
@@ -666,16 +666,21 @@ test("partial or altered boundary persistence is detected instead of activating 
     user(manager, "parent");
     const boundary = queueOperation(manager, { action: "call", task: "uncommitted work" });
     const before = manager.getLeafId();
-    const planned = planContextBoundary({ state: emptyContextState(), branch: manager.getBranch(), boundary });
+    const read = createContextReader();
+    const planned = planContextBoundary({ state: read(manager.getBranch()), branch: manager.getBranch(), boundary });
     const drafts = structuredClone(planned.entries);
     if (altered) {
       const edit = drafts.find((entry) => entry.type === "context_edit");
       edit.replacement = { content: "altered by a later handler" };
       appendDrafts(manager, drafts);
     } else appendDrafts(manager, drafts.slice(0, -1));
-    assert.throws(() => restoreContextState(manager.getBranch()), /Uncommitted|changed|persisted/);
+    assert.throws(() => read(manager.getBranch()), /Uncommitted|changed|persisted/);
     manager.branch(before);
-    assert.deepEqual(restoreContextState(manager.getBranch()), emptyContextState());
+    appendDrafts(manager, planned.entries);
+    assert.equal(read(manager.getBranch()).frames.length, 1);
+    manager.branch(before);
+    user(manager, "different branch");
+    assert.deepEqual(read(manager.getBranch()), emptyContextState());
   }
 });
 

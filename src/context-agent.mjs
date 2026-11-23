@@ -1,4 +1,4 @@
-import { contextCleanup, sourceIndex, searchContext, retentionForGoal, visiblePins } from "./context-core.mjs";
+import { contextCleanup, sourceIndex, searchContext, visiblePins } from "./context-core.mjs";
 import { currentValue, contextRef, contextSelection } from "./context-values.mjs";
 import { resolveSource } from "./context-retrieval.mjs";
 
@@ -48,7 +48,7 @@ export function agentSearch(branch, boundary, state, params = {}) {
 }
 
 export function retainedContext(branch, boundary, state, goalVersion, limit) {
-  const refs = [...new Set(visiblePins(retentionForGoal(state, goalVersion)).map((pin) => contextRef({ binding: pin.key, version: state.values[pin.key].version })))];
+  const refs = [...new Set(visiblePins(state, goalVersion).map((pin) => contextRef({ binding: pin.key, version: state.values[pin.key].version })))];
   const result = agentSearch(branch, boundary, state, { refs, limit: Math.min(limit, 16) });
   return { frame: result.frame, retained: result.hits, ...(result.incomplete ? { total: refs.length } : {}),
     next: "Retained values only. To find working context to remove, use compass_context_search(view=cleanup)." };

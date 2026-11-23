@@ -580,6 +580,50 @@ test("planner and frame worker can produce, assess, consume, throw and replan wi
   assert.deepEqual(host.errors, []);
 });
 
+test("nodes carry approved scope through compaction and explain a Human-paused handoff", async () => {
+  const host = await setup();
+  const { manager, runner, tools } = host;
+  const call = async (name, input) => JSON.parse((await tools.get(name).execute(name, input, undefined, undefined, runner.createContext())).content[0].text);
+  const constraints = ["Use the AISBench groups surface; leave micro_tune unchanged."];
+  const current = "Integrate tuning into the approved panel";
+  const plan = () => call("compass_state", { view: "plan" });
+  const goalState = () => manager.getBranch().findLast((entry) => entry.customType === "pi-compass-v2.goalrun").data;
+  await call("compass_goal", { action: "set", current, constraints, criteria: ["Integration observed"] });
+  await call("compass_plan", { action: "define", tasks: [
+    { id: "a", title: "Inspect the panel", acceptance: "Route observed" },
+    { id: "b", title: "Use the approved route", acceptance: "Route exercised", dependsOn: ["a"] },
+  ] });
+  const signed = approveDefinitions(goalState());
+  manager.appendCustomEntry("pi-compass-v2.goalrun", signed);
+  await runner.emit({ type: "session_start" });
+  const opened = await host.finish();
+  const receipt = (transition) => JSON.parse(transition.entries.find(({ customType }) => customType === "pi-compass-v2.context-message").content);
+  assert.deepEqual(receipt(opened).goal, { current, constraints });
+  const projected = async () => runner.emitContext(manager.buildSessionProjection().messages);
+  const matching = (messages) => messages.filter((message) => message.role === "custom" && message.details?.frame === receipt(opened).frame && message.details?.action === "call");
+  assert.equal(matching(await projected()).length, 1, "do not duplicate the visible node receipt");
+  const entry = manager.getBranch().findLast((item) => item.customType === "pi-compass-v2.context-message");
+  const rejected = await host.turn({ action: "drop", sources: [host.ref(entry.id)] });
+  assert.equal(rejected.entries.length, 0, "approved node scope cannot be dropped");
+  assert.match(modelText(manager), /active node receipt carries approved scope/);
+  const firstKept = user(manager, "Status check only; continue the approved work.");
+  manager.appendCompaction("Native summary without the approved scope", firstKept, 0, {}, false);
+  assert.equal(matching(manager.buildSessionProjection().messages).length, 0);
+  assert.deepEqual(JSON.parse(matching(await projected())[0].content).goal, { current, constraints });
+  await assert.rejects(() => call("compass_plan", { action: "throw", taskId: "a", reason: "Wrong route", evidence: "Fixture evidence" }), /compass_context.*action:"return".*status:"throw"/);
+  const evidence = "Observed working route. ".repeat(79).trim();
+  const returned = receipt(await host.turn({ action: "return", outcome: { status: "done", evidence } }));
+  assert.equal(returned.frame, "main");
+  assert.match(returned.next, /DAG paused for Human input.*compass_goal/);
+  assert.equal((await plan()).tasks[1].status, "pending");
+  assert.equal((await call("compass_state", { view: "plan", taskId: "a" })).task.evidence, evidence);
+  assert.equal(matching(await projected()).length, 0, "do not restore a closed node's receipt");
+  await call("compass_goal", { action: "update" });
+  assert.equal(goalState().plan.approval.requestId, signed.plan.approval.requestId);
+  assert.equal(receipt(await host.finish()).taskId, "b", "reaffirming unchanged input reuses approval and resumes handoff");
+  assert.deepEqual(host.errors, []);
+});
+
 test("append keeps an exact repeated read at the tail without rewriting raw history", async () => {
   const host = await setup();
   const payload = "READ_PAYLOAD_SAME\nsecond line\n";

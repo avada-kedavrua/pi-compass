@@ -222,6 +222,11 @@ test("a DAG is a draft, requires Goal criteria, and rejects unsafe or unexplaine
   assert.equal(plan.ready, undefined, "nothing is ready before Human approval");
   assert.ok(plan.prompt, "the native prompt carries only an opaque proposal ref");
   assert.equal(JSON.stringify(plan.prompt).includes("Tasks (DAG revision"), false, "the exact proposal is not duplicated into the model transcript");
+  const replacement = await setGoal(pi, "Map a different service", { criteria });
+  assert.equal(replacement.planReset, true);
+  const beforePatch = stateOf(pi);
+  await assert.rejects(() => call(pi, "compass_plan", { action: "patch", upsertTasks: tasks }), /no current DAG.*action:"define".*No state changed/i);
+  assert.deepEqual(stateOf(pi), beforePatch);
 });
 
 test("incremental Goal and DAG edits preserve unrelated evidence and require fresh approval", async () => {

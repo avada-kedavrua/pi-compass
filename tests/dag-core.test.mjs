@@ -156,12 +156,12 @@ test("material replans preserve a concise reason and changed-task history", () =
   assert.equal(revised.tasks.find((task) => task.id === "inspect-ui").status, "pending");
 });
 
-test("task updates retain a timestamped activity trail", () => {
+test("task state version advances only for a changed transition", () => {
   const state = plan();
-  const updated = updateTasks(state, [{ id: "inspect-api", status: "blocked", reason: "API server requires credentials." }]);
-  assert.equal(updated.activity.length, 1);
-  assert.match(updated.activity[0].at, /^\d{4}-\d{2}-\d{2}T/);
-  assert.deepEqual(updated.activity[0].changes.map((change) => [change.id, change.from, change.to]), [["inspect-api", "pending", "blocked"]]);
+  const updates = [{ id: "inspect-api", status: "blocked", reason: "API server requires credentials." }];
+  const updated = updateTasks(state, updates);
+  assert.equal(updated.stateVersion, state.stateVersion + 1);
+  assert.equal(updateTasks(updated, updates).stateVersion, updated.stateVersion);
 });
 
 test("re-submitting an identical plan does not create a false revision", () => {
