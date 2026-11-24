@@ -57,7 +57,12 @@ function fakePi(options = {}) {
     },
     events: { on: subscribe, emit },
     on(name, handler) { hooks.set(name, [...(hooks.get(name) ?? []), handler]); },
-    registerTool(definition) { tools.set(definition.name, definition); },
+    registerTool(definition) {
+      tools.set(definition.name, definition);
+      if (definition.exposure === undefined || definition.exposure === "direct" || definition.exposure === "model-only") {
+        if (!active.includes(definition.name)) active.push(definition.name);
+      }
+    },
     registerCommand(name, definition) { pi.commands ??= new Map(); pi.commands.set(name, definition); },
     getActiveTools() { return [...active]; },
     getAllTools() { return [...active.map((name) => ({ name })), ...[...tools.values()].map((tool) => ({ name: tool.name }))]; },
@@ -154,12 +159,30 @@ async function approve(pi, context = ctx(pi)) {
   assert.equal(dagApprovalStatus(stateOf(pi)).approved, true, "both exact approvals authorize this DAG");
 }
 
-test("registers exactly the seven fixed tools and never rewrites native activation", async () => {
+test("registers the fixed Compass tools and preserves the native loadout", async () => {
   const pi = fakePi();
   await boot(pi);
   assert.deepEqual([...pi.tools.keys()].sort(), ["compass_acceptance", "compass_context", "compass_context_search", "compass_goal", "compass_plan", "compass_state", "runtime_guard"]);
-  assert.deepEqual(pi.activeNames(), ["read", "bash", "edit", "write", "amend", "codemode", "subagent", "ask_user_question"]);
+  assert.ok(pi.activeNames().includes("compass_goal"));
+  assert.ok(pi.activeNames().includes("compass_context"));
+  assert.ok(pi.activeNames().includes("runtime_guard"));
   assert.equal(pi.commands?.has("compass-preflight"), true);
+});
+
+test("Compass tools recover after a host loadout reset", async () => {
+  const pi = fakePi();
+  await boot(pi);
+  const native = pi.activeNames().filter((name) => !name.startsWith("compass_") && name !== "runtime_guard");
+  pi.setActiveTools(native);
+  assert.equal(pi.activeNames().includes("compass_goal"), false);
+  await pi.hooks.get("turn_end").at(-1)({ entries: [] }, ctx(pi));
+  assert.ok(pi.activeNames().includes("compass_goal"));
+  pi.setActiveTools(native);
+  await pi.hooks.get("before_agent_start")[0]({ prompt: "Continue the current work" }, ctx(pi));
+  assert.ok(pi.activeNames().includes("compass_goal"));
+  assert.ok(pi.activeNames().includes("compass_plan"));
+  assert.ok(pi.activeNames().includes("runtime_guard"));
+  assert.deepEqual(pi.activeNames().filter((name) => !name.startsWith("compass_") && name !== "runtime_guard"), native);
 });
 
 test("Human prose is observed without creating, replacing or classifying a Goal", async () => {

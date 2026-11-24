@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.0 — fixed Compass tool-surface recovery
+
+- Recover the initially active Compass tools after native context projection or another extension rebuilds Pi's active loadout. Recovery is lifecycle-boundary based, restores only Compass-owned tools, preserves native tool preferences, and reports missing active tools in `/compass-preflight`.
+
 ## 0.10.0 — seven-tool candidate
 
 - Carry approved scope into parent nodes (including after compaction), explain paused handoffs, and make Goal replacement and node-stop recovery explicit. Verify new context records incrementally and remove the unused DAG activity copy. See the [AiClusterHub field replay](docs/measurements-v0.10.0.md#aiclusterhub-live-snapshot).

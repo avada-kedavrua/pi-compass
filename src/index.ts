@@ -49,6 +49,34 @@ function namesFrom(value: any): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((tool: any) => typeof tool === "string" ? tool : String(tool?.name ?? "")).filter(Boolean);
 }
+function activeToolNames(pi: any): string[] {
+  try { return namesFrom(pi.getActiveTools?.()); } catch { return []; }
+}
+function compassToolNames(pi: any): string[] {
+  const registered = new Set(namesFrom(pi.getAllTools?.()));
+  return activeToolNames(pi).filter((name) => COMPASS_TOOL_NAMES.includes(name) && registered.has(name));
+}
+function installCompassLoadoutRecovery(pi: any) {
+  let enabled = new Set<string>();
+  let captured = false;
+  const capture = () => {
+    if (captured) return;
+    const current = compassToolNames(pi);
+    if (current.length) { enabled = new Set(current); captured = true; }
+  };
+  const recover = () => {
+    capture();
+    if (!captured) return;
+    if (typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") {
+      throw new Error("Compass tools were active but this Pi host cannot restore the active tool loadout.");
+    }
+    const active = activeToolNames(pi);
+    const missing = [...enabled].filter((name) => !active.includes(name));
+    if (!missing.length) return;
+    pi.setActiveTools([...active, ...missing]);
+  };
+  return { recover };
+}
 function getContext(rest: any[]): any {
   return rest.find((item) => item && typeof item === "object" && (item.sessionManager || typeof item.cwd === "string" || item.hasUI !== undefined)) ?? {};
 }
@@ -1180,6 +1208,7 @@ function resolveExecution(pi: any, params: any, ctx: any) {
 
 registerTools(pi);
 for (const event of ["session_start", "session_tree"]) pi.on(event, (_event: unknown, ctx: ExtensionContext) => {
+  compassLoadout.recover();
   branchGeneration += 1; autoSchedulers.delete(pi);
   return serialized(() => {
     readContextState = createContextReader();
@@ -1206,6 +1235,7 @@ pi.on("session_shutdown", async (_event: any, ctx: any) => {
   // Observe native identity only. Meaning, scope and constraints belong to the
   // Agent's explicit compass_goal submission, never to prompt classifiers.
   pi.on("before_agent_start", async (_event: any, ctx: any) => {
+    compassLoadout.recover();
     await serialized(async () => {
       if (needsRestore) { state = adoptBranchState(ctx); needsRestore = false; }
       restoreContext(ctx);
@@ -1407,14 +1437,21 @@ pi.on("tool_call", async (event: ToolCallEvent, ctx: ExtensionContext) => {
 
 
 const runtimeGuards = registerRuntimeGuards(pi, { profileDir: getAgentDir });
+const compassLoadout = installCompassLoadoutRecovery(pi);
+// Context projection and other extensions may rebuild the host loadout at a
+// boundary. Repair only Compass tools, preserving the host's native selection.
+pi.on("turn_end", () => compassLoadout.recover());
 pi.registerCommand("compass-preflight", { description: "Check Compass tools, native host/scope health and optional DAG dependencies", handler: async (_args: string, ctx: ExtensionCommandContext) => {
+  compassLoadout.recover();
   const all = namesFrom(pi.getAllTools?.() ?? []);
+  const active = activeToolNames(pi);
   let guardError = "";
   try { await runtimeGuards.preflight(ctx); } catch (error) { guardError = String(error instanceof Error ? error.message : error); }
   const checks = [
     { name: "Release", ok: PACKAGE_VERSION === GOAL_RUN_RELEASE, detail: GOAL_RUN_RELEASE },
     { name: "GoalRun", ok: GOAL_RUN_API_VERSION === 11, detail: String(GOAL_RUN_API_VERSION) },
     { name: "Fixed tool registry", ok: COMPASS_TOOL_NAMES.every((name) => all.includes(name)) && !all.some((name) => name.startsWith("compass_") && !COMPASS_TOOL_NAMES.includes(name)), detail: COMPASS_TOOL_NAMES.join(", ") },
+    { name: "Active tool loadout", ok: COMPASS_TOOL_NAMES.every((name) => active.includes(name)), detail: COMPASS_TOOL_NAMES.filter((name) => !active.includes(name)).join(", ") || "all Compass tools active" },
     { name: "Runtime guard", ok: !guardError, detail: guardError || "scopes readable and Worker verdict verified; observed-input boundary only" },
   ];
   const approvalIssue = approvalTransportIssue(ctx);
