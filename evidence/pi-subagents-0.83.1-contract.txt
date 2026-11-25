@@ -1,7 +1,7 @@
 pi-subagents local compatibility evidence
 
 ===== Collection metadata =====
-Package root: /home/avada/.pi/agent/npm/node_modules/pi-subagents
+Package root: ~/.pi/agent/npm/node_modules/pi-subagents
 Generated at: 2026-10-28T15:28:01.426Z
 Read-only collector. Does not read settings.json, auth.json, models.json, environment credentials, or session transcripts.
 Report can include source code from the installed extension; review before sharing if you maintain private modifications.

@@ -8,7 +8,7 @@
     "defaultThinking": "high",
     "maxThinking": "xhigh",
     "defaultExtensions": [
-      "/home/avada/.pi/agent/npm/node_modules/@router-for-me/pi-cliproxyapi-provider/extensions/index.ts"
+      "/absolute/path/to/pi-cliproxyapi-provider/extensions/index.ts"
     ],
     "agentOverrides": {
       "scout": {
@@ -32,7 +32,7 @@
           "web_fetch"
         ],
         "subagentOnlyExtensions": [
-          "/home/avada/workspace/gitcode/agent-organon/pi-searxng/extensions/searxng.js"
+          "/absolute/path/to/pi-searxng/extensions/searxng.js"
         ],
         "inheritProjectContext": false,
         "inheritGlobalContext": false,
@@ -50,7 +50,7 @@
           "web_fetch"
         ],
         "subagentOnlyExtensions": [
-          "/home/avada/workspace/gitcode/agent-organon/pi-searxng/extensions/searxng.js"
+          "/absolute/path/to/pi-searxng/extensions/searxng.js"
         ],
         "inheritProjectContext": false,
         "inheritGlobalContext": false,

@@ -1,5 +1,5 @@
 pi-subagents structured-delegation compatibility evidence
-Package root: /home/avada/.pi/agent/npm/node_modules/pi-subagents
+Package root: ~/.pi/agent/npm/node_modules/pi-subagents
 Generated at: 2026-10-31T01:29:54.357Z
 This report contains package metadata, selected docs, delegation type declarations, and bundle source excerpts. It does not read Pi settings, API keys, or credentials.
 

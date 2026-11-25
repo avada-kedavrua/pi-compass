@@ -2,6 +2,15 @@
   "name": "pi-compass-v2",
   "version": "0.10.0",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/avada-kedavrua/pi-compass.git"
+  },
+  "homepage": "https://github.com/avada-kedavrua/pi-compass#readme",
+  "bugs": {
+    "url": "https://github.com/avada-kedavrua/pi-compass/issues"
+  },
   "type": "module",
   "description": "Agent-first Pi extension with deterministic capability gating, evidence-aware Goal outcomes, and compact GoalRun continuity",
   "keywords": [

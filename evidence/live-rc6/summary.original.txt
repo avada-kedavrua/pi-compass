@@ -8,6 +8,6 @@ pi_version_check_exit=0
 installed_contract_check_exit=0
 pi_exit=0
 live_report_exit=1
-provider_extension=/home/avada/.pi/agent/npm/node_modules/@router-for-me/pi-cliproxyapi-provider/extensions/index.ts
-pi_subagents_root=/home/avada/.pi/agent/npm/node_modules/pi-subagents
+provider_extension=/absolute/path/to/pi-cliproxyapi-provider/extensions/index.ts
+pi_subagents_root=~/.pi/agent/npm/node_modules/pi-subagents
 No settings.json, auth.json, models.json, or session transcript is included in this bundle.

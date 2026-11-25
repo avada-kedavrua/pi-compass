@@ -33,7 +33,7 @@ The [field-use audit and resolved TODOs](docs/agent-usage-audit-v0.10.0.md) reco
 
 ## Install
 
-First run `npm ci --ignore-scripts --omit=peer` in the Compass checkout. `pi install -l` registers a local package; it does not install its npm dependencies. From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v11/context v6 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
+First run `npm ci --ignore-scripts --omit=peer` in the Compass checkout (`git clone https://github.com/avada-kedavrua/pi-compass`). `pi install -l` registers a local package; it does not install its npm dependencies. From the target project, run `pi install -l /absolute/path/to/pi-compass` (replace the path with this checkout), then start a fresh Pi session and run `/compass-preflight`. GoalRun schema v11/context v6 are current-only; old snapshots fail visibly rather than migrating or resetting. This installs a local Pi package; do not copy Compass source into the target project or overwrite global settings with config proposals.
 
 ### Tool missing?
 
@@ -89,3 +89,7 @@ Use a disposable session/project: provider calls and filesystem effects remain r
 - [`docs/architecture-v0.10.0.md`](./docs/architecture-v0.10.0.md) — requirement-linked M0–M7 checklist and evidence boundaries.
 - [`docs/measurements-v0.10.0.md`](./docs/measurements-v0.10.0.md) — bounded local measurement.
 - Historical v0.9.x validation and session evidence remain under `docs/validation-v0.9.1.md` and `evidence/`; they are not evidence for the current bytes.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

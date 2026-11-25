@@ -2,7 +2,7 @@
 
 ## Tested local identity
 
-The inspected local host reports Pi `1.5.2` (`pi --version`) and `pi-subagents@0.88.1` (`/home/avada/.pi/agent/npm/node_modules/pi-subagents/package.json`). The release manifest and proposed package pin target those identities. Earlier `0.84.0`/Pi `1.4.0` references and reports are historical only; they are not evidence for the current source.
+The inspected local host reports Pi `1.5.2` (`pi --version`) and `pi-subagents@0.88.1` (`~/.pi/agent/npm/node_modules/pi-subagents/package.json`). The release manifest and proposed package pin target those identities. Earlier `0.84.0`/Pi `1.4.0` references and reports are historical only; they are not evidence for the current source.
 
 The installed `0.88.1` package still exports `./delegation` as `src/api/delegation.d.ts` plus `bundle/delegation.js`, and the contract checker passes all 36 structural checks using the manifest's expected package version. The declarations include the five `prompt-template:subagent:*` events, correlated `requestId` / `ownerRunId` / `nodeId`, structured result requests and terminal statuses used by Compass. This is source/API inspection, not proof of live dispatch or provider behavior.
 
@@ -14,7 +14,7 @@ The API surface remains compatible by structural inspection in 0.88.1, but chang
 
 ## Configuration
 
-`config/pi-subagents-settings.patch.json` contains Pi settings-surface values and the exact `npm:pi-subagents@0.88.1` package pin. `config/pi-subagents-runtime.json` contains extension runtime settings for `~/.pi/agent/extensions/subagent/config.json`. The merger creates private proposals, keeps the two settings surfaces separate, preserves unrelated user configuration and does not modify global settings. The strict checker validates both proposals and checks the installed package identity against `RELEASE-MANIFEST.json`.
+`config/pi-subagents-settings.patch.json` contains Pi settings-surface values and the exact `npm:pi-subagents@0.88.1` package pin. `config/pi-subagents-runtime.json` contains extension runtime settings for `~/.pi/agent/extensions/subagent/config.json`. The merger creates private proposals, keeps the two settings surfaces separate, preserves unrelated user configuration and does not modify global settings. The strict checker validates both proposals and checks the installed package identity against `RELEASE-MANIFEST.json`. The patch records the maintainer's local settings, so its provider, model IDs and extension paths are placeholders to replace with your own.
 
 The runtime config bounds concurrency and spawn counts, keeps scheduled runs/missions disabled, and retains foreground operation. Compass owns its explicit read-only DAG dispatch; pi-subagents owns child execution and its lifecycle.
 
